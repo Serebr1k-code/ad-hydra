@@ -1,0 +1,2809 @@
+openapi: 3.1.0
+info:
+  title: Hydra Core REST API
+  version: 1.1.0-draft
+  description: All authenticated users have full permissions; there are no roles. Users are created only
+    via the hydra-core CLI. Internal proxy RPCs are specified separately in hydra/proxy/v1/proxy.proto.
+servers:
+- url: /
+tags:
+- name: Auth
+- name: Users
+- name: Services
+- name: Filters
+- name: Traffic
+- name: Protocols
+- name: Targets
+- name: Farm
+- name: Flags
+- name: Audit
+- name: Diagnostics
+security:
+- AccessJWT: []
+paths:
+  /api/v1/auth/login:
+    post:
+      tags:
+      - Auth
+      summary: Login
+      operationId: post_api_v1_auth_login
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      description: Returns access token; sets HttpOnly Secure SameSite=Strict refresh cookie and CSRF
+        cookie. No public registration.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      security: []
+  /api/v1/auth/refresh:
+    post:
+      tags:
+      - Auth
+      summary: Rotate refresh JWT and issue 60s access JWT
+      operationId: post_api_v1_auth_refresh
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      description: Requires signed refresh JWT in HttpOnly cookie, matching CSRF header/cookie and valid
+        Origin. Refresh expires at the original login+10h, not sliding.
+      parameters:
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+      security: []
+  /api/v1/auth/logout:
+    post:
+      tags:
+      - Auth
+      summary: Revoke current session and clear refresh cookie
+      operationId: post_api_v1_auth_logout
+      responses:
+        '204':
+          description: No Content
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      description: Requires access JWT and refresh CSRF; revokes session and clears cookie.
+      parameters:
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+  /api/v1/auth/me:
+    get:
+      tags:
+      - Auth
+      summary: Get current user
+      operationId: get_api_v1_auth_me
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+  /api/v1/auth/sessions:
+    get:
+      tags:
+      - Auth
+      summary: List my sessions
+      operationId: get_api_v1_auth_sessions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Session'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+                required:
+                - items
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+  /api/v1/auth/sessions/{session_id}:
+    delete:
+      tags:
+      - Auth
+      summary: Revoke my session
+      operationId: delete_api_v1_auth_sessions_session_id
+      responses:
+        '204':
+          description: No Content
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - $ref: '#/components/parameters/session_id'
+  /api/v1/users:
+    get:
+      tags:
+      - Users
+      summary: List users (creation via CLI only)
+      operationId: get_api_v1_users
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+                required:
+                - items
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+  /api/v1/users/{user_id}:
+    patch:
+      tags:
+      - Users
+      summary: Enable or disable user account
+      operationId: patch_api_v1_users_user_id
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdate'
+      parameters:
+      - $ref: '#/components/parameters/user_id'
+  /api/v1/services:
+    get:
+      tags:
+      - Services
+      summary: List proxied services
+      operationId: get_api_v1_services
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Service'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+                required:
+                - items
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+    post:
+      tags:
+      - Services
+      summary: Create proxied service
+      operationId: post_api_v1_services
+      responses:
+        '202':
+          description: Accepted, proxy sync may still be pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Service'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceInput'
+  /api/v1/services/{service_id}:
+    get:
+      tags:
+      - Services
+      summary: Get service
+      operationId: get_api_v1_services_service_id
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Service'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - $ref: '#/components/parameters/service_id'
+    patch:
+      tags:
+      - Services
+      summary: Update service
+      operationId: patch_api_v1_services_service_id
+      responses:
+        '202':
+          description: Accepted, proxy sync may still be pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Service'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceInput'
+      parameters:
+      - $ref: '#/components/parameters/service_id'
+    delete:
+      tags:
+      - Services
+      summary: Remove service
+      operationId: delete_api_v1_services_service_id
+      responses:
+        '202':
+          description: Accepted
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - $ref: '#/components/parameters/service_id'
+  /api/v1/filters:
+    get:
+      tags:
+      - Filters
+      summary: List filters sorted by date / service
+      operationId: get_api_v1_filters
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Filter'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+                required:
+                - items
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - name: service_id
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: enabled
+        in: query
+        required: false
+        schema:
+          type: boolean
+      - &id001
+        name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque pagination cursor.
+      - &id002
+        name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+    post:
+      tags:
+      - Filters
+      summary: Create filter
+      operationId: post_api_v1_filters
+      responses:
+        '202':
+          description: Accepted, proxy sync may still be pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Filter'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FilterInput'
+  /api/v1/filters/{filter_id}:
+    get:
+      tags:
+      - Filters
+      summary: Get filter and applied state
+      operationId: get_api_v1_filters_filter_id
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Filter'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - $ref: '#/components/parameters/filter_id'
+    patch:
+      tags:
+      - Filters
+      summary: Modify filter and increment revision
+      operationId: patch_api_v1_filters_filter_id
+      responses:
+        '202':
+          description: Accepted, proxy sync may still be pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Filter'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FilterInput'
+      parameters:
+      - $ref: '#/components/parameters/filter_id'
+    delete:
+      tags:
+      - Filters
+      summary: Delete filter
+      operationId: delete_api_v1_filters_filter_id
+      responses:
+        '202':
+          description: Accepted
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - $ref: '#/components/parameters/filter_id'
+  /api/v1/filters/{filter_id}/state:
+    put:
+      tags:
+      - Filters
+      summary: Enable or disable a filter
+      operationId: put_api_v1_filters_filter_id_state
+      responses:
+        '202':
+          description: Accepted, proxy sync may still be pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Filter'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      description: Returns pending state until proxy confirms applied revision; expected_revision guards
+        concurrent updates.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FilterStateChange'
+      parameters:
+      - $ref: '#/components/parameters/filter_id'
+  /api/v1/filters/batch-state:
+    post:
+      tags:
+      - Filters
+      summary: Bulk enable/disable filters
+      operationId: post_api_v1_filters_batch_state
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted_count:
+                    type: integer
+                  request_id:
+                    type: string
+                required:
+                - accepted_count
+                - request_id
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FilterBatchStateChange'
+  /api/v1/traffic/flows:
+    get:
+      tags:
+      - Traffic
+      summary: List flows
+      operationId: get_api_v1_traffic_flows
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Flow'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+                required:
+                - items
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - name: service_id
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+      - name: client_ip
+        in: query
+        required: false
+        schema:
+          type: string
+      - *id001
+      - *id002
+  /api/v1/traffic/flows/{flow_id}:
+    get:
+      tags:
+      - Traffic
+      summary: Get flow details
+      operationId: get_api_v1_traffic_flows_flow_id
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Flow'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - $ref: '#/components/parameters/flow_id'
+  /api/v1/traffic/flows/{flow_id}/messages:
+    get:
+      tags:
+      - Traffic
+      summary: Get parsed messages in flow
+      operationId: get_api_v1_traffic_flows_flow_id_messages
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Message'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+                required:
+                - items
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - $ref: '#/components/parameters/flow_id'
+      - *id001
+      - *id002
+  /api/v1/traffic/messages/{message_id}:
+    get:
+      tags:
+      - Traffic
+      summary: Get parsed message and fields
+      operationId: get_api_v1_traffic_messages_message_id
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - $ref: '#/components/parameters/message_id'
+  /api/v1/traffic/samples/{sample_id}:
+    get:
+      tags:
+      - Traffic
+      summary: Fetch a bounded raw traffic sample on demand
+      operationId: get_api_v1_traffic_samples_sample_id
+      responses:
+        '200':
+          description: Raw byte sample
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '410':
+          description: Sample expired or overwritten
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - $ref: '#/components/parameters/sample_id'
+  /api/v1/traffic/events/stream:
+    get:
+      tags:
+      - Traffic
+      summary: Live parsed events via SSE
+      operationId: get_api_v1_traffic_events_stream
+      responses:
+        '200':
+          description: text/event-stream carrying EventEnvelope JSON
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      description: SSE does not expose raw packets. Access JWT must be in Authorization header, not URL.
+  /api/v1/protocols:
+    get:
+      tags:
+      - Protocols
+      summary: List installed protocol plugins
+      operationId: get_api_v1_protocols
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Protocol'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+                required:
+                - items
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+    post:
+      tags:
+      - Protocols
+      summary: Upload bounded Rust/WASM parser
+      operationId: post_api_v1_protocols
+      responses:
+        '201':
+          description: Uploaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Protocol'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                plugin:
+                  type: string
+                  format: binary
+                protocol_id:
+                  type: string
+                version:
+                  type: string
+              required:
+              - plugin
+              - protocol_id
+              - version
+              additionalProperties: false
+  /api/v1/protocols/{protocol_id}:
+    get:
+      tags:
+      - Protocols
+      summary: Get protocol plugin details
+      operationId: get_api_v1_protocols_protocol_id
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Protocol'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - $ref: '#/components/parameters/protocol_id'
+  /api/v1/protocols/{protocol_id}/activate:
+    post:
+      tags:
+      - Protocols
+      summary: Activate plugin on service
+      operationId: post_api_v1_protocols_protocol_id_activate
+      responses:
+        '202':
+          description: Accepted, proxy sync may still be pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Protocol'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtocolActivation'
+      parameters:
+      - $ref: '#/components/parameters/protocol_id'
+      - $ref: '#/components/parameters/IdempotencyKey'
+  /api/v1/protocols/test:
+    post:
+      tags:
+      - Protocols
+      summary: Test decoder on saved sample (no live mutation)
+      operationId: post_api_v1_protocols_test
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProtocolTestResult'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtocolTest'
+  /api/v1/farm/targets:
+    get:
+      tags:
+      - Targets
+      summary: List allowed competition targets
+      operationId: get_api_v1_farm_targets
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Target'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+                required:
+                - items
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+    post:
+      tags:
+      - Targets
+      summary: Add allowlisted target
+      operationId: post_api_v1_farm_targets
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Target'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TargetInput'
+  /api/v1/farm/targets/{target_id}:
+    patch:
+      tags:
+      - Targets
+      summary: Edit target
+      operationId: patch_api_v1_farm_targets_target_id
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Target'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TargetInput'
+      parameters:
+      - $ref: '#/components/parameters/target_id'
+    delete:
+      tags:
+      - Targets
+      summary: Delete target
+      operationId: delete_api_v1_farm_targets_target_id
+      responses:
+        '204':
+          description: No Content
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - $ref: '#/components/parameters/target_id'
+  /api/v1/farm/exploits:
+    get:
+      tags:
+      - Farm
+      summary: List uploaded exploits
+      operationId: get_api_v1_farm_exploits
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Exploit'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+                required:
+                - items
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+    post:
+      tags:
+      - Farm
+      summary: Upload exploit archive and manifest
+      operationId: post_api_v1_farm_exploits
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Exploit'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                manifest:
+                  type: string
+                  description: JSON or YAML manifest
+              required:
+              - file
+              - manifest
+              additionalProperties: false
+  /api/v1/farm/exploits/{exploit_id}:
+    get:
+      tags:
+      - Farm
+      summary: Get exploit
+      operationId: get_api_v1_farm_exploits_exploit_id
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Exploit'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - $ref: '#/components/parameters/exploit_id'
+    patch:
+      tags:
+      - Farm
+      summary: Update exploit settings
+      operationId: patch_api_v1_farm_exploits_exploit_id
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Exploit'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExploitUpdate'
+      parameters:
+      - $ref: '#/components/parameters/exploit_id'
+  /api/v1/farm/exploits/{exploit_id}/run:
+    post:
+      tags:
+      - Farm
+      summary: Start exploit run for allowlisted targets
+      operationId: post_api_v1_farm_exploits_exploit_id_run
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExploitRunRequest'
+      parameters:
+      - $ref: '#/components/parameters/exploit_id'
+      - $ref: '#/components/parameters/IdempotencyKey'
+  /api/v1/farm/runs:
+    get:
+      tags:
+      - Farm
+      summary: List exploit runs
+      operationId: get_api_v1_farm_runs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Run'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+                required:
+                - items
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - name: exploit_id
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+      - *id001
+      - *id002
+  /api/v1/farm/runs/{run_id}:
+    get:
+      tags:
+      - Farm
+      summary: Get run details and bounded logs
+      operationId: get_api_v1_farm_runs_run_id
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - $ref: '#/components/parameters/run_id'
+  /api/v1/farm/runs/{run_id}/cancel:
+    post:
+      tags:
+      - Farm
+      summary: Cancel running or queued exploit job
+      operationId: post_api_v1_farm_runs_run_id_cancel
+      responses:
+        '202':
+          description: Cancellation requested
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - $ref: '#/components/parameters/run_id'
+      - $ref: '#/components/parameters/IdempotencyKey'
+  /api/v1/flags:
+    get:
+      tags:
+      - Flags
+      summary: List masked flags and status
+      operationId: get_api_v1_flags
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Flag'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+                required:
+                - items
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - name: classification
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+      - *id001
+      - *id002
+    post:
+      tags:
+      - Flags
+      summary: Manually record captured flag from allowed target
+      operationId: post_api_v1_flags
+      responses:
+        '201':
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Flag'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualFlagInput'
+  /api/v1/flags/{flag_id}:
+    get:
+      tags:
+      - Flags
+      summary: Get redacted flag metadata
+      operationId: get_api_v1_flags_flag_id
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Flag'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - $ref: '#/components/parameters/flag_id'
+  /api/v1/flags/{flag_id}/submit:
+    post:
+      tags:
+      - Flags
+      summary: Queue verified captured flag for submitter
+      operationId: post_api_v1_flags_flag_id_submit
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Submission'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      description: Reject own_exposed or unknown classification. Server determines ownership; UI cannot
+        override.
+      parameters:
+      - $ref: '#/components/parameters/flag_id'
+      - $ref: '#/components/parameters/IdempotencyKey'
+  /api/v1/submissions:
+    get:
+      tags:
+      - Flags
+      summary: List submission outcomes
+      operationId: get_api_v1_submissions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Submission'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+                required:
+                - items
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+      - *id001
+      - *id002
+  /api/v1/audit/events:
+    get:
+      tags:
+      - Audit
+      summary: Read attributed immutable audit journal
+      operationId: get_api_v1_audit_events
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditEvent'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+                required:
+                - items
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      parameters:
+      - name: actor_user_id
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: action
+        in: query
+        required: false
+        schema:
+          type: string
+      - *id001
+      - *id002
+  /api/v1/system/proxy:
+    get:
+      tags:
+      - Diagnostics
+      summary: Get technical proxy state
+      operationId: get_api_v1_system_proxy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyStatus'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+  /api/v1/diagnostics/probe:
+    post:
+      tags:
+      - Diagnostics
+      summary: Send bounded application payload to configured upstream
+      operationId: post_api_v1_diagnostics_probe
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeResult'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Missing/invalid access token
+        '403':
+          description: Forbidden by security policy (not role-based)
+        '409':
+          description: State/revision conflict
+      description: Uses only configured/allowlisted service upstreams. Does not insert packets into other
+        clients' live connections.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProbeRequest'
+components:
+  securitySchemes:
+    AccessJWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access JWT valid for 60 seconds. Refresh JWT is an HttpOnly cookie only for refresh/logout
+        endpoints.
+  schemas:
+    ApiError:
+      type: object
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        request_id:
+          type: string
+        details:
+          type: object
+          properties: {}
+          additionalProperties: true
+      required:
+      - code
+      - message
+      - request_id
+    Actor:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+          - user
+          - system
+          - local_cli
+          - service
+        user_id:
+          type: string
+        username:
+          type: string
+        initiated_by_user_id:
+          type: string
+      required:
+      - type
+    AuditMeta:
+      type: object
+      properties:
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          $ref: '#/components/schemas/Actor'
+        updated_at:
+          type: string
+          format: date-time
+        updated_by:
+          $ref: '#/components/schemas/Actor'
+      required:
+      - created_at
+      - created_by
+      - updated_at
+      - updated_by
+    LoginRequest:
+      type: object
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+      required:
+      - username
+      - password
+      additionalProperties: false
+    TokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          enum:
+          - Bearer
+        expires_in:
+          type: integer
+          const: 60
+        session_id:
+          type: string
+          format: uuid
+        session_expires_at:
+          type: string
+          format: date-time
+        csrf_token:
+          type: string
+          description: Double-submit CSRF token; also sent in hydra_csrf cookie.
+      required:
+      - access_token
+      - token_type
+      - expires_in
+      - session_id
+      - session_expires_at
+      - csrf_token
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          $ref: '#/components/schemas/Actor'
+      required:
+      - id
+      - username
+      - active
+      - created_at
+      - created_by
+    UserUpdate:
+      type: object
+      properties:
+        active:
+          type: boolean
+      required:
+      - active
+      additionalProperties: false
+    Session:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+      required:
+      - id
+      - created_at
+      - expires_at
+    ServiceInput:
+      type: object
+      properties:
+        name: &id003
+          type: string
+        transport: &id004
+          type: string
+          enum:
+          - tcp
+          - udp
+        listen_address: &id005
+          type: string
+        upstream_address: &id006
+          type: string
+        protocol_id: &id007
+          type: string
+        enabled: &id008
+          type: boolean
+      required:
+      - name
+      - transport
+      - listen_address
+      - upstream_address
+      additionalProperties: false
+    Service:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name: *id003
+        transport: *id004
+        listen_address: *id005
+        upstream_address: *id006
+        protocol_id: *id007
+        enabled: *id008
+        revision:
+          type: integer
+        apply_status:
+          type: string
+          enum:
+          - pending
+          - applied
+          - failed
+        audit:
+          $ref: '#/components/schemas/AuditMeta'
+      required:
+      - id
+      - name
+      - transport
+      - listen_address
+      - upstream_address
+      - enabled
+      - revision
+      - apply_status
+      - audit
+    RuleExpression:
+      description: Recursive AND/OR/NOT/predicate expression. Shape is validated by Core and bounded in
+        complexity.
+      oneOf:
+      - type: object
+        properties:
+          all:
+            type: array
+            items:
+              $ref: '#/components/schemas/RuleExpression'
+        required:
+        - all
+        additionalProperties: false
+      - type: object
+        properties:
+          any:
+            type: array
+            items:
+              $ref: '#/components/schemas/RuleExpression'
+        required:
+        - any
+        additionalProperties: false
+      - type: object
+        properties:
+          not:
+            $ref: '#/components/schemas/RuleExpression'
+        required:
+        - not
+        additionalProperties: false
+      - type: object
+        properties:
+          field:
+            type: string
+          op:
+            type: string
+            enum:
+            - eq
+            - ne
+            - contains
+            - regex
+            - prefix
+            - gt
+            - lt
+            - in
+            - not_in
+          value: {}
+        required:
+        - field
+        - op
+        - value
+        additionalProperties: false
+    RateLimitOptions:
+      type: object
+      properties:
+        key:
+          type: string
+          description: Counter key, e.g. network.src_ip
+        requests:
+          type: integer
+          minimum: 1
+        window_ms:
+          type: integer
+          minimum: 1
+        on_exceed:
+          type: string
+          enum:
+          - block
+          - drop_connection
+          - drop_datagram
+      required:
+      - key
+      - requests
+      - window_ms
+      - on_exceed
+      additionalProperties: false
+    FilterActionConfig:
+      type: object
+      properties:
+        http_status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        rate_limit:
+          $ref: '#/components/schemas/RateLimitOptions'
+        tag:
+          type: string
+      additionalProperties: false
+    FilterInput:
+      type: object
+      properties:
+        name: &id009
+          type: string
+        description: &id010
+          type: string
+        service_id: &id011
+          type: string
+          format: uuid
+        enabled: &id012
+          type: boolean
+        priority: &id013
+          type: integer
+        mode: &id014
+          type: string
+          enum:
+          - shadow
+          - enforce
+        action: &id015
+          type: string
+          enum:
+          - allow
+          - alert
+          - block
+          - drop_connection
+          - drop_datagram
+          - rate_limit
+          - tag
+          - log
+        action_config: &id016
+          $ref: '#/components/schemas/FilterActionConfig'
+        conditions: &id017
+          $ref: '#/components/schemas/RuleExpression'
+        expires_at: &id018
+          type:
+          - string
+          - 'null'
+          format: date-time
+        backend: &id019
+          type: string
+          description: Optional backend abstraction; userspace in v1.
+      required:
+      - name
+      - service_id
+      - enabled
+      - priority
+      - mode
+      - action
+      - conditions
+      additionalProperties: false
+    Filter:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name: *id009
+        description: *id010
+        service_id: *id011
+        enabled: *id012
+        priority: *id013
+        mode: *id014
+        action: *id015
+        action_config: *id016
+        conditions: *id017
+        expires_at: *id018
+        backend: *id019
+        desired_revision:
+          type: integer
+        applied_revision:
+          type: integer
+        applied_enabled:
+          type: boolean
+        apply_status:
+          type: string
+          enum:
+          - pending
+          - applied
+          - failed
+        apply_error:
+          type:
+          - string
+          - 'null'
+        hit_count:
+          type: integer
+          minimum: 0
+        audit:
+          $ref: '#/components/schemas/AuditMeta'
+      required:
+      - id
+      - name
+      - service_id
+      - enabled
+      - priority
+      - mode
+      - action
+      - conditions
+      - desired_revision
+      - apply_status
+      - hit_count
+      - audit
+    FilterStateChange:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        expected_revision:
+          type: integer
+      required:
+      - enabled
+      - expected_revision
+      additionalProperties: false
+    FilterBatchStateChange:
+      type: object
+      properties:
+        ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        enabled:
+          type: boolean
+      required:
+      - ids
+      - enabled
+      additionalProperties: false
+    Flow:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+          format: uuid
+        transport:
+          type: string
+          enum:
+          - tcp
+          - udp
+        client_ip:
+          type: string
+        client_port:
+          type: integer
+        upstream_address:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        bytes_up:
+          type: integer
+        bytes_down:
+          type: integer
+        message_count:
+          type: integer
+        flag_count:
+          type: integer
+      required:
+      - id
+      - service_id
+      - transport
+      - client_ip
+      - client_port
+      - started_at
+    Message:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        flow_id:
+          type: string
+          format: uuid
+        timestamp:
+          type: string
+          format: date-time
+        direction:
+          type: string
+          enum:
+          - client_to_server
+          - server_to_client
+        protocol_id:
+          type: string
+        message_type:
+          type: string
+        fields:
+          type: object
+          properties: {}
+          additionalProperties: true
+        raw_sample_id:
+          type:
+          - string
+          - 'null'
+        original_size:
+          type: integer
+        truncated:
+          type: boolean
+      required:
+      - id
+      - flow_id
+      - timestamp
+      - direction
+      - fields
+    EventEnvelope:
+      type: object
+      properties:
+        event_id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum:
+          - flow
+          - message
+          - rule_hit
+          - flag_finding
+          - loss
+          - proxy_stats
+        at:
+          type: string
+          format: date-time
+        service_id:
+          type: string
+          format: uuid
+        flow_id:
+          type: string
+          format: uuid
+        payload:
+          type: object
+          properties: {}
+          additionalProperties: true
+      required:
+      - event_id
+      - kind
+      - at
+      - payload
+    Protocol:
+      type: object
+      properties:
+        id:
+          type: string
+        version:
+          type: string
+        sha256:
+          type: string
+        state:
+          type: string
+          enum:
+          - uploaded
+          - installed
+          - active
+          - failed
+        service_id:
+          type:
+          - string
+          - 'null'
+        audit:
+          $ref: '#/components/schemas/AuditMeta'
+      required:
+      - id
+      - version
+      - sha256
+      - state
+      - audit
+    ProtocolActivation:
+      type: object
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        expected_version:
+          type: string
+      required:
+      - service_id
+      - expected_version
+      additionalProperties: false
+    ProtocolTest:
+      type: object
+      properties:
+        protocol_id:
+          type: string
+        version:
+          type: string
+        sample_id:
+          type: string
+      required:
+      - protocol_id
+      - version
+      - sample_id
+      additionalProperties: false
+    ProtocolTestResult:
+      type: object
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        errors:
+          type: array
+          items:
+            type: string
+        consumed_bytes:
+          type: integer
+      required:
+      - messages
+      - errors
+      - consumed_bytes
+    TargetInput:
+      type: object
+      properties:
+        name: &id020
+          type: string
+        host: &id021
+          type: string
+        port: &id022
+          type: integer
+        transport: &id023
+          type: string
+          enum:
+          - tcp
+          - udp
+        service_id: &id024
+          type: string
+          format: uuid
+        enabled: &id025
+          type: boolean
+      required:
+      - name
+      - host
+      - port
+      - transport
+      - service_id
+      additionalProperties: false
+    Target:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name: *id020
+        host: *id021
+        port: *id022
+        transport: *id023
+        service_id: *id024
+        enabled: *id025
+        audit:
+          $ref: '#/components/schemas/AuditMeta'
+      required:
+      - id
+      - name
+      - host
+      - port
+      - transport
+      - service_id
+      - audit
+    Exploit:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        version:
+          type: string
+        service_id:
+          type: string
+          format: uuid
+        enabled:
+          type: boolean
+        mode:
+          type: string
+          enum:
+          - per_target
+          - batch
+        schedule_type:
+          type: string
+          enum:
+          - manual
+          - interval
+        interval_seconds:
+          type: integer
+        timeout_seconds:
+          type: integer
+        memory_limit_mb:
+          type: integer
+        concurrency:
+          type: integer
+        uploaded_at:
+          type: string
+          format: date-time
+        audit:
+          $ref: '#/components/schemas/AuditMeta'
+      required:
+      - id
+      - name
+      - version
+      - enabled
+      - mode
+      - uploaded_at
+      - audit
+    ExploitUpdate:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        interval_seconds:
+          type: integer
+        timeout_seconds:
+          type: integer
+        concurrency:
+          type: integer
+        args:
+          type: array
+          items:
+            type: string
+        env:
+          type: object
+          properties: {}
+          additionalProperties:
+            type: string
+    ExploitRunRequest:
+      type: object
+      properties:
+        target_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        reason:
+          type: string
+      required:
+      - target_ids
+      additionalProperties: false
+    Run:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        exploit_id:
+          type: string
+          format: uuid
+        target_id:
+          type:
+          - string
+          - 'null'
+        status:
+          type: string
+          enum:
+          - queued
+          - running
+          - succeeded
+          - failed
+          - timed_out
+          - cancelled
+        started_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        finished_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        exit_code:
+          type:
+          - integer
+          - 'null'
+        flags_detected:
+          type: integer
+        log_tail:
+          type: string
+        trigger_actor:
+          $ref: '#/components/schemas/Actor'
+      required:
+      - id
+      - exploit_id
+      - status
+      - flags_detected
+      - trigger_actor
+    ManualFlagInput:
+      type: object
+      properties:
+        value:
+          type: string
+        target_id:
+          type: string
+          format: uuid
+        source_note:
+          type: string
+      required:
+      - value
+      - target_id
+      additionalProperties: false
+    Flag:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        masked:
+          type: string
+        flag_hash:
+          type: string
+        origin:
+          type: string
+          enum:
+          - farm
+          - proxy
+          - manual
+        classification:
+          type: string
+          enum:
+          - captured
+          - own_exposed
+          - unknown
+        status:
+          type: string
+          enum:
+          - found
+          - queued
+          - submitting
+          - accepted
+          - rejected
+          - duplicate
+          - expired
+        target_id:
+          type:
+          - string
+          - 'null'
+        exploit_run_id:
+          type:
+          - string
+          - 'null'
+        flow_id:
+          type:
+          - string
+          - 'null'
+        found_at:
+          type: string
+          format: date-time
+        found_by:
+          $ref: '#/components/schemas/Actor'
+      required:
+      - id
+      - masked
+      - flag_hash
+      - origin
+      - classification
+      - status
+      - found_at
+      - found_by
+    Submission:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        flag_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+          - queued
+          - submitting
+          - accepted
+          - rejected
+          - duplicate
+          - retry
+          - expired
+        attempts:
+          type: integer
+        last_error:
+          type:
+          - string
+          - 'null'
+        created_at:
+          type: string
+          format: date-time
+        submitted_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        requested_by:
+          $ref: '#/components/schemas/Actor'
+      required:
+      - id
+      - flag_id
+      - status
+      - attempts
+      - created_at
+      - requested_by
+    AuditEvent:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        at:
+          type: string
+          format: date-time
+        request_id:
+          type: string
+        actor:
+          $ref: '#/components/schemas/Actor'
+        action:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+        result:
+          type: string
+          enum:
+          - success
+          - failed
+        change_summary:
+          type: object
+          properties: {}
+          additionalProperties: true
+      required:
+      - id
+      - at
+      - request_id
+      - actor
+      - action
+      - resource_type
+      - resource_id
+      - result
+    ProxyStatus:
+      type: object
+      properties:
+        connected:
+          type: boolean
+        proxy_epoch_id:
+          type: string
+        active_flows:
+          type: integer
+        desired_rules_revision:
+          type: integer
+        applied_rules_revision:
+          type: integer
+        telemetry_dropped:
+          type: integer
+        critical_spool_bytes:
+          type: integer
+        last_seen:
+          type: string
+          format: date-time
+      required:
+      - connected
+      - active_flows
+      - desired_rules_revision
+      - applied_rules_revision
+    ProbeRequest:
+      type: object
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        transport:
+          type: string
+          enum:
+          - tcp
+          - udp
+        payload_base64:
+          type: string
+          description: Base64-encoded application data, max 64KiB.
+        timeout_ms:
+          type: integer
+      required:
+      - service_id
+      - transport
+      - payload_base64
+      additionalProperties: false
+    ProbeResult:
+      type: object
+      properties:
+        response_base64:
+          type: string
+        elapsed_ms:
+          type: integer
+        truncated:
+          type: boolean
+        error_code:
+          type:
+          - string
+          - 'null'
+      required:
+      - response_base64
+      - elapsed_ms
+      - truncated
+  parameters:
+    user_id:
+      name: user_id
+      in: path
+      required: true
+      schema:
+        type: string
+    service_id:
+      name: service_id
+      in: path
+      required: true
+      schema:
+        type: string
+    filter_id:
+      name: filter_id
+      in: path
+      required: true
+      schema:
+        type: string
+    flow_id:
+      name: flow_id
+      in: path
+      required: true
+      schema:
+        type: string
+    message_id:
+      name: message_id
+      in: path
+      required: true
+      schema:
+        type: string
+    sample_id:
+      name: sample_id
+      in: path
+      required: true
+      schema:
+        type: string
+    protocol_id:
+      name: protocol_id
+      in: path
+      required: true
+      schema:
+        type: string
+    target_id:
+      name: target_id
+      in: path
+      required: true
+      schema:
+        type: string
+    exploit_id:
+      name: exploit_id
+      in: path
+      required: true
+      schema:
+        type: string
+    run_id:
+      name: run_id
+      in: path
+      required: true
+      schema:
+        type: string
+    flag_id:
+      name: flag_id
+      in: path
+      required: true
+      schema:
+        type: string
+    session_id:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+    cursor: *id001
+    limit: *id002
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Idempotent external side-effect request; UUID or random unique string
+      schema:
+        type: string

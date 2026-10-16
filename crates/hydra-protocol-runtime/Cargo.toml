@@ -1,0 +1,13 @@
+[package]
+name = "hydra-protocol-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+[dependencies]
+hydra-domain = { path = "../hydra-domain" }
+hydra-protocol-sdk = { path = "../hydra-protocol-sdk" }
+serde_json = "1"
+sha2 = "0.10"
+wasmi = "0.40"
+[dev-dependencies]
+wat = "1"

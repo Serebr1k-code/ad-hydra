@@ -1,0 +1,17 @@
+name: Block suspicious API requests
+service_id: 11111111-1111-4111-8111-111111111111
+description: Block suspicious client on internal route
+enabled: true
+priority: 100
+mode: enforce
+conditions:
+  all:
+    - field: http.path
+      op: prefix
+      value: /internal/
+    - field: http.user_agent
+      op: regex
+      value: '(?i).*scanner.*'
+action: block
+action_config:
+  http_status: 403

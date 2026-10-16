@@ -1,0 +1,15 @@
+name: Deny dangerous command
+service_id: 22222222-2222-4222-8222-222222222222
+enabled: true
+priority: 200
+mode: enforce
+conditions:
+  all:
+    - field: protocol.command
+      op: eq
+      value: 255
+    - not:
+        field: network.src_ip
+        op: in
+        value: [10.0.0.1, 10.0.0.2]
+action: drop_connection

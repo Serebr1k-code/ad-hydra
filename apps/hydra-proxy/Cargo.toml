@@ -1,0 +1,35 @@
+[package]
+name = "hydra-proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+[dependencies]
+sha2 = "0.10"
+anyhow.workspace = true
+clap.workspace = true
+hydra-domain.workspace = true
+hydra-wire.workspace = true
+hydra-filter-engine.workspace = true
+hydra-protocol-runtime.workspace = true
+hydra-protocol-sdk.workspace = true
+nix.workspace = true
+prost-types.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+[lints]
+workspace = true
+
+[dev-dependencies]
+wat = "1"
+sha2 = "0.10"
+
+[dependencies.regex]
+version = "1"

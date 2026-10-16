@@ -1,0 +1,31 @@
+{
+  "socket": "/run/hydra/proxy.sock",
+  "state_file": "/var/lib/hydra/proxy/last-good.json",
+  "limits": {
+    "max_flows": 1024,
+    "udp_idle_ms": 30000,
+    "tcp_idle_ms": 300000,
+    "connect_timeout_ms": 3000
+  },
+  "snapshot": {
+    "revision": 1,
+    "services": [
+      {
+        "id": "toy-tcp",
+        "transport": "tcp",
+        "listen_address": "127.0.0.1:9000",
+        "upstream_address": "127.0.0.1:9001",
+        "protocol_id": "raw",
+        "enabled": true
+      },
+      {
+        "id": "toy-udp",
+        "transport": "udp",
+        "listen_address": "127.0.0.1:9002",
+        "upstream_address": "127.0.0.1:9003",
+        "protocol_id": "raw",
+        "enabled": true
+      }
+    ]
+  }
+}

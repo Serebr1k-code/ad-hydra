@@ -1,0 +1,4 @@
+/target/
+/frontend/dist/
+.superpowers/
+__pycache__/

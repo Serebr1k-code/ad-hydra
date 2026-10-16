@@ -1,0 +1,51 @@
+name: Rust verification
+on:
+  push:
+    branches: [main]
+    paths: &inputs
+      - 'apps/**'
+      - 'crates/**'
+      - 'contracts/**'
+      - 'frontend/**'
+      - 'plugins/**'
+      - 'migrations/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'Cargo.*'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths: *inputs
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain and protobuf
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          rustup target add wasm32-unknown-unknown --toolchain 1.99.0
+          python3 -m pip install -r scripts/requirements.txt
+      - run: cargo fmt --all -- --check
+      - run: cargo check --locked --workspace --all-targets
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      - run: scripts/check-contracts.sh
+      - run: python3 scripts/generate-frontend.py --check
+      - run: find frontend/src -name '*.js' -exec node --check {} \;
+      - run: cargo build --locked --workspace
+      - run: python3 tests/e2e/relay.py
+      - run: cargo build --locked --release --manifest-path plugins/examples/length-prefixed/Cargo.toml --target wasm32-unknown-unknown
+      - run: python3 tests/e2e/http_filters.py
+        env:
+          HYDRA_WASM_SAMPLE: ${{ github.workspace }}/plugins/examples/length-prefixed/target/wasm32-unknown-unknown/release/hydra_length_prefixed_example.wasm
+      - run: python3 tests/e2e/operations.py
+      - run: python3 tests/e2e/diagnostics.py
+      - run: cargo build --locked --release --workspace

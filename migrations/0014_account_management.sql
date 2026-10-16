@@ -1,0 +1,3 @@
+ALTER TABLE users ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE users ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+UPDATE users SET updated_at=created_at;

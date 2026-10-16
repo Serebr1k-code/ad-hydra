@@ -1,0 +1,17 @@
+name: UDP flood protection
+service_id: 33333333-3333-4333-8333-333333333333
+enabled: true
+priority: 50
+mode: enforce
+conditions:
+  all:
+    - field: transport.kind
+      op: eq
+      value: udp
+action: rate_limit
+action_config:
+  rate_limit:
+    key: network.src_ip
+    requests: 100
+    window_ms: 1000
+    on_exceed: drop_datagram

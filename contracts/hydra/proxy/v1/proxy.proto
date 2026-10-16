@@ -1,0 +1,331 @@
+syntax = "proto3";
+
+package hydra.proxy.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Internal only. Transport: Unix domain socket (/run/hydra/proxy.sock).
+// The proxy MUST authenticate the local Core process using socket permissions
+// and peer credentials. Actor fields are attribution, not credentials.
+service ProxyControl {
+  rpc GetStatus(GetStatusRequest) returns (ProxyStatus);
+  rpc ApplyConfigSnapshot(ApplyConfigSnapshotRequest) returns (ApplyResult);
+  rpc ApplyServiceSnapshot(ApplyServiceSnapshotRequest) returns (ApplyResult);
+  rpc ApplyRuleSnapshot(ApplyRuleSnapshotRequest) returns (ApplyResult);
+  rpc InstallProtocol(InstallProtocolRequest) returns (InstallProtocolResult);
+  rpc ActivateProtocol(ActivateProtocolRequest) returns (ApplyResult);
+  rpc DeactivateProtocol(DeactivateProtocolRequest) returns (ApplyResult);
+}
+
+service ProxyTelemetry {
+  // Lossy, bounded, parsed events only; no raw packet stream.
+  rpc StreamTelemetry(StreamTelemetryRequest) returns (stream EventBatch);
+  // Critical events are replayed by (proxy_epoch, sequence) until acknowledged.
+  rpc StreamCritical(StreamCriticalRequest) returns (stream EventBatch);
+  rpc AckCritical(AckCriticalRequest) returns (AckCriticalReply);
+}
+
+service ProxyDiagnostics {
+  // Explicit, on-demand raw sample from bounded local proxy buffer.
+  rpc TestProtocol(TestProtocolRequest) returns (TestProtocolReply);
+  rpc CaptureSample(CaptureSampleRequest) returns (CaptureSampleReply);
+  rpc GetSample(GetSampleRequest) returns (GetSampleReply);
+  // ONLY to a configured service upstream on the competition allowlist.
+  // Does not inject arbitrary packets into pre-existing connections.
+  rpc ProbeService(ProbeServiceRequest) returns (ProbeServiceReply);
+}
+
+enum ActorType {
+  ACTOR_TYPE_UNSPECIFIED = 0;
+  ACTOR_TYPE_USER = 1;
+  ACTOR_TYPE_SYSTEM = 2;
+  ACTOR_TYPE_LOCAL_CLI = 3;
+  ACTOR_TYPE_SERVICE = 4;
+}
+message Actor {
+  ActorType type = 1;
+  string user_id = 2;
+  string username = 3;
+  string initiated_by_user_id = 4;
+  string request_id = 5;
+}
+
+enum Transport {
+  TRANSPORT_UNSPECIFIED = 0;
+  TRANSPORT_TCP = 1;
+  TRANSPORT_UDP = 2;
+}
+enum Direction {
+  DIRECTION_UNSPECIFIED = 0;
+  DIRECTION_CLIENT_TO_SERVER = 1;
+  DIRECTION_SERVER_TO_CLIENT = 2;
+}
+enum RuleMode {
+  RULE_MODE_UNSPECIFIED = 0;
+  RULE_MODE_SHADOW = 1;
+  RULE_MODE_ENFORCE = 2;
+}
+enum Action {
+  ACTION_UNSPECIFIED = 0;
+  ACTION_ALLOW = 1;
+  ACTION_ALERT = 2;
+  ACTION_BLOCK = 3;
+  ACTION_DROP_CONNECTION = 4;
+  ACTION_DROP_DATAGRAM = 5;
+  ACTION_RATE_LIMIT = 6;
+  ACTION_TAG = 7;
+  ACTION_LOG = 8;
+}
+enum Comparison {
+  COMPARISON_UNSPECIFIED = 0;
+  COMPARISON_EQUALS = 1;
+  COMPARISON_NOT_EQUALS = 2;
+  COMPARISON_CONTAINS = 3;
+  COMPARISON_REGEX = 4;
+  COMPARISON_PREFIX = 5;
+  COMPARISON_GREATER_THAN = 6;
+  COMPARISON_LESS_THAN = 7;
+  COMPARISON_IN = 8;
+  COMPARISON_NOT_IN = 9;
+}
+
+// Typed arbitrary fields allow plugins to emit binary and 64-bit integers
+// without lossy JSON number conversion.
+message FieldValue {
+  oneof value {
+    string string_value = 1;
+    sint64 int_value = 2;
+    uint64 uint_value = 3;
+    double double_value = 4;
+    bool bool_value = 5;
+    bytes bytes_value = 6;
+    FieldObject object_value = 7;
+    FieldList list_value = 8;
+  }
+}
+message FieldObject { map<string, FieldValue> fields = 1; }
+message FieldList { repeated FieldValue values = 1; }
+message Predicate {
+  string field_path = 1;       // e.g. protocol.command or network.src_ip
+  Comparison comparison = 2;
+  FieldValue expected = 3;
+}
+message RuleGroup { repeated RuleExpression children = 1; }
+message RuleExpression {
+  oneof node {
+    RuleGroup all = 1;
+    RuleGroup any = 2;
+    RuleExpression negated = 3;
+    Predicate predicate = 4;
+  }
+}
+message RateLimitOptions {
+  string key = 1;            // e.g. network.src_ip
+  uint32 requests = 2;
+  uint64 window_ms = 3;
+  Action on_exceed = 4;      // BLOCK, DROP_CONNECTION or DROP_DATAGRAM
+}
+message RuleActionConfig {
+  optional uint32 http_status = 1;  // Only valid for parsed HTTP BLOCK
+  RateLimitOptions rate_limit = 2; // Required for RATE_LIMIT
+  string tag = 3;                 // Required for TAG
+}
+message Rule {
+  string id = 1;
+  string service_id = 2;
+  string name = 3;
+  bool enabled = 4;
+  RuleMode mode = 5;
+  uint32 priority = 6;
+  RuleExpression expression = 7;
+  Action action = 8;
+  string backend = 9;         // userspace initially; backend is an abstraction
+  string description = 10;
+  RuleActionConfig action_config = 11;
+  google.protobuf.Timestamp expires_at = 12;
+}
+
+message ServiceConfig {
+  string id = 1;
+  Transport transport = 2;
+  string listen_address = 3;
+  string upstream_address = 4;
+  string protocol_id = 5;
+  bool enabled = 6;
+}
+message GetStatusRequest {}
+message ProxyStatus {
+  string proxy_instance_id = 1;
+  string proxy_epoch_id = 2;
+  uint64 applied_rules_revision = 3;
+  uint64 applied_services_revision = 4;
+  uint32 active_flows = 5;
+  uint64 dropped_telemetry_events = 6;
+  uint64 critical_spool_bytes = 7;
+  google.protobuf.Timestamp started_at = 8;
+  uint64 rejected_flows = 9;
+  uint64 dropped_udp_datagrams = 10;
+  map<string, uint64> rule_hit_counts = 11;
+  uint64 critical_dropped = 12;
+  uint64 sample_dropped = 13;
+}
+message ApplyServiceSnapshotRequest {
+  uint64 revision = 1;
+  string request_id = 2;
+  Actor actor = 3;
+  repeated ServiceConfig services = 4;
+}
+message ApplyRuleSnapshotRequest {
+  uint64 revision = 1;
+  string request_id = 2;
+  Actor actor = 3;
+  repeated Rule rules = 4;
+}
+// Atomic dependent services and rules; both nested revisions must agree.
+message ApplyConfigSnapshotRequest {
+  ApplyServiceSnapshotRequest services = 1;
+  ApplyRuleSnapshotRequest rules = 2;
+}
+message ApplyResult {
+  uint64 applied_revision = 1;
+  bool applied = 2;
+  string error_code = 3;
+  string error_message = 4;
+  google.protobuf.Timestamp applied_at = 5;
+}
+message InstallProtocolRequest {
+  string protocol_id = 1;
+  string version = 2;
+  string sha256_hex = 3;
+  string framing_profile_json = 7; // mutually exclusive with wasm; bounded declarative profile
+  bytes wasm = 4;              // hard cap 4 MiB, validate digest and runtime budgets
+  string request_id = 5;
+  Actor actor = 6;
+}
+message InstallProtocolResult {
+  string metadata_json = 6; // optional bounded typed schema; null for legacy ABI v1 parsers
+  string protocol_id = 1;
+  string version = 2;
+  string sha256_hex = 3;
+  bool installed = 4;
+  string error_message = 5;
+}
+message ActivateProtocolRequest {
+  string protocol_id = 1;
+  string version = 2;
+  string service_id = 3;
+  string request_id = 4;
+  Actor actor = 5;
+}
+
+message StreamTelemetryRequest {
+  uint32 max_events_per_batch = 1;
+}
+message StreamCriticalRequest {
+  string proxy_epoch_id = 1;
+  uint64 after_sequence = 2;
+}
+message EventBatch {
+  string proxy_epoch_id = 1;
+  uint64 first_sequence = 2;
+  bool critical = 3;
+  repeated Event events = 4;
+}
+message Event {
+  string event_id = 1;
+  google.protobuf.Timestamp occurred_at = 2;
+  string service_id = 3;
+  string flow_id = 4;
+  oneof payload {
+    FlowOpened flow_opened = 10;
+    FlowClosed flow_closed = 11;
+    ParsedMessage message = 12;
+    RuleHit rule_hit = 13;
+    FlagFinding flag = 14;
+    ProxyCounters counters = 15;
+    EventLoss loss = 16;
+  }
+}
+message Endpoint {
+  string ip = 1;
+  uint32 port = 2;
+}
+message FlowOpened {
+  Transport transport = 1;
+  Endpoint client = 2;
+  Endpoint upstream = 3;
+}
+message FlowClosed {
+  uint64 bytes_client_to_server = 1;
+  uint64 bytes_server_to_client = 2;
+  string reason = 3;
+}
+message ParsedMessage {
+  string message_id = 1;
+  string protocol_id = 2;
+  string message_type = 3;
+  Direction direction = 4;
+  FieldObject fields = 5;
+  string sample_id = 6;      // on-demand only; may expire (NOT_FOUND)
+  uint32 original_size = 7;
+  bool truncated = 8;
+}
+message RuleHit {
+  string rule_id = 1;
+  Action action = 2;
+  RuleMode mode = 3;
+  string message_id = 4;
+}
+message FlagFinding {
+  string finding_id = 1;
+  string flag_value = 2;      // critical stream ONLY, redacted in REST/UI
+  string source_kind = 3;     // own_exposed / unknown, never auto-submit own flag
+  string message_id = 4;
+  Direction direction = 5;
+}
+message ProxyCounters {
+  uint64 active_flows = 1;
+  uint64 total_flows = 2;
+  uint64 rule_hits = 3;
+  uint64 telemetry_dropped = 4;
+}
+message EventLoss {
+  uint64 count = 1;
+  string reason = 2;
+}
+message AckCriticalRequest {
+  string proxy_epoch_id = 1;
+  uint64 through_sequence = 2; // ack only after Core SQLite commit
+}
+message AckCriticalReply { uint64 acknowledged_through = 1; }
+message TestProtocolRequest { string protocol_id = 1; string version = 2; string sample_id = 3; Direction direction = 4; string request_id = 5; Actor actor = 6; }
+message TestProtocolReply { repeated ParsedMessage messages = 1; }
+message CaptureSampleRequest { string flow_id = 1; string request_id = 2; Actor actor = 3; }
+message CaptureSampleReply { string sample_id = 1; }
+message GetSampleRequest { string sample_id = 1; }
+message GetSampleReply {
+  bytes data = 1;
+  bool truncated = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+message ProbeServiceRequest {
+  string service_id = 1;     // selects configured upstream; no arbitrary destination
+  Transport transport = 2;
+  bytes payload = 3;         // application data, not forged IP packets
+  uint32 timeout_ms = 4;
+  string request_id = 5;
+  Actor actor = 6;
+}
+message ProbeServiceReply {
+  bytes response = 1;
+  bool truncated = 2;
+  uint32 elapsed_ms = 3;
+  string error_code = 4;
+}
+
+// Restore the service's configured native parser for new sessions only.
+message DeactivateProtocolRequest {
+  string service_id = 1;
+  string request_id = 2;
+  Actor actor = 3;
+}

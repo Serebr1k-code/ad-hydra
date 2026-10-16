@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = ["apps/hydra-core", "apps/hydra-proxy", "crates/hydra-domain", "crates/hydra-wire", "crates/hydra-filter-engine", "crates/hydra-protocol-sdk", "crates/hydra-protocol-runtime"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+
+[workspace.dependencies]
+anyhow = "1"
+axum = "0.8"
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+clap = { version = "4", features = ["derive"] }
+hydra-domain = { path = "crates/hydra-domain" }
+hydra-filter-engine = { path = "crates/hydra-filter-engine" }
+hydra-protocol-runtime = { path = "crates/hydra-protocol-runtime" }
+hydra-protocol-sdk = { path = "crates/hydra-protocol-sdk" }
+hydra-wire = { path = "crates/hydra-wire" }
+hyper-util = { version = "0.1", features = ["tokio"] }
+nix = { version = "0.30", features = ["user"] }
+prost = "0.13"
+prost-types = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "io-util", "signal", "fs", "process"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tonic = "0.12"
+tonic-build = "0.12"
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
+uuid = { version = "1", features = ["v4"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

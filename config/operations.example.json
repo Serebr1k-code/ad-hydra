@@ -1,0 +1,6 @@
+{
+  "flag_pattern": "FLAG\\{[A-Za-z0-9_]{1,64}\\}",
+  "auto_submit_captured": false,
+  "checker": null,
+  "sandbox": null
+}

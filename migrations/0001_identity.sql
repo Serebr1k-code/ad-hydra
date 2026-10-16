@@ -1,0 +1,7 @@
+CREATE TABLE users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL);
+CREATE TABLE sessions(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE refresh_tokens(digest TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), consumed INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX sessions_user ON sessions(user_id);
+CREATE TABLE audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, actor_kind TEXT NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, request_id TEXT NOT NULL, success INTEGER NOT NULL, metadata TEXT NOT NULL);
+CREATE TRIGGER audit_no_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT,'append-only audit'); END;
+CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT,'append-only audit'); END;

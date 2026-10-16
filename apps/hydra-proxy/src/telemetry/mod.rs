@@ -1,0 +1,349 @@
+pub mod critical;
+use hydra_domain::{Service, Transport};
+use hydra_wire::v1::{self, event::Payload};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::SystemTime,
+};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
+
+pub fn timestamp() -> prost_types::Timestamp {
+    SystemTime::now().into()
+}
+
+pub struct Telemetry {
+    pub samples: std::sync::RwLock<Option<Arc<crate::samples::SampleRing>>>,
+    pub flows: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    pub scanner: std::sync::RwLock<Option<Arc<crate::inspection::flags::Scanner>>>,
+    pub critical: std::sync::RwLock<Option<Arc<critical::CriticalSpool>>>,
+    pub protocols: std::sync::RwLock<Option<Arc<crate::inspection::protocols::Protocols>>>,
+    pub hit_counts: std::sync::Mutex<std::collections::BTreeMap<String, u64>>,
+    pub rules: std::sync::RwLock<Arc<hydra_filter_engine::CompiledSnapshot>>,
+    pub epoch: String,
+    pub started_at: prost_types::Timestamp,
+    pub active: AtomicU64,
+    pub dropped: AtomicU64,
+    pub rejected: AtomicU64,
+    pub udp_dropped: AtomicU64,
+    pub events: broadcast::Sender<v1::Event>,
+    pub permits: Arc<Semaphore>,
+    pub subscribers: Arc<Semaphore>,
+}
+impl Telemetry {
+    pub fn new(max_flows: usize) -> Arc<Self> {
+        let (events, _) = broadcast::channel(1024);
+        Arc::new(Self {
+            samples: std::sync::RwLock::new(None),
+            flows: std::sync::Mutex::new(Default::default()),
+            scanner: std::sync::RwLock::new(None),
+            critical: std::sync::RwLock::new(None),
+            protocols: std::sync::RwLock::new(None),
+            hit_counts: std::sync::Mutex::new(Default::default()),
+            rules: std::sync::RwLock::new(Arc::new(
+                hydra_filter_engine::CompiledSnapshot::compile(
+                    hydra_domain::RuleSnapshot::default(),
+                    &[],
+                )
+                .expect("empty rules"),
+            )),
+            epoch: uuid::Uuid::new_v4().to_string(),
+            started_at: timestamp(),
+            active: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+            rejected: AtomicU64::new(0),
+            udp_dropped: AtomicU64::new(0),
+            events,
+            permits: Arc::new(Semaphore::new(max_flows)),
+            subscribers: Arc::new(Semaphore::new(4)),
+        })
+    }
+    pub fn decoder_error(&self, service: &str, flow: &str, reason: &str) {
+        self.emit(
+            service,
+            flow,
+            Payload::Loss(v1::EventLoss {
+                count: 1,
+                reason: reason.into(),
+            }),
+        );
+    }
+    pub fn replace_rules(&self, compiled: hydra_filter_engine::CompiledSnapshot) {
+        let ids: std::collections::BTreeSet<_> = compiled.rule_ids().map(str::to_owned).collect();
+        let mut counts = self.hit_counts.lock().unwrap_or_else(|e| e.into_inner());
+        counts.retain(|id, _| ids.contains(id));
+        for id in ids {
+            counts.entry(id).or_insert(0);
+        }
+        drop(counts);
+        *self.rules.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(compiled);
+    }
+    pub fn evaluate(
+        &self,
+        service: &Service,
+        flow_id: &str,
+        fields: &std::collections::BTreeMap<String, hydra_domain::FieldValue>,
+        safe_http: bool,
+        message_id: &str,
+    ) -> Option<hydra_domain::Action> {
+        let rules = self.rules.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let result = rules.evaluate(&hydra_domain::EvaluationContext {
+            service_id: &service.id,
+            transport: service.transport,
+            fields,
+            now_ms: crate::state::now().saturating_mul(1000),
+            safe_http,
+        });
+        if result.state_exhausted {
+            self.decoder_error(&service.id, flow_id, "rate_limit_state_exhausted");
+        }
+        for hit in result.hits {
+            if let Some(count) = self
+                .hit_counts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_mut(&hit.rule_id)
+            {
+                *count = count.saturating_add(1);
+            }
+            self.emit(
+                &service.id,
+                flow_id,
+                Payload::RuleHit(v1::RuleHit {
+                    rule_id: hit.rule_id,
+                    action: hydra_wire::rules::action_code(&hit.action),
+                    mode: if hit.mode == hydra_domain::Mode::Shadow {
+                        1
+                    } else {
+                        2
+                    },
+                    message_id: message_id.into(),
+                }),
+            );
+        }
+        result.action
+    }
+    pub fn message(
+        &self,
+        service: &str,
+        flow: &str,
+        message: hydra_protocol_sdk::ParsedMessage,
+        size: usize,
+    ) -> String {
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let direction = message.direction;
+        let fields = message
+            .fields
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    hydra_wire::rules::value_to_wire(&crate::inspection::domain_value(v)),
+                )
+            })
+            .collect();
+        if let Some(scanner) = self
+            .scanner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let values = message
+                .fields
+                .iter()
+                .map(|(k, v)| (k.clone(), crate::inspection::domain_value(v)))
+                .collect();
+            self.findings(
+                service,
+                flow,
+                &message_id,
+                direction,
+                scanner.scan_fields(&values),
+            );
+        }
+        self.emit(
+            service,
+            flow,
+            Payload::Message(v1::ParsedMessage {
+                message_id: message_id.clone(),
+                protocol_id: message.protocol,
+                message_type: message.message_type,
+                direction: match message.direction {
+                    hydra_protocol_sdk::Direction::ClientToServer => 1,
+                    hydra_protocol_sdk::Direction::ServerToClient => 2,
+                },
+                fields: Some(v1::FieldObject { fields }),
+                original_size: size.min(u32::MAX as usize) as u32,
+                sample_id: String::new(),
+                truncated: false,
+            }),
+        );
+        message_id
+    }
+    pub fn findings(
+        &self,
+        service: &str,
+        flow: &str,
+        message: &str,
+        direction: hydra_protocol_sdk::Direction,
+        values: Vec<String>,
+    ) {
+        if values.len() == 256 {
+            self.decoder_error(service, flow, "flag_findings_limit");
+        }
+        for value in values {
+            self.emit(
+                service,
+                flow,
+                Payload::Flag(v1::FlagFinding {
+                    finding_id: uuid::Uuid::new_v4().to_string(),
+                    flag_value: value,
+                    source_kind: "own_exposed".into(),
+                    message_id: message.into(),
+                    direction: if direction == hydra_protocol_sdk::Direction::ClientToServer {
+                        1
+                    } else {
+                        2
+                    },
+                }),
+            );
+        }
+    }
+    pub fn emit(&self, service: &str, flow: &str, payload: Payload) {
+        let event = v1::Event {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            occurred_at: Some(timestamp()),
+            service_id: service.into(),
+            flow_id: flow.into(),
+            payload: Some(payload),
+        };
+        if matches!(event.payload, Some(Payload::Flag(_))) {
+            if let Some(spool) = self
+                .critical
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
+                spool.try_emit(event);
+            } else {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        }
+        if self.events.send(event).is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn open(
+        self: &Arc<Self>,
+        service: &Service,
+        client: SocketAddr,
+        permit: OwnedSemaphorePermit,
+    ) -> Flow {
+        let flow = Flow {
+            scanner: std::sync::Mutex::new(
+                self.scanner
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .map(|s| s.session()),
+            ),
+            transport: service.transport,
+            id: uuid::Uuid::new_v4().to_string(),
+            service: service.id.clone(),
+            telemetry: self.clone(),
+            up: AtomicU64::new(0),
+            down: AtomicU64::new(0),
+            reason: "closed".into(),
+            _permit: permit,
+        };
+        self.flows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(flow.id.clone());
+        self.active.fetch_add(1, Ordering::Relaxed);
+        self.emit(
+            &flow.service,
+            &flow.id,
+            Payload::FlowOpened(v1::FlowOpened {
+                transport: match service.transport {
+                    Transport::Tcp => 1,
+                    Transport::Udp => 2,
+                },
+                client: Some(endpoint(client)),
+                upstream: Some(endpoint(service.upstream_address)),
+            }),
+        );
+        flow
+    }
+}
+fn endpoint(addr: SocketAddr) -> v1::Endpoint {
+    v1::Endpoint {
+        ip: addr.ip().to_string(),
+        port: addr.port().into(),
+    }
+}
+pub struct Flow {
+    scanner: std::sync::Mutex<Option<crate::inspection::flags::FlagSession>>,
+    transport: Transport,
+    pub id: String,
+    service: String,
+    telemetry: Arc<Telemetry>,
+    pub up: AtomicU64,
+    pub down: AtomicU64,
+    pub reason: String,
+    _permit: OwnedSemaphorePermit,
+}
+impl Flow {
+    pub fn scan(&self, direction: hydra_protocol_sdk::Direction, bytes: &[u8]) {
+        if let Some(samples) = self
+            .telemetry
+            .samples
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            samples.try_capture(&self.id, bytes);
+        }
+        let values = if self.transport == Transport::Udp {
+            self.telemetry
+                .scanner
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|s| s.scan(bytes))
+                .unwrap_or_default()
+        } else {
+            self.scanner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_mut()
+                .map(|s| s.feed(direction, bytes))
+                .unwrap_or_default()
+        };
+        self.telemetry
+            .findings(&self.service, &self.id, "", direction, values);
+    }
+}
+impl Drop for Flow {
+    fn drop(&mut self) {
+        self.telemetry
+            .flows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+        self.telemetry.active.fetch_sub(1, Ordering::Relaxed);
+        self.telemetry.emit(
+            &self.service,
+            &self.id,
+            Payload::FlowClosed(v1::FlowClosed {
+                bytes_client_to_server: self.up.load(Ordering::Relaxed),
+                bytes_server_to_client: self.down.load(Ordering::Relaxed),
+                reason: self.reason.clone(),
+            }),
+        );
+    }
+}

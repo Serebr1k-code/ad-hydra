@@ -1,0 +1,89 @@
+# Hydra implementation ledger
+
+Authority: SPEC.md. Delivery order: IMPLEMENTATION_PLAN.md. Original repository contained untracked handoff documents and no executable implementation; those documents were preserved. Work remains uncommitted in the supplied workspace.
+
+## Phase 0 — working foundation
+
+Implemented seven real workspace packages: independent `apps/hydra-core` and `apps/hydra-proxy`, pure `hydra-domain`, generated `hydra-wire`, `hydra-filter-engine`, independent `hydra-protocol-sdk`, and `hydra-protocol-runtime`. Thin mains; vertical Core features, explicit Proxy transport/inspection/gRPC/telemetry modules. Canonical protobuf generates only in Cargo OUT_DIR. Original OpenAPI draft preserved; active OpenAPI derives from handlers. Frontend helpers/types derive from that snapshot. Added build configuration, CI, architecture checker and deployment instructions.
+
+Verification commands: `cargo check --locked --workspace --all-targets`, `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace`, `scripts/check-contracts.sh`, `python3 scripts/generate-frontend.py --check`. Final verification results are recorded below. Dependency-direction check passed: no app-to-app Cargo dependency, no Proxy SQLite/auth/API dependency, independent SDK, one canonical proto.
+
+Changed areas: root Cargo files/lock/toolchain, `.cargo`, `.github/workflows`, `apps`, `crates`, `contracts`, `scripts`, `frontend`, `deploy`, documentation.
+
+## Phase 1 — real relay and UDS control
+
+TCP full duplex and half-close preserve binary bytes; bounded UDP mappings preserve replies, including empty datagrams. Connection/time/buffer/channel bounds are explicit. Local gRPC uses mode0600 UDS and peer UID checks. Service/rule snapshots validate, bind listeners before mutation, persist atomically and ACK; combined snapshots preserve cross-references. Proxy restarts from its last accepted state independently. Cancellation-admitted commits finish safely; graceful shutdown drains admitted changes. Normal flow metadata is parsed telemetry, never packet streaming.
+
+`python3 tests/e2e/relay.py` passed against both real executables: binary/fragmented TCP, half-close, two UDP clients, zero-length datagram, mapping expiry, global capacity rejection, config ACK/idempotency/stale/conflicting-bind rollback, existing TCP during Core kill, Proxy/Core restart and saved config. State integration tests exercise cancellation and atomic services/rules.
+
+Changed areas: `apps/hydra-proxy/src/{transport,grpc,state,config,security,telemetry}`, Core `infrastructure/proxy_client`, domain/wire, `tests/e2e/relay.py`, example config.
+
+## Phase 2 — accounts, audit and filters
+
+SQLite WAL migrations, private directories/files, bounded writer admission/database/traffic budgets. CLI-only account creation with hidden password prompt. Argon2id passwords; Ed25519 JWT access60seconds; rotating refresh with absolute10-hour lifetime, family reuse detection, immediate revocation and equal full account privileges. Secure HttpOnly/Strict refresh cookie, Origin+double-submit CSRF for cookie operations. Authentication/session/user/audit UI and API, native HTTPS, embedded Swagger.
+
+Real filter AST/operators/typed values, priority/TTL/missing-field semantics, shadow tests against saved messages before enforcement, author/editor derived from JWT, creation date, counters, edits and live toggles. Userspace rules enforce transport-safe TCP/UDP and completely buffered supported HTTP requests. Fixed-window field-keyed rate limits have1024 total keys, bounded windows and explicit capacity failure. Filter/service revisions conflict with409; ACK status is pending/applied/error.
+
+Rust account/session tests passed, including exact lifetimes, refresh reuse, immediate revocation, cookie/HTTP2 split headers, permissions and server attribution. Engine tests cover rule semantics, aggregate regex/node/value budgets and rate windows/cardinality. `tests/e2e/http_filters.py` passed real auth, shadow/enforce/toggle, HTTP edge cases, attribution, counters, revision conflict and traffic persistence. Final rerun includes saved-sample parser test.
+
+Changed areas: Core `modules/{auth,users,audit,services,filters}`, `infrastructure/{crypto,db}`, migrations1/2/5, filter engine/domain/wire, frontend feature pages and shared auth helper.
+
+## Phase 3 — parsing, WASM, Traffic and critical telemetry
+
+Native bounded HTTP/1.1 request parser plus raw fallback. Import-free WASM interpreter with checksum, fuel, memory, output, state, session/version bounds; real Rust u16-length-framed sample decoder. Immutable upload, live activation, restart, version retention and explicit parser testing against captured samples. Typed protobuf values, traffic SQLite index, flow/message views, pagination/search and authenticated bounded SSE. On-demand next-chunk sample ring:16KiB/sample,4MiB payload storage,16 pending requests,30-second expiry, UUID generations, audited capture/read and410 expiry handling. Configured-service diagnostics are bounded and accept no arbitrary destination.
+
+Flag scanner handles per-direction TCP chunk boundaries and decoded fields; observed findings are own_exposed. Critical observations use finite durable replay/ACK, separate persisted epoch, explicit losses, Core durable flag/loss writes and epoch/sequence receipts before ACK. Normal rule counters reconcile separately across lossy telemetry.
+
+Verified: real Rust WASM upload/activation/typed fragmented decode/malformed isolation/restart; scanner unit tests; real disk sample quota/eviction/expiry tests; seven critical-spool disk restart/ACK/corruption/quota tests; Core durable receipt/dedup/loss tests. `tests/e2e/diagnostics.py` passed sample capture,410, configured local echo probe, defensive flag cross-chunk detection, Core-down spool persistence and two-process restart replay. `tests/e2e/browser.py` passed native HTTPS login, cookie refresh after reload, actual feature navigation, authenticated API calls and logout.
+
+Changed areas: SDK/runtime, sample plugin, Proxy inspection/samples/critical/diagnostics, Core traffic/protocols/critical receipts, migrations3/4/6/9, frontend Traffic/Protocols, integration tests/docs.
+
+Limitations: no exposed generic declarative framing registry beyond raw/HTTP; no response HTTP parsing, chunked/HTTP2/WebSocket/TLS decryption. Unsupported framing passes unchanged with fallback metadata. Samples capture one requested next chunk, not a whole conversation. Critical producer admission has a finite crash window before its background fsync, with bounded loss rather than unlimited guarantees.
+
+## Phase 4 — Farm, Flag Manager and Submitter
+
+Target allowlist, immutable exploit uploads/version history, persisted manual/interval scheduling, enable/disable/edit/delete, optimistic revisions, run idempotency, cancellation/status/logs. One transient worker; Linux user/mount/PID/IPC/UTS/network namespaces, capabilities removed from worker, fixed-destination bridge and delegated cgroup CPU/memory/PID limits. Missing setup refuses execution. Scheduled lifecycle audit uses system actor with initiating user retained. Flags have captured/own_exposed/unknown categories, regex validation, hash/category dedup, provenance and redacted UI; only captured values are eligible for submission. Durable queue, stable external IDs, retries/backoff cap10 and real HTTP/TCP checker adapters. Checker credentials remain in Core configuration.
+
+Actual SQLite/API tests passed for allowlist/revision, immutable upload, queue/cancel/restart, attribution, flag category/dedup/redaction and own-exposed submission refusal. `tests/e2e/operations.py` passed real APIs and local checker acceptance/persistence; unconfigured sandbox produces truthful failed runs. Earlier in the session, the opt-in real kernel suite passed within its own delegated scope (authorized local echo, filesystem/environment isolation, timeout/cancel, CPU/PID/memory limits). After the user's instruction to avoid cyber-risk tests, no further exploit-execution tests are run. New full Farm-to-sandbox-to-checker fixture is opt-in and has not been executed as an integrated acceptance claim.
+
+Changed areas: Core `modules/{farm,flags}`, `infrastructure/{sandbox,operations}`, migrations7/8, Farm/Flags frontend, `tests/sandbox`, `tests/e2e/{operations,farm_execution}.py`, integration documentation.
+
+Historical milestone limitations (superseded by the completion milestone below): sandbox adapter supports IPv4 TCP per-target jobs; multi-target batch and UDP execution fail explicitly. Checker adapters use plaintext HTTP JSON or TCP JSON-lines; no native HTTPS/custom/batch adapter. Redacted outcome summaries replace arbitrary raw checker replies. External exactly-once effects require checker idempotency support. Flag lists currently show newest100. Target/exploit list/run pagination is bounded. Full product-specific sandbox deployment still needs operator cgroup delegation.
+
+## Phase 5 — deployment and resource validation
+
+Real compact console pages for Services, Filters, Traffic, Protocols, Farm, Flags, Users/Audit. Memory-only browser access token and refresh coordination, secure rendering, error visibility. Build/run/backup docs, example operations config and two systemd units supplied. Units are examples requiring installation, certificate and operator configuration; no host services were installed or started.
+
+Measured local echo acceptance under `systemd-run --user --scope -p MemoryMax=2G -p CPUQuota=200%`, with both app processes constrained to two CPU affinity slots: Proxy debug RSS19716KiB (19.3MiB), Core31036KiB (30.3MiB), combined49.6MiB. One-second idle samples after the short relay test: Proxy1.00% and Core0.00% of one core. Test elapsed2.59seconds. This is a constrained smoke measurement on the implementation host, not a sustained throughput/load benchmark or a physically2GiB machine. Runtime bounds are implemented; competition-scale latency, packet rate and sustained RSS remain to be measured.
+
+Historical remaining scope (implemented in the completion milestone below): generic frame-profile editor, richer protocol-field/rule search, multi-target batch/UDP sandbox adapter, custom checker adapters and comprehensive resource/load benchmarks. These are not represented by placeholder endpoints.
+
+## Earlier integration verification record
+
+Current commands and logs are recorded during final integration. Build artifacts stay in ignored `target/`; temporary logs and matching official WASM sample toolchain are under `/tmp`. Reproducible ordinary commands are in README and CI. No publish/deploy/commit was performed.
+
+Final integration verification (2026-10-16): workspace tests **85 passed, 0 failed, 1 ignored**; fmt and strict all-target Clippy passed; debug and optimized release builds passed. Release executables are approximately25MiB Core and7.4MiB Proxy. Release-generated OpenAPI exactly matches the active snapshot; protoc validation, architecture checker, frontend generation/diff and JavaScript/Python syntax checks passed. Saved-sample Rust WASM HTTP integration and native HTTPS Chromium browser checks passed after the final integration changes. Systemd syntax verification passed using temporary copies pointing to the built workspace binaries; units were not installed. No further exploit-execution checks were run after the user's restriction.
+
+Optimized release resource smoke also passed under the same2GiB/two-CPU scope: Proxy8740KiB RSS (8.5MiB), Core14384KiB (14.0MiB), combined22.6MiB. One-second idle samples were Proxy0% and Core1% of one core; these coarse samples are not a CPU performance guarantee. The short relay acceptance took2.59seconds.
+
+Final audit hardening: offline `hydra-core apply` now requires the configured private Core database and writes local_cli request/result audit records with the same request ID sent to Proxy. A local echo regression checks successful/idempotent/rejected maintenance changes retain audit provenance. Core was stopped for those maintenance operations; status remains independent of SQLite.
+
+Post-hardening verification: strict Clippy and all85Rust tests passed again; both final release executables rebuilt successfully; active/release OpenAPI diff, architecture and generated frontend checks passed. The final release two-process local relay/offline-audit smoke also passed. All deployment changes remain reviewable files in the workspace.
+
+## Completion milestone — remaining product surfaces
+
+Implemented immutable native framing profiles (raw/delimiter/fixed-size/length-prefix), bounded typed field schemas and optional WASM metadata, live activation/deactivation with persisted manifests and idempotent ACK handling. Existing sessions retain decoder versions. Traffic Explorer adds service/time/transport/address/direction/exact-field/rule/flag filters, conversation details, message comparison and saved-field shadow rule creation. Exact detail lookup traverses bounded search pages. Bulk filter toggles preserve atomic revisions and per-rule attribution; the UI explicitly shows desired/applied enabled state.
+
+Farm adds bounded fixed-endpoint IPv4 UDP, explicit multi-target batch manifests/provenance, aggregate deadlines, cancellation cleanup and immutable retry attempts. Flags adds paginated search, unknown triage, defensive-digest quarantine, verified HTTPS and declarative atomic CustomTcp batches, stable retry IDs and redacted response evidence. Users adds revision-checked editing, password reset, activation/deactivation and immediate session revocation. Audited settings/export and consistent request/error IDs complete the management surface. Production units separate Core and Proxy users while preserving exact UDS peer-UID authentication.
+
+Changed files/areas: `crates/hydra-domain/src/{decimal,protocols}.rs`, protocol SDK/runtime framing/metadata, canonical `contracts/hydra/proxy/v1/proxy.proto`, Proxy protocol/gRPC/config/security modules; Core `modules/{users,auth,audit,services,filters,traffic,protocols,farm,flags,settings}`, API middleware, SQLite startup and sandbox/operations adapters; migrations0010–0014; frontend feature pages/generated contracts; deployment units/README; CI; safe integration/resource tests and related docs. Existing phase files remain organized by the repository dependency contract.
+
+Commands: `cargo build --workspace --offline --locked`, `cargo test --workspace --offline --locked`, `cargo clippy --workspace --all-targets --offline --locked -- -D warnings`, `cargo fmt --all -- --check`, `cargo build --release --workspace --offline --locked`; generated `hydra-core openapi`, `scripts/check-contracts.sh`, `python3 scripts/generate-frontend.py --check`, JavaScript/Python syntax checks. The Rust WASM example is rebuilt with a matching isolated upstream compiler/target and exercised only as a parser. Local fixtures: `tests/e2e/{relay,http_filters,operations,diagnostics,browser}.py`. Operations checks configure no sandbox and verify refusal; they execute no uploaded code. Read-only systemd syntax checks use temporary unit copies; no services/accounts were installed.
+
+Safe checks passed for Rust compilation, SQLite transitions, framing, schema quotas, account/session revocation, maximal bulk transactions, target validation, checker transports/TLS hostname verification, triage/quarantine and HTTP request audit. The ordinary suite deliberately ignores actual kernel exploit execution. The full live Farm-to-worker-to-checker acceptance path and new batch/UDP worker behavior remain unverified after the user restricted execution tests. Earlier TCP kernel results above do not validate these new paths. Operators must provision cgroup delegation and sandbox runtimes before use; absent prerequisites fail closed.
+
+Other limits: HTTP inspection/enforcement covers supported HTTP/1.1 requests only; encrypted/unsupported protocols pass through. Checker atomic-batch acknowledgement and external idempotency depend on the configured checker. Configuration export covers services/rules, not a full live database backup. Short constrained-host resource runs do not demonstrate physical 2GiB hardware or long-term memory stability. Normal telemetry is explicitly lossy under load; critical delivery also has finite admission/storage bounds. No Docker daemon, Redis/PostgreSQL, eBPF, rounds or service monitor was introduced.
+
+Final safe verification: **107 Rust tests passed, 0 failed, 1 kernel execution test ignored**. Strict all-target Clippy, fmt, architecture boundaries, protoc/handler-generated OpenAPI diff, generated frontend checks and JavaScript/Python syntax passed. All49 OpenAPI paths parse and local schema references resolve. Actual local HTTP/WASM/native-profile, relay/restart, diagnostics, fail-closed management/checker and HTTPS Chromium suites passed. Final test logs are `/tmp/hydra-final-{tests,clippy,http,relay,diagnostics,operations,browser,contracts}.log`; build logs use `/tmp/hydra-final-{build,release,wasm}.log`. The Rust WASM sample is an independent guest workspace artifact; no binaries/keys/database files are checked into source.
+
+Final optimized build and release/OpenAPI diff passed. Binaries: Core27060664bytes (25.81MiB), Proxy7942024bytes (7.57MiB). The final 30-second owned-loopback benchmark passed under verified2GiB/200%-CPU scope limits and two-CPU affinity: 221030 successful requests, 0 payload errors, idleRSS24.66MiB, peakRSS28.74MiB, window growth+0.86MiB; Core received8469events with0indexing losses and Proxy dropped0normal events in this workload. See `docs/PERFORMANCE.md` and checked-in raw measurement JSON for CPU and per-second results. No full sandbox/exploit tests were rerun. No commit, publication or system installation was performed.
