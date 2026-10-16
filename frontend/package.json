@@ -1,1 +1,31 @@
-{"name":"hydra-console","private":true,"type":"module","description":"Native ES modules embedded in Core. No build or deployment-time Node runtime."}
+{
+  "name": "hydra-console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "typecheck": "vue-tsc --noEmit",
+    "build": "vue-tsc --noEmit && vite build",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@lucide/vue": "^1.58.0",
+    "@vueuse/core": "^15.0.0",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-vue-next": "1.0.0",
+    "reka-ui": "^2.11.0",
+    "tailwind-merge": "3.7.0",
+    "vue": "3.5.44",
+    "vue-router": "5.4.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@types/bun": "1.4.3",
+    "@vitejs/plugin-vue": "6.0.10",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3",
+    "vite": "8.3.4",
+    "vue-tsc": "3.3.13"
+  }
+}

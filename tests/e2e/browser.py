@@ -4,6 +4,7 @@ import http.client
 import json
 import os
 import pathlib
+import re
 import shutil
 import socket
 import ssl
@@ -13,6 +14,16 @@ import tempfile
 import time
 import unittest
 from relay import BIN, port
+
+
+def rename_dist_preserving_parent_mtime(source, destination):
+    # This smoke runs with no concurrent frontend changes. Preserve only the
+    # directory timestamp changed by our temporary asset-availability probe.
+    assert source.parent == destination.parent
+    parent = source.parent
+    before = parent.stat()
+    source.rename(destination)
+    os.utime(parent, ns=(before.st_atime_ns, before.st_mtime_ns))
 
 
 class CDP:
@@ -74,14 +85,20 @@ class Browser(unittest.TestCase):
             args = [str(BIN/'hydra-core'),'--database',str(tmp/'db'),'--key',str(tmp/'jwt.pem'),'--socket',sock]
             log = open(tmp/'process.log','w+')
             cdp=None
+            dist = pathlib.Path(__file__).resolve().parents[2] / "frontend" / "dist"
+            hidden_dist = None
             try:
                 subprocess.run(args+['create','user','alice','test-password-1234'],check=True,stdout=log,stderr=log,timeout=10)
                 processes.append(subprocess.Popen([str(BIN/'hydra-proxy'),'--config',str(tmp/'proxy.json')],stdout=log,stderr=log))
+                if os.environ.get('HYDRA_VERIFY_EMBEDDED') == '1':
+                    self.assertTrue(dist.is_dir(), 'Build frontend/dist before this smoke test')
+                    hidden_dist = dist.with_name(f'dist.browser-hidden-{os.getpid()}')
+                    rename_dist_preserving_parent_mtime(dist, hidden_dist)
                 processes.append(subprocess.Popen(args+['serve','--listen',f'127.0.0.1:{ap}','--origin',f'https://localhost:{ap}','--tls-cert',str(tmp/'tls.crt'),'--tls-key',str(tmp/'tls.key')],stdout=log,stderr=log))
                 for _ in range(100):
                     try:
                         c=http.client.HTTPSConnection('127.0.0.1',ap,context=ssl._create_unverified_context(),timeout=2)
-                        c.request('GET','/');r=c.getresponse();r.read();c.close()
+                        c.request('GET','/');r=c.getresponse();index=r.read().decode();c.close()
                         if r.status==200:
                             break
                     except (OSError,http.client.HTTPException):
@@ -89,6 +106,17 @@ class Browser(unittest.TestCase):
                     time.sleep(.05)
                 else:
                     log.seek(0);self.fail(log.read())
+                scripts = re.findall(r'<script[^>]+src="([^"]+)"', index)
+                self.assertTrue(scripts, 'Core must serve the Vite compiled module')
+                for script in scripts:
+                    self.assertRegex(script, r'^/assets/[^/]+-[A-Za-z0-9_-]+\.js$')
+                    c=http.client.HTTPSConnection('127.0.0.1',ap,context=ssl._create_unverified_context(),timeout=2)
+                    c.request('GET',script);r=c.getresponse();bundle=r.read();c.close()
+                    self.assertEqual(r.status,200)
+                    self.assertIn('javascript',r.getheader('Content-Type'))
+                    self.assertEqual(r.getheader('X-Content-Type-Options'),'nosniff')
+                    self.assertIn('immutable',r.getheader('Cache-Control'))
+                    self.assertGreater(len(bundle),1000)
                 processes.append(subprocess.Popen([chrome,'--headless','--no-sandbox','--disable-gpu','--disable-background-networking','--disable-component-update','--no-first-run','--ignore-certificate-errors',f'--user-data-dir={tmp / "chrome"}',f'--remote-debugging-port={debug}','about:blank'],stdout=log,stderr=log))
                 for _ in range(100):
                     try:
@@ -105,32 +133,48 @@ class Browser(unittest.TestCase):
                         if cdp.evaluate(expression):
                             return
                         time.sleep(.05)
-                    self.fail(cdp.evaluate('document.body.innerText'))
+                    self.fail(cdp.evaluate("document.body.innerText+'\\nTextarea DOM: '+[...document.querySelectorAll('textarea')].map(e=>e.outerHTML).join('\\n')"))
                 wait("document.querySelector('#login') && !document.querySelector('#login').hidden")
-                cdp.evaluate("document.querySelector('[name=username]').value='alice';document.querySelector('[name=password]').value='test-password-1234';document.querySelector('#login-form').requestSubmit()")
-                wait("!document.querySelector('#console').hidden")
+                self.assertTrue(cdp.evaluate("document.querySelector('#app')?.hasAttribute('data-v-app')"), "Vue must mount the application")
+                cdp.evaluate("for (const [name,value] of [['username','alice'],['password','test-password-1234']]) { const input=document.querySelector(`[name=${name}]`);input.value=value;input.dispatchEvent(new Event('input',{bubbles:true})); }")
+                cdp.evaluate("document.querySelector('#login-form').requestSubmit()")
+                wait("document.querySelector('#console') && !document.querySelector('#console').hidden")
                 original=cdp.evaluate('performance.timeOrigin')
                 cdp.call('Page.reload')
                 wait(f"performance.timeOrigin!=={original} && document.querySelector('#console') && !document.querySelector('#console').hidden")
+                # Real Vue bindings and mutations, with a loopback-only service and no workers.
+                wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent==='Add service' && !b.disabled)")
+                cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add service').click()")
+                wait("document.querySelector('#editor-value') !== null")
+                service = {'transport':'tcp','listen_address':f'127.0.0.1:{port()}','upstream_address':f'127.0.0.1:{port()}','protocol_id':'raw','enabled':True}
+                cdp.evaluate(f"{{ const input=document.querySelector('#editor-value');input.value={json.dumps(json.dumps(service))};input.dispatchEvent(new Event('input',{{bubbles:true}})); }}")
+                cdp.evaluate("document.querySelector('#editor-save').click()")
+                wait(f"document.querySelector('#page').innerText.includes({json.dumps(service['listen_address'])}) && !document.querySelector('#editor-value')")
                 for section in ['Filters','Traffic','Protocols','Farm','Flags','Settings','Users / audit']:
                     cdp.evaluate(f"[...document.querySelectorAll('nav button')].find(b=>b.textContent==={json.dumps(section)}).click()")
                     expected = {'Users / audit':'Users and audit','Farm':'Exploit farm','Flags':'Flag Vault'}.get(section,section)
                     wait(f"document.querySelector('#page h1')?.textContent==={json.dumps(expected)}")
+                    wait("!document.querySelector('#page').innerText.includes('Loading')")
                     self.assertFalse(cdp.evaluate("document.querySelector('#error').textContent"))
+                    self.assertFalse(cdp.evaluate("[...document.querySelectorAll('#page [role=alert]')].some(e=>e.textContent.trim())"),cdp.evaluate("document.querySelector('#page').innerText"))
                 self.assertIn('alice',cdp.evaluate("document.querySelector('#page').innerText"))
                 cdp.evaluate("document.querySelector('#logout').click()")
-                wait("!document.querySelector('#login').hidden")
+                wait("document.querySelector('#login') && !document.querySelector('#login').hidden")
                 self.assertNotIn('hydra_csrf=',cdp.evaluate('document.cookie'))
                 cdp.socket.close()
-                print('Native HTTPS and real Chromium login, navigation, API calls, logout: OK')
+                print('Embedded Vue, native HTTPS and real Chromium login, navigation, API calls, logout: OK')
             finally:
                 if cdp:
                     cdp.socket.close()
-                for p in reversed(processes):
-                    if p.poll() is None:
-                        p.terminate()
-                    p.wait(timeout=10)
-                log.close()
+                try:
+                    for p in reversed(processes):
+                        if p.poll() is None:
+                            p.terminate()
+                        p.wait(timeout=10)
+                finally:
+                    if hidden_dist is not None:
+                        rename_dist_preserving_parent_mtime(hidden_dist, dist)
+                    log.close()
 
 
 if __name__ == '__main__':

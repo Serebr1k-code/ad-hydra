@@ -13,8 +13,8 @@ for path, item in spec['paths'].items():
             identifier = operation['operationId']
             assert identifier not in operations, identifier
             operations[identifier] = {'path':path,'method':method.upper()}
-js = '// Generated from contracts/openapi.yaml; do not edit.\nexport const operations = ' + json.dumps(operations,sort_keys=True,indent=2) + ';\n'
-js += '''export function path(id, values={}) {
+js = '// Generated from contracts/openapi.yaml; do not edit.\nexport const operations = ' + json.dumps(operations,sort_keys=True,indent=2) + ' as const;\n'
+js += '''export function path(id: keyof typeof operations, values: Record<string, string | number> = {}): string {
   const operation=operations[id];if(!operation)throw Error('Unknown API operation '+id);
   return operation.path.replace(/\\{([^}]+)\\}/g,(_,name)=>{
     if(values[name]===undefined)throw Error('Missing path parameter '+name);
@@ -44,7 +44,7 @@ def declaration(s):
     return {'string':'string','integer':'number','number':'number','boolean':'boolean','null':'null'}.get(kind,'unknown')
 types = '// Generated from contracts/openapi.yaml; do not edit.\n' + '\n'.join('export type '+name+' = '+declaration(value)+';' for name,value in sorted(spec.get('components',{}).get('schemas',{}).items()))+'\n'
 parser=argparse.ArgumentParser();parser.add_argument('--check',action='store_true');args=parser.parse_args()
-for name,content in [('operations.js',js),('contracts.d.ts',types)]:
+for name,content in [('operations.ts',js),('contracts.d.ts',types)]:
     target=root/'frontend/src/generated'/name
     if args.check:
         assert target.read_text()==content, f'{target} is stale; run python3 scripts/generate-frontend.py'

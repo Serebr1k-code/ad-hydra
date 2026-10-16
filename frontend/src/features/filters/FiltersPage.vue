@@ -1,0 +1,116 @@
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
+import type { FilterInput, ListResponse } from '@/generated/contracts'
+import { api, errorMessage } from '@/shared/api/client'
+import { openEditor } from '@/shared/editor'
+import { date } from '@/shared/format'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import DataTable from '@/components/DataTable.vue'
+
+type Filter = Omit<FilterInput, 'expected_revision'> & { id: string; created_at: string; updated_at: string; created_by: string; updated_by: string; hit_count: number; desired_revision: number; applied_revision: number; desired_enabled: boolean; applied_enabled: boolean | null }
+type Filters = Omit<ListResponse, 'items'> & { items: Filter[] }
+const data = ref<Filters | null>(null)
+const serviceId = ref('')
+const busy = ref(false)
+const error = ref('')
+const notice = ref('')
+const query = ref('')
+const after = ref('')
+const sort = ref('created_at')
+const selected = ref<string[]>([])
+const columns = [{ key: 'select', label: 'Select' }, { key: 'name', label: 'Name / mode' }, { key: 'priority', label: 'Priority' }, { key: 'created_at', label: 'Created' }, { key: 'author', label: 'Author / editor' }, { key: 'hit_count', label: 'Hits' }, { key: 'enabled', label: 'Enabled' }, { key: 'actions', label: 'Actions' }]
+const sortOptions = [{ key: 'created_at', label: 'Creation date' }, { key: 'created_by', label: 'Author' }, { key: 'hit_count', label: 'Hits' }, { key: 'priority', label: 'Priority' }, { key: 'name', label: 'Name' }]
+const rows = computed(() => [...(data.value?.items ?? [])].sort((a, b) => {
+  switch (sort.value) {
+    case 'priority': return b.priority - a.priority
+    case 'hit_count': return b.hit_count - a.hit_count
+    case 'created_by': return a.created_by.localeCompare(b.created_by)
+    case 'name': return a.name.localeCompare(b.name)
+    default: return a.created_at.localeCompare(b.created_at)
+  }
+}))
+async function load(cursor = after.value) {
+  busy.value = true
+  error.value = ''
+  try {
+    const [filters, services] = await Promise.all([api<Filters>(`/filters?q=${encodeURIComponent(query.value)}&after=${encodeURIComponent(cursor)}`), api<ListResponse>('/services')])
+    data.value = filters
+    serviceId.value = typeof services.items[0]?.id === 'string' ? services.items[0].id : ''
+    after.value = cursor
+    selected.value = []
+  } catch (cause) { error.value = errorMessage(cause) }
+  finally { busy.value = false }
+}
+function edit(filter?: Filter) {
+  const initial = filter ? { service_id: filter.service_id, name: filter.name, description: filter.description, enabled: filter.enabled, mode: filter.mode, priority: filter.priority, expression: filter.expression, action: filter.action, backend: filter.backend, expires_at_ms: filter.expires_at_ms } : { service_id: serviceId.value, name: 'New filter', description: '', enabled: true, mode: 'shadow', priority: 10, expression: { field: 'http.path', op: 'prefix', value: { type: 'string', value: '/blocked' } }, action: { type: 'block', http_status: 403 }, backend: 'userspace', expires_at_ms: null }
+  openEditor(filter ? 'Edit filter' : 'Create shadow filter', initial, async value => {
+    const current = await api<ListResponse>('/filters')
+    await api(`/filters${filter ? '/' + encodeURIComponent(filter.id) : ''}`, filter ? 'PATCH' : 'POST', { ...value, expected_revision: current.revision })
+    await load('')
+  })
+}
+async function mutate(action: () => Promise<unknown>) {
+  busy.value = true
+  error.value = ''
+  try { await action(); await load() }
+  catch (cause) { error.value = errorMessage(cause) }
+  finally { busy.value = false }
+}
+function toggleSelection(id: string, checked: boolean | 'indeterminate') {
+  selected.value = checked === true ? [...new Set([...selected.value, id])] : selected.value.filter(value => value !== id)
+}
+async function setState(filter: Filter) {
+  await mutate(async () => {
+    const current = await api<ListResponse>('/filters')
+    await api(`/filters/${encodeURIComponent(filter.id)}/state`, 'PUT', { enabled: !filter.enabled, expected_revision: current.revision })
+  })
+}
+async function bulk(enabled: boolean) {
+  if (!selected.value.length || !data.value) { error.value = 'Select filters first'; return }
+  const payload = { ids: [...selected.value], enabled, expected_revision: data.value.revision }
+  await mutate(() => api('/filters/state', 'PUT', payload))
+}
+async function remove(filter: Filter) {
+  if (!window.confirm('Delete this filter?')) return
+  await mutate(async () => {
+    const current = await api<ListResponse>('/filters')
+    await api(`/filters/${encodeURIComponent(filter.id)}?expected_revision=${current.revision}`, 'DELETE')
+  })
+}
+function test(filter: Filter) {
+  openEditor('Test filter against saved parsed message', { message_id: '' }, async value => {
+    const result = await api<{ matched: boolean }>(`/filters/${encodeURIComponent(filter.id)}/test`, 'POST', value)
+    notice.value = result.matched ? 'Matched in shadow evaluation. Exact rule is now eligible for enforcement.' : 'No match on this saved message. Review the rule before enforcing.'
+  })
+}
+onMounted(() => load(''))
+</script>
+
+<template>
+  <section class="space-y-4">
+    <h1 class="text-2xl font-semibold">Filters</h1>
+    <div class="flex flex-wrap items-center gap-3">
+      <Input v-model="query" class="max-w-xs" placeholder="Search filters" aria-label="Search filters" @change="load('')" />
+      <p v-if="data" class="text-sm text-muted-foreground">{{ data.apply_status }} · desired {{ data.revision }} / applied {{ data.applied_revision }}</p>
+      <Button :disabled="busy" @click="edit()">Add filter</Button><Button variant="outline" :disabled="busy" @click="load()">Refresh</Button>
+      <Select v-model="sort"><SelectTrigger class="w-44" aria-label="Sort filters"><SelectValue /></SelectTrigger><SelectContent><SelectItem v-for="option in sortOptions" :key="option.key" :value="option.key">{{ option.label }}</SelectItem></SelectContent></Select>
+      <Button variant="outline" :disabled="busy || !selected.length" @click="bulk(true)">Enable selected</Button><Button variant="outline" :disabled="busy || !selected.length" @click="bulk(false)">Disable selected</Button>
+      <Button variant="outline" :disabled="busy || !data?.items.length" @click="selected = data?.items.map(item => item.id) ?? []">Select page</Button>
+    </div>
+    <p v-if="error || data?.apply_error" role="alert" class="text-sm text-destructive">{{ error || data?.apply_error }}</p><p v-if="notice" role="status">{{ notice }}</p>
+    <p v-if="busy" role="status">Loading filters…</p>
+    <p v-else-if="data && !data.items.length" class="text-muted-foreground">No filters. Start in shadow mode, inspect traffic, then test a saved message before enforcing.</p>
+    <DataTable v-if="data?.items.length" :columns="columns" :rows="rows">
+      <template #cell-select="{ row }"><Checkbox :model-value="selected.includes(row.id)" :aria-label="'Select ' + row.name" @update:model-value="value => toggleSelection(row.id, value)" /></template>
+      <template #cell-name="{ row }">{{ row.name }} · {{ row.mode }}</template>
+      <template #cell-created_at="{ row }">{{ date(row.created_at) }}</template>
+      <template #cell-author="{ row }"><div>{{ row.created_by }}</div><div class="text-muted-foreground">{{ row.updated_by }}</div></template>
+      <template #cell-enabled="{ row }"><Button variant="outline" size="sm" :disabled="busy" @click="setState(row)">{{ row.enabled ? 'Turn off' : 'Turn on' }}</Button><p class="text-sm">Desired {{ row.desired_enabled ? 'on' : 'off' }} / applied {{ row.applied_enabled === null ? 'pending' : row.applied_enabled ? 'on' : 'off' }}</p></template>
+      <template #cell-actions="{ row }"><div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" :disabled="busy" @click="edit(row)">Edit</Button><Button variant="outline" size="sm" :disabled="busy" @click="test(row)">Test saved message</Button><Button variant="destructive" size="sm" :disabled="busy" @click="remove(row)">Delete</Button></div></template>
+    </DataTable>
+    <div class="flex gap-2"><Button v-if="after" variant="outline" :disabled="busy" @click="load('')">First page</Button><Button v-if="data?.next_cursor" variant="outline" :disabled="busy" @click="load(data.next_cursor)">Next page</Button></div>
+  </section>
+</template>

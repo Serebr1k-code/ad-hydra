@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext", "moduleResolution": "Bundler", "strict": true,
+    "skipLibCheck": true, "isolatedModules": true, "resolveJsonModule": true,
+    "noEmit": true, "esModuleInterop": true, "allowJs": false,
+    "baseUrl": ".", "paths": {"@/*": ["src/*"]}, "types": ["vite/client", "bun"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts", "tests/**/*.ts"]
+}

@@ -1,79 +1,120 @@
 use axum::{
     Router,
-    extract::Path,
+    extract::OriginalUri,
     http::StatusCode,
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::get,
 };
-const ROOT: &str = include_str!("../../../../frontend/index.html");
+
+include!(concat!(env!("OUT_DIR"), "/frontend_assets.rs"));
+
 pub fn router() -> Router {
     Router::new()
-        .route("/", get(|| async { Html(ROOT) }))
-        .route("/assets/{name}", get(asset))
+        .route("/", get(asset))
+        .route("/assets/{*path}", get(asset))
 }
-async fn asset(Path(name): Path<String>) -> Response {
-    let (mime, source) = match name.as_str() {
-        "style.css" => (
-            "text/css",
-            include_str!("../../../../frontend/src/app/style.css"),
-        ),
-        "app.js" => (
-            "text/javascript",
-            include_str!("../../../../frontend/src/app/app.js"),
-        ),
-        "api.js" => (
-            "text/javascript",
-            include_str!("../../../../frontend/src/shared/api.js"),
-        ),
-        "view.js" => (
-            "text/javascript",
-            include_str!("../../../../frontend/src/shared/view.js"),
-        ),
-        "services.js" => (
-            "text/javascript",
-            include_str!("../../../../frontend/src/features/services/page.js"),
-        ),
-        "filters.js" => (
-            "text/javascript",
-            include_str!("../../../../frontend/src/features/filters/page.js"),
-        ),
-        "traffic.js" => (
-            "text/javascript",
-            include_str!("../../../../frontend/src/features/traffic/page.js"),
-        ),
-        "users.js" => (
-            "text/javascript",
-            include_str!("../../../../frontend/src/features/users/page.js"),
-        ),
-        "protocols.js" => (
-            "text/javascript",
-            include_str!("../../../../frontend/src/features/protocols/page.js"),
-        ),
-        "flags.js" => (
-            "text/javascript",
-            include_str!("../../../../frontend/src/features/flags/page.js"),
-        ),
-        "farm.js" => (
-            "text/javascript",
-            include_str!("../../../../frontend/src/features/farm/page.js"),
-        ),
-        "settings.js" => (
-            "text/javascript",
-            include_str!("../../../../frontend/src/features/settings/page.js"),
-        ),
-        "operations.js" => (
-            "text/javascript",
-            include_str!("../../../../frontend/src/generated/operations.js"),
-        ),
-        _ => return StatusCode::NOT_FOUND.into_response(),
+
+async fn asset(OriginalUri(uri): OriginalUri) -> Response {
+    // Compare the original encoded path exactly: no decoding or filesystem access.
+    // Vue Router uses hash navigation, so only the root document needs serving.
+    let Some((path, mime, bytes)) = ASSETS.iter().find(|(path, _, _)| *path == uri.path()) else {
+        return StatusCode::NOT_FOUND.into_response();
     };
     (
         [
-            ("content-type", mime),
+            ("content-type", *mime),
             ("x-content-type-options", "nosniff"),
-            ("cache-control", "no-cache"),
+            (
+                "cache-control",
+                if *path == "/" {
+                    "no-cache"
+                } else {
+                    "public, max-age=31536000, immutable"
+                },
+            ),
         ],
-        source,
+        *bytes,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn serves_compiled_bundle_and_cache_headers() {
+        let response = router()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"],
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(response.headers()["cache-control"], "no-cache");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        let html = String::from_utf8(
+            to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(html.contains("type=\"module\""));
+        assert!(html.contains("/assets/"));
+        assert!(html.contains("id=\"app\""));
+        let js = ASSETS
+            .iter()
+            .find(|(path, _, _)| path.ends_with(".js") && html.contains(*path))
+            .unwrap();
+        assert!(
+            html.contains(js.0),
+            "index must reference its compiled script"
+        );
+        for (path, mime, source) in ASSETS.iter().filter(|(path, _, _)| *path != "/") {
+            let response = router()
+                .oneshot(Request::builder().uri(*path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["content-type"], *mime);
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+            assert_eq!(
+                response.headers()["cache-control"],
+                "public, max-age=31536000, immutable"
+            );
+            assert_eq!(
+                to_bytes(response.into_body(), 32 * 1024 * 1024)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                *source
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn refuses_unknown_assets_and_traversal() {
+        for path in [
+            "/assets/missing.js",
+            "/assets/../index.html",
+            "/assets/%2e%2e/index.html",
+            "/assets/%2fetc/passwd",
+            "/src/app/App.vue",
+            "/filters",
+        ] {
+            let response = router()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+    }
 }

@@ -6,9 +6,10 @@ Read [PROGRESS.md](PROGRESS.md) for verified scope and limitations, [SPEC.md](SP
 
 ## Build and verify
 
-Linux, Rust 1.99.0, a C/C++ linker and `protoc` are required. SQLite and Swagger assets are bundled. Deployment needs no Node, Redis, PostgreSQL, containers, or Docker daemon.
+Linux, Rust 1.99.0, Bun 1.4.3, Node 22.18+, a C/C++ linker and `protoc` are required to build. CI pins Node22.23.3 for the frontend tooling. SQLite and Swagger assets are bundled. Vue assets are embedded into the Core executable; deployment needs no Bun, Node, frontend directory, Redis, PostgreSQL, containers, or Docker daemon.
 
 ```sh
+(cd frontend && bun install --frozen-lockfile && bun run typecheck && bun run test && bun run build)
 cargo build --locked --workspace
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -20,9 +21,11 @@ python3 tests/e2e/relay.py
 python3 tests/e2e/http_filters.py
 python3 tests/e2e/operations.py
 python3 tests/e2e/diagnostics.py
-python3 tests/e2e/browser.py
+HYDRA_VERIFY_EMBEDDED=1 python3 tests/e2e/browser.py
 cargo build --release --locked --workspace
 ```
+
+Build the frontend before every Cargo build after changing frontend source, configuration, package manifest or lockfile. Cargo rejects missing or older bundles. See [docs/vue-frontend.md](docs/vue-frontend.md) for the Vue layout and development workflow.
 
 The Rust checker-adapter tests need OpenSSL and owned loopback sockets. The browser test also needs Chromium. Network integration tests bind local ephemeral ports. Kernel sandbox integration has additional prerequisites in [docs/sandbox-integration.md](docs/sandbox-integration.md); an ignored kernel test is not evidence that isolation passed.
 

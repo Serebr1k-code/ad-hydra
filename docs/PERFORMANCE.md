@@ -86,3 +86,20 @@ Measured 2026-10-16 on the same host, with the final optimized binaries, 30secon
 Successful requests by transport: TCP139649, UDP77415, parsed HTTP3966. Both RSS targets passed. No payload errors or measured telemetry/indexing losses occurred in this particular release workload; this does not override the development run's observed losses or make delivery lossless. RSS increased 0.86MiB between the compared windows. Thirty seconds is insufficient to establish long-term memory stability, maximum throughput or production behavior. These are constrained-host measurements, not results from a physically2GiB machine.
 
 Full per-second samples, per-thread counters and before/after statuses: [release JSON](benchmarks/loopback-release-2026-10-16.json). No sandbox workers or external destinations were used.
+
+## Vue-containing Core release
+
+After the Vue migration, the rebuilt binaries passed the same owned-loopback workload for15seconds/16threads under verified2GiB/two-CPU quota and `[0,1]` affinity. This remains a constrained scope on the larger host described above.
+
+| Metric | Result |
+| --- | ---: |
+| Combined idle RSS | 24.36MiB |
+| Peak combined RSS | 28.06MiB |
+| Compared RSS window growth | +0.38MiB |
+| Mean Core CPU | 23.70% of one CPU |
+| Mean Proxy CPU | 35.97% of one CPU |
+| Verified requests / errors | 100664 / 0 |
+| Core received events / indexing losses | 4020 / 0 |
+| Proxy normal telemetry losses | 0 |
+
+Parsed HTTP storage was verified. A separate real HTTPS Chromium check fetched the Vue assets and exercised login, refresh-on-reload, service creation, all pages and logout while `frontend/dist` was absent. This benchmark measures server traffic, not browser memory or maximum throughput. Fifteen seconds cannot establish long-term stability. [Raw Vue-release samples](benchmarks/vue-console-release-2026-10-16.json).

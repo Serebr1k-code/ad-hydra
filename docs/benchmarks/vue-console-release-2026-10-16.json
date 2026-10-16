@@ -1,0 +1,371 @@
+{
+  "profile": "release",
+  "duration_seconds": 15,
+  "threads": 16,
+  "affinity": [
+    0,
+    1
+  ],
+  "cgroup_limits": {
+    "memory.max": "2147483648",
+    "cpu.max": "200000 100000"
+  },
+  "host_cpu_count": 8,
+  "host_mem_total_kib": "32652840",
+  "payload_bytes": {
+    "tcp": 4096,
+    "udp": 1024,
+    "http": 2
+  },
+  "samples": [
+    {
+      "second": 1,
+      "core": {
+        "rss_bytes": 17793024,
+        "cpu_percent_one_core": 26.424973371493465
+      },
+      "proxy": {
+        "rss_bytes": 9682944,
+        "cpu_percent_one_core": 37.60476979789454
+      }
+    },
+    {
+      "second": 2,
+      "core": {
+        "rss_bytes": 18182144,
+        "cpu_percent_one_core": 22.00309106016126
+      },
+      "proxy": {
+        "rss_bytes": 9682944,
+        "cpu_percent_one_core": 36.005058098445694
+      }
+    },
+    {
+      "second": 3,
+      "core": {
+        "rss_bytes": 18620416,
+        "cpu_percent_one_core": 24.006471280764284
+      },
+      "proxy": {
+        "rss_bytes": 9691136,
+        "cpu_percent_one_core": 36.009706921146424
+      }
+    },
+    {
+      "second": 4,
+      "core": {
+        "rss_bytes": 18984960,
+        "cpu_percent_one_core": 22.991753754688766
+      },
+      "proxy": {
+        "rss_bytes": 9723904,
+        "cpu_percent_one_core": 34.98745136583072
+      }
+    },
+    {
+      "second": 5,
+      "core": {
+        "rss_bytes": 19439616,
+        "cpu_percent_one_core": 23.99546536094949
+      },
+      "proxy": {
+        "rss_bytes": 9723904,
+        "cpu_percent_one_core": 36.993009098130464
+      }
+    },
+    {
+      "second": 6,
+      "core": {
+        "rss_bytes": 19611648,
+        "cpu_percent_one_core": 25.008775253746357
+      },
+      "proxy": {
+        "rss_bytes": 9764864,
+        "cpu_percent_one_core": 35.0122853552449
+      }
+    },
+    {
+      "second": 7,
+      "core": {
+        "rss_bytes": 19615744,
+        "cpu_percent_one_core": 24.00479390143339
+      },
+      "proxy": {
+        "rss_bytes": 9793536,
+        "cpu_percent_one_core": 36.00719085215009
+      }
+    },
+    {
+      "second": 8,
+      "core": {
+        "rss_bytes": 19615744,
+        "cpu_percent_one_core": 21.99887770551913
+      },
+      "proxy": {
+        "rss_bytes": 9682944,
+        "cpu_percent_one_core": 34.998214531507706
+      }
+    },
+    {
+      "second": 9,
+      "core": {
+        "rss_bytes": 19615744,
+        "cpu_percent_one_core": 24.00116969641185
+      },
+      "proxy": {
+        "rss_bytes": 9682944,
+        "cpu_percent_one_core": 37.00180328196827
+      }
+    },
+    {
+      "second": 10,
+      "core": {
+        "rss_bytes": 19615744,
+        "cpu_percent_one_core": 23.990800103960563
+      },
+      "proxy": {
+        "rss_bytes": 9715712,
+        "cpu_percent_one_core": 35.98620015594084
+      }
+    },
+    {
+      "second": 11,
+      "core": {
+        "rss_bytes": 19619840,
+        "cpu_percent_one_core": 23.006559745747797
+      },
+      "proxy": {
+        "rss_bytes": 9752576,
+        "cpu_percent_one_core": 36.01026742812699
+      }
+    },
+    {
+      "second": 12,
+      "core": {
+        "rss_bytes": 19619840,
+        "cpu_percent_one_core": 22.99443336935075
+      },
+      "proxy": {
+        "rss_bytes": 9752576,
+        "cpu_percent_one_core": 35.99128701289683
+      }
+    },
+    {
+      "second": 13,
+      "core": {
+        "rss_bytes": 19619840,
+        "cpu_percent_one_core": 25.006189882586888
+      },
+      "proxy": {
+        "rss_bytes": 9773056,
+        "cpu_percent_one_core": 35.00866583562164
+      }
+    },
+    {
+      "second": 14,
+      "core": {
+        "rss_bytes": 19619840,
+        "cpu_percent_one_core": 21.999687516261663
+      },
+      "proxy": {
+        "rss_bytes": 9773056,
+        "cpu_percent_one_core": 36.999474459167345
+      }
+    },
+    {
+      "second": 15,
+      "core": {
+        "rss_bytes": 19619840,
+        "cpu_percent_one_core": 24.002382020537038
+      },
+      "proxy": {
+        "rss_bytes": 9805824,
+        "cpu_percent_one_core": 35.00347377994985
+      }
+    }
+  ],
+  "core_status_before": {
+    "connected": true,
+    "proxy_epoch_id": "92ab03af-54e6-43ad-ba66-ce4a6f070c5e",
+    "active_flows": 0,
+    "applied_services_revision": 1,
+    "applied_rules_revision": 1,
+    "telemetry_dropped": 0,
+    "critical_spool_bytes": 60,
+    "critical_dropped": 0,
+    "sample_dropped": 0,
+    "rejected_flows": 0,
+    "dropped_udp_datagrams": 0,
+    "events_received": 0,
+    "indexing_dropped": 0
+  },
+  "idle": {
+    "core": {
+      "rss_bytes": 16814080,
+      "cpu_percent_one_core": 0.0
+    },
+    "proxy": {
+      "rss_bytes": 8724480,
+      "cpu_percent_one_core": 0.0
+    }
+  },
+  "status_before": {
+    "connected": true,
+    "proxy_epoch_id": "92ab03af-54e6-43ad-ba66-ce4a6f070c5e",
+    "active_flows": 0,
+    "applied_services_revision": 1,
+    "applied_rules_revision": 1,
+    "telemetry_dropped": 0,
+    "critical_spool_bytes": 60,
+    "critical_dropped": 0,
+    "sample_dropped": 0,
+    "rejected_flows": 0,
+    "dropped_udp_datagrams": 0,
+    "events_received": 0,
+    "indexing_dropped": 0
+  },
+  "load": [
+    {
+      "kind": "tcp",
+      "requests": 10639,
+      "bytes_received": 43577344,
+      "errors": 0
+    },
+    {
+      "kind": "udp",
+      "requests": 7039,
+      "bytes_received": 7207936,
+      "errors": 0
+    },
+    {
+      "kind": "http",
+      "requests": 394,
+      "bytes_received": 788,
+      "errors": 0
+    },
+    {
+      "kind": "tcp",
+      "requests": 10518,
+      "bytes_received": 43081728,
+      "errors": 0
+    },
+    {
+      "kind": "udp",
+      "requests": 7060,
+      "bytes_received": 7229440,
+      "errors": 0
+    },
+    {
+      "kind": "http",
+      "requests": 389,
+      "bytes_received": 778,
+      "errors": 0
+    },
+    {
+      "kind": "tcp",
+      "requests": 10637,
+      "bytes_received": 43569152,
+      "errors": 0
+    },
+    {
+      "kind": "udp",
+      "requests": 7033,
+      "bytes_received": 7201792,
+      "errors": 0
+    },
+    {
+      "kind": "http",
+      "requests": 402,
+      "bytes_received": 804,
+      "errors": 0
+    },
+    {
+      "kind": "tcp",
+      "requests": 10490,
+      "bytes_received": 42967040,
+      "errors": 0
+    },
+    {
+      "kind": "udp",
+      "requests": 7072,
+      "bytes_received": 7241728,
+      "errors": 0
+    },
+    {
+      "kind": "http",
+      "requests": 382,
+      "bytes_received": 764,
+      "errors": 0
+    },
+    {
+      "kind": "tcp",
+      "requests": 10546,
+      "bytes_received": 43196416,
+      "errors": 0
+    },
+    {
+      "kind": "udp",
+      "requests": 7109,
+      "bytes_received": 7279616,
+      "errors": 0
+    },
+    {
+      "kind": "http",
+      "requests": 394,
+      "bytes_received": 788,
+      "errors": 0
+    },
+    {
+      "kind": "tcp",
+      "requests": 10560,
+      "bytes_received": 43253760,
+      "errors": 0
+    }
+  ],
+  "status_after": {
+    "connected": true,
+    "proxy_epoch_id": "92ab03af-54e6-43ad-ba66-ce4a6f070c5e",
+    "active_flows": 5,
+    "applied_services_revision": 1,
+    "applied_rules_revision": 1,
+    "telemetry_dropped": 0,
+    "critical_spool_bytes": 60,
+    "critical_dropped": 0,
+    "sample_dropped": 0,
+    "rejected_flows": 0,
+    "dropped_udp_datagrams": 0,
+    "events_received": 0,
+    "indexing_dropped": 0
+  },
+  "core_status_after": {
+    "connected": true,
+    "proxy_epoch_id": "92ab03af-54e6-43ad-ba66-ce4a6f070c5e",
+    "active_flows": 16,
+    "applied_services_revision": 1,
+    "applied_rules_revision": 1,
+    "telemetry_dropped": 0,
+    "critical_spool_bytes": 60,
+    "critical_dropped": 0,
+    "sample_dropped": 0,
+    "rejected_flows": 0,
+    "dropped_udp_datagrams": 0,
+    "events_received": 4020,
+    "indexing_dropped": 0
+  },
+  "summary": {
+    "idle_combined_rss_bytes": 25538560,
+    "peak_combined_rss_bytes": 29425664,
+    "after_warmup_first5_mean_rss_bytes": 28993945.6,
+    "last5_mean_rss_bytes": 29391257.6,
+    "last5_minus_first5_bytes": 397312.0,
+    "requests": 100664,
+    "errors": 0,
+    "bytes_received": 295809874,
+    "telemetry_dropped_delta": 0,
+    "core_events_received_delta": 4020,
+    "core_indexing_dropped_delta": 0,
+    "parsed_http_verified": true,
+    "load_rss_under_500_mib": true,
+    "idle_rss_under_300_mib": true
+  }
+}
