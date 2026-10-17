@@ -68,3 +68,35 @@ jobs:
         env:
           HYDRA_VERIFY_EMBEDDED: "1"
       - run: cargo build --locked --release --workspace
+      - name: Build static Linux binaries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl --toolchain 1.99.0
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+          CC_x86_64_unknown_linux_musl=musl-gcc \
+            cargo build --locked --release --target x86_64-unknown-linux-musl \
+              --manifest-path Cargo.toml -p hydra-core -p hydra-proxy
+          mkdir -p dist/linux-x86_64-musl
+          install -m 0755 target/x86_64-unknown-linux-musl/release/hydra-core \
+            dist/linux-x86_64-musl/hydra-core-linux-x86_64-musl
+          install -m 0755 target/x86_64-unknown-linux-musl/release/hydra-proxy \
+            dist/linux-x86_64-musl/hydra-proxy-linux-x86_64-musl
+          for binary in dist/linux-x86_64-musl/hydra-*-linux-x86_64-musl; do
+            if readelf -l "$binary" | grep -q 'INTERP'; then
+              echo "Expected a static binary, but found an ELF interpreter: $binary" >&2
+              exit 1
+            fi
+          done
+          printf 'commit=%s\ntarget=%s\n' "$GITHUB_SHA" "x86_64-unknown-linux-musl" \
+            > dist/linux-x86_64-musl/BUILD.txt
+          (cd dist/linux-x86_64-musl && sha256sum hydra-*-linux-x86_64-musl > SHA256SUMS)
+          tar -czf "$GITHUB_WORKSPACE/dist/hydra-linux-x86_64-musl.tar.gz" \
+            -C "$GITHUB_WORKSPACE/dist/linux-x86_64-musl" .
+      - name: Upload downloadable Linux binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: hydra-linux-x86_64-musl-${{ github.sha }}
+          path: dist/hydra-linux-x86_64-musl.tar.gz
+          if-no-files-found: error
+          retention-days: 30

@@ -5,6 +5,8 @@ Hydra is a two-process operations platform for authorized Attack/Defense CTF inf
 Read [PROGRESS.md](PROGRESS.md) for verified scope and limitations, [SPEC.md](SPEC.md) for product requirements, and [DECISIONS.md](DECISIONS.md) for implementation choices. The original handoff README is preserved in `docs/ORIGINAL_HANDOFF_README.md`.
 
 
+The `Rust verification` GitHub Actions run builds static `x86_64-unknown-linux-musl` Core and Proxy binaries after verification succeeds. Download `hydra-linux-x86_64-musl-<commit-sha>` from that run's **Artifacts** section; the archive includes SHA-256 checksums and build commit metadata.
+
 ## Build and verify
 
 Linux, Rust 1.99.0, Bun 1.4.3, Node 22.18+, a C/C++ linker and `protoc` are required to build. CI pins Node22.23.3 for the frontend tooling. SQLite and Swagger assets are bundled. Vue assets are embedded into the Core executable; deployment needs no Bun, Node, frontend directory, Redis, PostgreSQL, containers, or Docker daemon.
