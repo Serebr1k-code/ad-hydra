@@ -116,6 +116,14 @@ class Relay(unittest.TestCase):
                     'username': 'history-test', 'password': 'test-password-12345'})
                 return result['access_token']
 
+            def wait_for_proxy(token):
+                for _ in range(200):
+                    _, result = api_request('GET', '/api/v1/system/proxy', token)
+                    if result.get('connected'):
+                        return
+                    time.sleep(.05)
+                self.fail('Core HTTP became ready before its Proxy telemetry stream connected')
+
             def find_flow(token, client_port):
                 query = urllib.parse.urlencode({'service_id': 'tcp', 'limit': 50, 'newest_first': 'true'})
                 _, result = api_request('GET', '/api/v1/traffic/flows?' + query, token)
@@ -227,6 +235,7 @@ class Relay(unittest.TestCase):
                         time.sleep(.05)
                 else:
                     self.fail('Core HTTP did not become ready for login')
+                wait_for_proxy(token)
                 check_saved_history(token)
                 check_utf8_conversation(token)
                 check_tcp()
