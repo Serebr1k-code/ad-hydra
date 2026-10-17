@@ -14,7 +14,7 @@ import DataTable from '@/components/DataTable.vue'
 type Filter = FilterRecord & { updated_at: string; updated_by: string; desired_revision: number; applied_revision: number; desired_enabled: boolean; applied_enabled: boolean | null }
 type Filters = Omit<ListResponse, 'items'> & { items: Filter[] }
 const data = ref<Filters | null>(null)
-const services = ref<Array<{ id: string; name: string }>>([])
+const services = ref<Array<{ id: string; name: string; transport: string }>>([])
 const busy = ref(false)
 const editorOpen = ref(false)
 const editing = ref<Filter | undefined>()
@@ -41,7 +41,7 @@ async function load(cursor = after.value) {
   try {
     const [filters, serviceResponse] = await Promise.all([api<Filters>(`/filters?q=${encodeURIComponent(query.value)}&after=${encodeURIComponent(cursor)}`), api<ListResponse>('/services')])
     data.value = filters
-    services.value = serviceResponse.items.flatMap(item => typeof item.id === 'string' ? [{ id: item.id, name: typeof item.name === 'string' ? item.name : item.id }] : [])
+    services.value = serviceResponse.items.flatMap(item => typeof item.id === 'string' ? [{ id: item.id, name: typeof item.name === 'string' ? item.name : item.id, transport: typeof item.transport === 'string' ? item.transport : 'tcp' }] : [])
     after.value = cursor
     selected.value = []
   } catch (cause) { error.value = errorMessage(cause) }

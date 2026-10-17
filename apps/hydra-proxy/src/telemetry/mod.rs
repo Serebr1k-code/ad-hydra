@@ -109,6 +109,31 @@ impl Telemetry {
             now_ms: crate::state::now().saturating_mul(1000),
             safe_http,
         });
+        self.record_evaluation(service, flow_id, message_id, result)
+    }
+    pub fn evaluate_stream_sizes(
+        &self,
+        service: &Service,
+        flow_id: &str,
+        fields: &std::collections::BTreeMap<String, hydra_domain::FieldValue>,
+    ) -> Option<hydra_domain::Action> {
+        let rules = self.rules.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let result = rules.evaluate_stream_sizes(&hydra_domain::EvaluationContext {
+            service_id: &service.id,
+            transport: service.transport,
+            fields,
+            now_ms: crate::state::now().saturating_mul(1000),
+            safe_http: false,
+        });
+        self.record_evaluation(service, flow_id, "", result)
+    }
+    fn record_evaluation(
+        &self,
+        service: &Service,
+        flow_id: &str,
+        message_id: &str,
+        result: hydra_domain::Evaluation,
+    ) -> Option<hydra_domain::Action> {
         if result.state_exhausted {
             self.decoder_error(&service.id, flow_id, "rate_limit_state_exhausted");
         }
@@ -283,6 +308,8 @@ impl Telemetry {
             telemetry: self.clone(),
             up: AtomicU64::new(0),
             down: AtomicU64::new(0),
+            body_sizes: std::sync::Mutex::new(crate::inspection::body_size::BodySizes::default()),
+            reported_message: std::sync::atomic::AtomicBool::new(false),
             reason: "closed".into(),
             history: std::sync::Mutex::new(history),
             history_truncated: std::sync::atomic::AtomicBool::new(history_truncated),
@@ -322,6 +349,8 @@ pub struct Flow {
     telemetry: Arc<Telemetry>,
     pub up: AtomicU64,
     pub down: AtomicU64,
+    pub body_sizes: std::sync::Mutex<crate::inspection::body_size::BodySizes>,
+    pub reported_message: std::sync::atomic::AtomicBool,
     pub reason: String,
     history: std::sync::Mutex<Option<crate::history::HistoryWriter>>,
     history_truncated: std::sync::atomic::AtomicBool,
@@ -370,6 +399,25 @@ impl Flow {
 }
 impl Drop for Flow {
     fn drop(&mut self) {
+        if !self.reported_message.load(Ordering::Relaxed) {
+            let sizes = self.body_sizes.get_mut().unwrap_or_else(|e| e.into_inner());
+            for direction in [
+                hydra_protocol_sdk::Direction::ClientToServer,
+                hydra_protocol_sdk::Direction::ServerToClient,
+            ] {
+                if let Some((message, size)) = sizes.summary(
+                    direction,
+                    if self.transport == Transport::Udp {
+                        "datagram"
+                    } else {
+                        "stream"
+                    },
+                ) {
+                    self.telemetry
+                        .message(&self.service, &self.id, message, size);
+                }
+            }
+        }
         let history_truncated = self
             .history
             .get_mut()

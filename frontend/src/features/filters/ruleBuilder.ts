@@ -23,8 +23,10 @@ export const fields: Array<{ value: string; label: string; kind: FieldKind }> = 
   { value: 'http.path', label: 'HTTP path', kind: 'string' },
   { value: 'http.user_agent', label: 'HTTP user agent', kind: 'string' },
   { value: 'http.body_text', label: 'HTTP body (UTF-8)', kind: 'string' },
-  { value: 'http.body_length', label: 'HTTP body length', kind: 'number' },
-  { value: 'packet.size', label: 'Message size', kind: 'number' },
+  { value: 'body.size', label: 'Request/body size in bytes (live)', kind: 'number' },
+  { value: 'transfer.bytes', label: 'Total transferred bytes (this direction)', kind: 'number' },
+  { value: 'http.body_length', label: 'HTTP body size in bytes', kind: 'number' },
+  { value: 'packet.size', label: 'Inspected frame/read size in bytes', kind: 'number' },
   { value: 'network.src_ip', label: 'Client IP', kind: 'string' },
   { value: 'network.src_port', label: 'Client port', kind: 'number' },
   { value: 'network.dst_ip', label: 'Server IP', kind: 'string' },
@@ -44,13 +46,18 @@ export function fieldKind(field: string): FieldKind {
 }
 
 function uintValue(input: string): string {
+  if (input.length > 128) throw new Error('Size is too long')
   const match = /^\s*(\d+(?:\.\d+)?)\s*(b|kb|kib|mb|mib|gb|gib)?\s*$/i.exec(input)
   if (!match) throw new Error('Enter a number, optionally with B, KB, KiB, MB, MiB, GB, or GiB')
   const unit = (match[2] ?? '').toLowerCase()
   const multiplier = unit === 'kb' ? 1000 : unit === 'kib' ? 1024 : unit === 'mb' ? 1_000_000 : unit === 'mib' ? 1_048_576 : unit === 'gb' ? 1_000_000_000 : unit === 'gib' ? 1_073_741_824 : 1
-  const result = Number(match[1]) * multiplier
-  if (!Number.isSafeInteger(result) || result < 0) throw new Error('Size must be a non-negative safe integer')
-  return String(result)
+  const [whole = '0', fraction = ''] = (match[1] ?? '0').split('.')
+  const scale = 10n ** BigInt(fraction.length)
+  const scaled = BigInt(whole + fraction) * BigInt(multiplier)
+  if (scaled % scale !== 0n) throw new Error('Size must resolve to a whole number of bytes')
+  const result = scaled / scale
+  if (result > 18446744073709551615n) throw new Error('Size exceeds the 64-bit byte counter')
+  return result.toString()
 }
 
 function conditionExpression(node: Condition): Expression {

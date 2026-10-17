@@ -34,6 +34,7 @@ struct CompiledRule {
     rule: Rule,
     transport: Transport,
     expression: CompiledExpression,
+    streaming_size: bool,
 }
 #[derive(Debug)]
 pub struct CompiledSnapshot {
@@ -106,10 +107,12 @@ impl CompiledSnapshot {
                 _ => {}
             }
             let expression = CompiledExpression::compile(&rule.expression, 1, &mut 0)?;
+            let streaming_size = references_size(&rule.expression);
             rules.push(CompiledRule {
                 rule,
                 transport: service.transport,
                 expression,
+                streaming_size,
             });
         }
         rules.sort_by(|a, b| {
@@ -125,6 +128,13 @@ impl CompiledSnapshot {
         })
     }
     pub fn evaluate(&self, context: &EvaluationContext<'_>) -> Evaluation {
+        self.evaluate_inner(context, false)
+    }
+    /// Rehearse only byte-limit rules before forwarding a transport read.
+    pub fn evaluate_stream_sizes(&self, context: &EvaluationContext<'_>) -> Evaluation {
+        self.evaluate_inner(context, true)
+    }
+    fn evaluate_inner(&self, context: &EvaluationContext<'_>, size_only: bool) -> Evaluation {
         let mut result = Evaluation::default();
         for compiled in &self.rules {
             let r = &compiled.rule;
@@ -133,6 +143,17 @@ impl CompiledSnapshot {
                 || compiled.transport != context.transport
                 || r.expires_at_ms.is_some_and(|t| context.now_ms >= t)
             {
+                continue;
+            }
+            if size_only && !compiled.streaming_size {
+                // An earlier explicit allow retains precedence over size limits.
+                if r.mode == Mode::Enforce
+                    && r.action == Action::Allow
+                    && compiled.expression.matches(context.fields)
+                {
+                    result.action = Some(Action::Allow);
+                    break;
+                }
                 continue;
             }
             let enforcement = match &r.action {
@@ -194,6 +215,16 @@ impl CompiledSnapshot {
             }
         }
         result
+    }
+}
+fn references_size(expression: &Expression) -> bool {
+    match expression {
+        Expression::All { all } | Expression::Any { any: all } => all.iter().any(references_size),
+        Expression::Not { not } => references_size(not),
+        Expression::Predicate { field, .. } => matches!(
+            field.as_str(),
+            "body.size" | "transfer.bytes" | "http.body_length"
+        ),
     }
 }
 /// Backend abstraction deliberately independent of sockets, storage and control transport.

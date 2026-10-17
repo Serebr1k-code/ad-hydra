@@ -15,6 +15,34 @@ IP and port, transport and direction. Protocol decoder fields are available by
 their `protocol.*` path. Non-UTF-8 or oversized request bodies are omitted from
 the text field rather than silently truncated before matching.
 
+For live upload limits select **Request/body size in bytes (live)** (`body.size`),
+**is greater than**, a byte limit such as `524288` or `512KiB`, and **Block
+transfer**. Start in shadow mode, test a saved message, then enable enforcement.
+The Proxy checks this rule before forwarding every read. Crossing a TCP limit
+closes the connection and discards the entire offending read; previously
+forwarded bytes cannot be recalled. UDP drops the offending datagram.
+
+HTTP/1.x request bodies are counted per request, excluding headers and chunked
+transfer framing. The independent streaming counter handles binary data and
+large uploads without retaining the body, including after the bounded content
+decoder falls back to passthrough. Other TCP profiles (raw, UTF-8, framing and
+WASM) count all received bytes per direction, independently of decoder output;
+unknown protocols have no inferred request boundaries. UDP `body.size` is the
+current datagram length. `transfer.bytes` is the cumulative received byte count
+per direction for either transport, including HTTP headers. Both counters use
+saturating unsigned 64-bit integers. Text replacement characters and text
+preview limits do not affect byte counts. Malformed HTTP framing falls back to
+the opaque stream count instead of trusting an ambiguous body length.
+
+Parsed messages retain `body.size`, `body.size_scope`, `transfer.bytes` and
+`direction`, so saved-message tests use the same byte quantities. Flows with no
+decoded messages emit at most one metadata-only `transfer/byte_summary` per
+nonempty direction at closure, allowing raw byte-limit rules to be rehearsed.
+No per-read raw byte stream or per-packet SQLite rows are added. HTTP response
+status blocking still requires a completely buffered request; use connection
+blocking for an upload that must stop before it finishes. Native and WASM
+decoders cannot delay or disable the host's live byte counter.
+
 `hydra-domain` owns pure rule types and typed field values (`rules.rs`).
 `hydra-filter-engine` reexports these types and owns compilation, evaluation and
 `NetworkFilterBackend` / `UserspaceBackend`. It has no application, transport,
@@ -67,7 +95,8 @@ Hard caps are 256 rules/snapshot, 256 nodes/expression, depth 16,
 compiled regex/DFA caches per regex. Snapshot-wide allocation-free preflight limits
 total AST nodes to 512, regex predicates to 16, and expected data to 256 KiB. Field paths are at most 256 bytes; empty
 segments are invalid. Built-in field registry accepts `http.method`, `http.path`,
-`http.user_agent`, `network.src_ip`, `network.src_port`, `network.dst_ip`,
+`http.user_agent`, `http.body_text`, `http.body_length`, `body.size`,
+`body.size_scope`, `transfer.bytes`, `packet.size`, `network.src_ip`, `network.src_port`, `network.dst_ip`,
 `network.dst_port`, `transport.kind`, `direction` and extensible `protocol.*`
 paths. Unknown HTTP/metadata paths reject the snapshot. Rule IDs are unique and at most 128 bytes. Regex input is
 rejected as unknown rather than truncated into a potentially false match.

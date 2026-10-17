@@ -45,4 +45,11 @@ describe('visual filter expression builder', () => {
     expect(() => toExpression({ id: 'root', kind: 'group', join: 'all', children: [] })).toThrow()
     expect(() => toExpression({ id: 'size', kind: 'condition', field: 'packet.size', op: 'gt', value: '5widgets' })).toThrow()
   })
+  test('live byte counts preserve full-width unsigned integers and exact unit conversion', () => {
+    const condition = { id: 'limit', kind: 'condition' as const, field: 'body.size', op: 'gt', value: '18446744073709551615' }
+    expect(toExpression(condition)).toEqual({ field: 'body.size', op: 'gt', value: { type: 'uint', value: '18446744073709551615' } })
+    expect(toExpression({ ...condition, value: '0.5KiB' })).toEqual({ field: 'body.size', op: 'gt', value: { type: 'uint', value: '512' } })
+    expect(() => toExpression({ ...condition, value: '18446744073709551616' })).toThrow()
+    expect(() => toExpression({ ...condition, value: '0.1B' })).toThrow()
+  })
 })

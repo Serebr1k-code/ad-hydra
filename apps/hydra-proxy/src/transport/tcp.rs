@@ -43,7 +43,8 @@ pub async fn listen(
                 let limits=limits.clone();let shutdown=shutdown.clone();let telemetry=telemetry.clone();
                 tasks.spawn(async move{
                     let mut flow=flow;
-                    let session=telemetry.protocols.read().unwrap_or_else(|e|e.into_inner()).as_ref().and_then(|p|match p.session(&config.id,&config.protocol_id){Ok(s)=>Some(s),Err(_)=>{telemetry.decoder_error(&config.id,&flow.id,"decoder_initialization_failed");None}});
+                    let mut session=telemetry.protocols.read().unwrap_or_else(|e|e.into_inner()).as_ref().and_then(|p|match p.session(&config.id,&config.protocol_id){Ok(s)=>Some(s),Err(_)=>{telemetry.decoder_error(&config.id,&flow.id,"decoder_initialization_failed");None}});
+                    flow.body_sizes.lock().unwrap_or_else(|e|e.into_inner()).set_http(session.as_mut().is_some_and(|s|s.http_mut().is_some()));
                     let decoder=Arc::new(Mutex::new(session));
                     let work=async{
                         if matches!(telemetry.evaluate(&config,&flow.id,&network_fields(&config,addr,"client_to_server"),false,""),Some(Action::DropConnection)){return Err(std::io::ErrorKind::PermissionDenied.into())}
@@ -134,6 +135,9 @@ async fn client_to_server(
         let inspected = {
             let mut decoder = c.decoder.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(http) = decoder.as_mut().and_then(|d| d.http_mut()) {
+                if inspect_transfer(c, Direction::ClientToServer, &buf[..n]) {
+                    return Err(std::io::ErrorKind::PermissionDenied.into());
+                }
                 let batch = http.feed_available(Direction::ClientToServer, &buf[..n]);
                 if http.has_pending() {
                     if pending_since.is_none() || !batch.requests.is_empty() {
@@ -252,10 +256,19 @@ async fn server_to_client(
 }
 fn inspect_message(
     c: &Context<'_>,
-    message: hydra_protocol_sdk::ParsedMessage,
+    mut message: hydra_protocol_sdk::ParsedMessage,
     size: usize,
     safe_http: bool,
 ) -> Option<Action> {
+    c.flow
+        .body_sizes
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .annotate(&mut message, "stream");
+    message.fields.insert(
+        "packet.size".into(),
+        hydra_protocol_sdk::Value::Unsigned(size as u64),
+    );
     let direction = if message.direction == Direction::ClientToServer {
         "client_to_server"
     } else {
@@ -273,10 +286,14 @@ fn inspect_message(
             .map(|(k, v)| (k.clone(), domain_value(v))),
     );
     let message_id = c.telemetry.message(&c.config.id, &c.flow.id, message, size);
+    c.flow.reported_message.store(true, Ordering::Relaxed);
     c.telemetry
         .evaluate(c.config, &c.flow.id, &fields, safe_http, &message_id)
 }
 fn inspect_raw(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
+    if inspect_transfer(c, direction, bytes) {
+        return true;
+    }
     let result = {
         let mut decoder = c.decoder.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(d) = decoder.as_mut() {
@@ -366,4 +383,24 @@ fn inspect_raw(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
             .evaluate(c.config, &c.flow.id, &fields, false, ""),
         Some(Action::DropConnection)
     )
+}
+fn inspect_transfer(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
+    let mut sizes = c.flow.body_sizes.lock().unwrap_or_else(|e| e.into_inner());
+    sizes.feed(direction, bytes, |size_fields| {
+        let mut fields = network_fields(
+            c.config,
+            c.client,
+            if direction == Direction::ClientToServer {
+                "client_to_server"
+            } else {
+                "server_to_client"
+            },
+        );
+        fields.extend(size_fields.clone());
+        matches!(
+            c.telemetry
+                .evaluate_stream_sizes(c.config, &c.flow.id, &fields),
+            Some(Action::DropConnection)
+        )
+    })
 }

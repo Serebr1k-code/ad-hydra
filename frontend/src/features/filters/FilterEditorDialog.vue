@@ -17,7 +17,7 @@ export interface FilterRecord extends Omit<FilterInput, 'expected_revision'> {
   created_by: string
   hit_count: number
 }
-interface ServiceOption { id: string; name: string }
+interface ServiceOption { id: string; name: string; transport: string }
 const props = defineProps<{ open: boolean; busy: boolean; error: string; services: ServiceOption[]; filter?: FilterRecord }>()
 const emit = defineEmits<{ 'update:open': [value: boolean]; save: [value: Omit<FilterInput, 'expected_revision'>] }>()
 const isOpen = computed({ get: () => props.open, set: value => emit('update:open', value) })
@@ -31,7 +31,7 @@ const form = reactive({
 watch(() => [props.open, props.filter, props.services] as const, ([open]) => {
   if (!open) return
   const filter = props.filter
-  const action = filter?.action ?? { type: 'block', http_status: 403 }
+  const action = filter?.action ?? { type: props.services[0]?.transport === 'udp' ? 'drop_datagram' : 'drop_connection' }
   const supportedActions = ['block', 'alert', 'log', 'allow', 'drop_connection', 'drop_datagram', 'tag']
   const actionType = typeof action.type === 'string' && supportedActions.includes(action.type) ? action.type : filter ? '__preserve__' : 'block'
   preservedAction.value = actionType === '__preserve__' ? structuredClone(action) : null
@@ -66,6 +66,11 @@ function save() {
       : { type: form.actionType }
   emit('save', buildPayload({ expression, action }))
 }
+watch(() => form.service_id, id => {
+  if (!props.filter && ['drop_connection', 'drop_datagram'].includes(form.actionType)) {
+    form.actionType = props.services.find(service => service.id === id)?.transport === 'udp' ? 'drop_datagram' : 'drop_connection'
+  }
+})
 function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'expected_revision'> {
   const expires = form.expires ? new Date(form.expires).getTime() : null
   return {
@@ -97,10 +102,11 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
         <section class="space-y-2" :aria-disabled="!expressionEditable">
           <div><h3 class="font-medium">Match conditions</h3><p class="text-sm text-muted-foreground">Groups add parentheses. Choose whether all or any conditions inside a group must match.</p></div>
           <RuleGroupEditor :group="form.rules" />
+          <p class="text-xs text-muted-foreground">Live byte limits count bytes as they arrive. HTTP counts body bytes per request; other TCP profiles count each stream direction, and UDP counts each datagram. Use Block transfer to stop the upload immediately.</p>
         </section>
 
         <div class="grid gap-4 md:grid-cols-2">
-          <div class="space-y-2"><Label>Action</Label><Select v-model="form.actionType"><SelectTrigger aria-label="Filter action"><SelectValue /></SelectTrigger><SelectContent><SelectItem v-if="form.actionType === '__preserve__'" value="__preserve__">Keep existing advanced action</SelectItem><SelectItem value="block">Block HTTP request</SelectItem><SelectItem value="alert">Alert</SelectItem><SelectItem value="log">Log</SelectItem><SelectItem value="allow">Allow</SelectItem><SelectItem value="drop_connection">Drop TCP connection</SelectItem><SelectItem value="drop_datagram">Drop UDP datagram</SelectItem><SelectItem value="tag">Tag</SelectItem></SelectContent></Select></div>
+          <div class="space-y-2"><Label>Action</Label><Select v-model="form.actionType"><SelectTrigger aria-label="Filter action"><SelectValue /></SelectTrigger><SelectContent><SelectItem v-if="form.actionType === '__preserve__'" value="__preserve__">Keep existing advanced action</SelectItem><SelectItem value="block">Block HTTP request</SelectItem><SelectItem value="alert">Alert</SelectItem><SelectItem value="log">Log</SelectItem><SelectItem value="allow">Allow</SelectItem><SelectItem value="drop_connection">Block transfer (close TCP connection)</SelectItem><SelectItem value="drop_datagram">Block transfer (drop UDP datagram)</SelectItem><SelectItem value="tag">Tag</SelectItem></SelectContent></Select></div>
           <div v-if="form.actionType === 'block'" class="space-y-2"><Label for="filter-status">HTTP block status</Label><Input id="filter-status" v-model.number="form.httpStatus" type="number" min="400" max="599" /></div>
           <div v-else-if="form.actionType === 'tag'" class="space-y-2"><Label for="filter-tag">Tag</Label><Input id="filter-tag" v-model="form.tag" required maxlength="128" /></div>
           <div class="space-y-2"><Label for="filter-expires">Expires (optional)</Label><Input id="filter-expires" v-model="form.expires" type="datetime-local" /></div>

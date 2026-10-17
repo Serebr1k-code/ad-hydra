@@ -16,6 +16,9 @@ use std::{
 };
 use tokio::{net::UdpSocket, sync::watch, task::JoinSet};
 use tokio_util::sync::CancellationToken;
+#[cfg(test)]
+#[path = "udp_tests.rs"]
+mod tests;
 struct Session {
     socket: Arc<UdpSocket>,
     context: Arc<Context>,
@@ -41,6 +44,30 @@ impl Context {
             .store(self.start.elapsed().as_millis() as u64, Ordering::Relaxed);
     }
     fn inspect(&self, direction: Direction, bytes: &[u8]) -> bool {
+        let size_fields = self
+            .flow
+            .body_sizes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .datagram(direction, bytes.len());
+        let mut live_fields = network_fields(
+            &self.config,
+            self.client,
+            if direction == Direction::ClientToServer {
+                "client_to_server"
+            } else {
+                "server_to_client"
+            },
+        );
+        live_fields.extend(size_fields);
+        if matches!(
+            self.telemetry
+                .evaluate_stream_sizes(&self.config, &self.flow.id, &live_fields),
+            Some(Action::DropDatagram)
+        ) {
+            self.telemetry.udp_dropped.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
         self.flow.scan(direction, bytes);
         let mut decoder = self.decoder.lock().unwrap_or_else(|e| e.into_inner());
         let result = match decoder.as_mut() {
@@ -58,7 +85,12 @@ impl Context {
         drop(decoder);
         let mut evaluated = false;
         if let Some(Ok(messages)) = result {
-            for message in messages {
+            for mut message in messages {
+                self.flow
+                    .body_sizes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .annotate(&mut message, "datagram");
                 evaluated = true;
                 let mut fields = network_fields(
                     &self.config,
@@ -82,6 +114,7 @@ impl Context {
                 let message_id =
                     self.telemetry
                         .message(&self.config.id, &self.flow.id, message, bytes.len());
+                self.flow.reported_message.store(true, Ordering::Relaxed);
                 let action = self.telemetry.evaluate(
                     &self.config,
                     &self.flow.id,

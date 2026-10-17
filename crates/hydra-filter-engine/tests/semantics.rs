@@ -136,6 +136,34 @@ fn http_body_and_packet_size_fields_are_available_to_visual_rules() {
         .evaluate(&context(&fields));
     assert_eq!(result.hits.len(), 2);
 }
+
+#[test]
+fn streaming_size_evaluation_does_not_run_unrelated_rules_and_respects_allow_priority() {
+    let mut limit = rule("limit", Action::DropConnection);
+    limit.expression = Expression::Predicate {
+        field: "body.size".into(),
+        op: Comparison::Gt,
+        value: FieldValue::Uint(512),
+    };
+    let normal = rule("unrelated", Action::Alert);
+    let fields = BTreeMap::from([
+        ("body.size".into(), FieldValue::Uint(513)),
+        ("protocol.x".into(), FieldValue::String("yes".into())),
+    ]);
+    let compiled = compile(vec![normal, limit.clone()]).unwrap();
+    let result = compiled.evaluate_stream_sizes(&context(&fields));
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.action, Some(Action::DropConnection));
+    let mut allow = rule("allow", Action::Allow);
+    allow.priority = 20;
+    assert_eq!(
+        compile(vec![allow, limit])
+            .unwrap()
+            .evaluate_stream_sizes(&context(&fields))
+            .action,
+        Some(Action::Allow)
+    );
+}
 #[test]
 fn typed_comparisons_and_membership() {
     for (op, expected) in [
