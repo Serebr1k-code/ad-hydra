@@ -212,3 +212,16 @@ run/target/digest observations classify first-committed new flags versus already
 captured values; repeats in one process do not inflate counts. Legacy counts are
 partial and labeled. Observations contain no extra plaintext, cap at1million,
 and cascade with run deletion. Migrations19–21 preserve existing configuration.
+
+### Farm run table and modal logs
+
+The user requested run time, actual teams, exploit/service names, duplicate/new
+counts, state and actions in that order, with Logs opening a modal. Show the
+start timestamp (creation time while queued) plus duration from start to finish;
+running durations advance without counting queue time. Resolve catalog names in
+Core so run history is independent of the currently loaded exploit editor page.
+Team IPs come from the persisted run target snapshot, retaining the address used
+even if its catalog IP changes; legacy targets/catalog removals fall back to
+available names or IDs. Existing run list/detail responses gain optional display
+metadata without a migration or removed fields. The shadcn dialog keeps existing
+live paged logs/counters and restores keyboard focus to the invoking button.

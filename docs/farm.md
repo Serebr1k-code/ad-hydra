@@ -130,3 +130,16 @@ history and sets history_lost. Completion waits for pipe drain/finalization even
 when a cancellation status has already been committed. Reads are authenticated
 and audited. Legacy truncated logs remain readable; their lost bytes cannot be
 recovered.
+
+## Runs table and log modal
+
+Runs display **Run time**, **Team**, **Exploit**, **Service**, **Duplicate flags**,
+**New flags**, **State** and **Actions**. Run time includes the start timestamp
+(creation timestamp for queued runs) and elapsed execution duration, excluding
+queue wait. Team cells list names and the IPs captured for that run; multiple
+selected teams remain visible. Catalog names are resolved by Core even when the
+exploit is on another editor page. Removed catalog entries fall back to IDs.
+
+**Logs** opens a modal with run details, live stdout/stderr, paged retained output
+and per-target flag counts. Close with Close logs, Escape or the close icon; focus
+returns to the invoking button. Polling stops for log panels when the modal closes.

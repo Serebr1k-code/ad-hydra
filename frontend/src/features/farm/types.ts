@@ -1,6 +1,8 @@
 export interface FarmPage<T> { items: T[]; next_cursor: string | null }
 export interface FarmRun {
   id: string; exploit_id: string; status: string; created_at: number; initiated_by: string; version: string
+  exploit_name?:string; service_name?:string; service_id?:string|null; team_ids?:string[]; target_ids?:string[]
+  teams?:{id:string;name:string;host:string|null}[]
   new_flags?:number; existing_flags?:number; flag_counts_complete?:boolean
   started_at?: number | null; finished_at?: number | null; exit_code?: number | null
 }

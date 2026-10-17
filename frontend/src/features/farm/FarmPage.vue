@@ -14,6 +14,7 @@ import FarmCatalog from './FarmCatalog.vue'
 import ExploitForm from './ExploitForm.vue'
 import FarmRuns from './FarmRuns.vue'
 import FarmRunDetailView from './FarmRunDetail.vue'
+import {Dialog,DialogContent,DialogHeader,DialogTitle,DialogDescription} from '@/components/ui/dialog'
 const empty = <T,>(): FarmPage<T> => ({ items: [], next_cursor: null })
 const services = ref<FarmService[]>([]), teams = ref<FarmTeam[]>([])
 const exploits = ref(empty<Exploit>()), runs = ref(empty<FarmRun>())
@@ -24,6 +25,7 @@ const detail = ref<FarmRunDetail | null>(null), detailLoading = ref(false), requ
 const versionDetail = ref(''), versionTitle = ref('')
 const keys = new Map<string, string>()
 let detailRefreshUntil = 0
+let logTrigger:HTMLElement|null=null
 let mounted = true, polling = false, timer: ReturnType<typeof setInterval> | undefined
 const exploitColumns = [{ key: 'name', label: 'Exploit' }, { key: 'service', label: 'Service' }, { key: 'enabled', label: 'Enabled' }, { key: 'schedule', label: 'Schedule' }, { key: 'actions', label: 'Actions' }]
 const query = (kind: 'exploits' | 'runs') => cursors[kind] ? `?after=${encodeURIComponent(cursors[kind])}` : ''
@@ -67,8 +69,9 @@ async function readDetail(id: string) {
     }
   } finally { detailLoading.value = false }
 }
-function showLogs(run: FarmRun) { detailRefreshUntil = Date.now() + 10000; requestedDetail.value = run.id; void action(() => readDetail(run.id), false) }
+function showLogs(run: FarmRun) { logTrigger=document.activeElement instanceof HTMLElement?document.activeElement:null;detail.value=null;detailRefreshUntil = Date.now() + 10000; requestedDetail.value = run.id; void action(() => readDetail(run.id), false) }
 function closeLogs() { requestedDetail.value = ''; detail.value = null }
+function restoreLogFocus(event:Event){if(logTrigger?.isConnected){event.preventDefault();logTrigger.focus()}}
 function showVersions(e: Exploit) {
   void action(async () => { const value = await api<unknown>(`/farm/exploits/${encodeURIComponent(e.id)}/versions`); versionDetail.value = JSON.stringify(value, null, 2) ?? ''; versionTitle.value = `Versions: ${e.name}` }, false)
 }
@@ -121,7 +124,15 @@ onUnmounted(() => { mounted = false; if (timer) clearInterval(timer) })
     <FarmRuns :runs="runs.items" :busy="busy" @refresh="action(load, false)" @logs="showLogs" @cancel="cancel" @retry="retry" />
     <p class="text-sm text-muted-foreground">Runs refresh every 2 seconds, newest first. Gzip compressed logs are retained for 7 days, with at most 1,000 completed runs, paged output with no 1 MiB capture cap, and a total compressed disk budget of 64 MiB. Older output rotates when the shared budget is full. New/existing counts are distinct flag values per target process; * marks partial historical counts.</p>
     <div class="flex flex-wrap gap-2"><Button v-if="cursors.runs" variant="outline" :disabled="busy" @click="first('runs')">Newest runs</Button><Button v-if="runs.items.length === 100 && runs.next_cursor" variant="outline" :disabled="busy" @click="next('runs')">Older runs</Button><Button variant="outline" :disabled="busy" @click="cleanup">Apply log retention policy</Button></div>
-    <FarmRunDetailView v-if="detail" :run="detail" :loading="detailLoading" @close="closeLogs" />
+    <Dialog :open="Boolean(requestedDetail)" @update:open="open=>{if(!open)closeLogs()}">
+      <DialogContent class="max-h-[90vh] w-[calc(100%_-_2rem)] max-w-5xl overflow-y-auto" @close-auto-focus="restoreLogFocus">
+        <DialogHeader><DialogTitle>Run logs</DialogTitle><DialogDescription>Live stdout and stderr, run details, and flag counts.</DialogDescription></DialogHeader>
+        <p v-if="detailLoading&&!detail" role="status">Loading run logs…</p>
+        <p v-if="error" role="alert" class="text-destructive">{{error}}</p>
+        <FarmRunDetailView v-if="detail" :run="detail" :loading="detailLoading" />
+        <Button variant="outline" @click="closeLogs">Close logs</Button>
+      </DialogContent>
+    </Dialog>
     <section v-if="versionDetail" class="space-y-2"><div class="flex items-center justify-between"><h2 class="text-lg font-semibold">{{ versionTitle }}</h2><Button variant="outline" @click="versionDetail = ''">Close versions</Button></div><pre class="max-h-96 overflow-auto rounded border p-3 text-sm">{{ versionDetail }}</pre></section>
   </div>
 </template>

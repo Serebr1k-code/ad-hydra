@@ -364,3 +364,43 @@ async fn rotation_enforces_compressed_byte_budget_before_count_limit() {
     drop(f);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn run_labels_resolve_names_and_keep_snapshot_ip_after_team_edit() {
+    let (farm, dir) = super::tests::setup().await;
+    let exploit = catalog(&farm).await;
+    let id = farm
+        .enqueue_for_team(
+            Actor::user("owner".into()),
+            exploit.id.clone(),
+            1,
+            "labels".into(),
+            Some("two".into()),
+        )
+        .await
+        .unwrap();
+    let expected_name = exploit.name;
+    farm.auth
+        .db
+        .run(move |db| {
+            let tx = db.transaction()?;
+            tx.execute(
+                "UPDATE farm_teams SET name='Renamed team',host='127.0.0.3' WHERE id='two'",
+                [],
+            )?;
+            let mut value = serde_json::json!({"id":id,"exploit_id":exploit.id,"service_id":"web"});
+            super::run_labels::attach(&tx, &mut value)?;
+            assert_eq!(value["exploit_name"], expected_name);
+            assert_eq!(value["service_name"], "Web");
+            assert_eq!(value["teams"][0]["name"], "Renamed team");
+            assert_eq!(value["teams"][0]["host"], "127.0.0.2");
+            tx.execute("DELETE FROM farm_exploits WHERE id=?1", [&exploit.id])?;
+            super::run_labels::attach(&tx, &mut value)?;
+            assert_eq!(value["exploit_name"], exploit.id);
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}

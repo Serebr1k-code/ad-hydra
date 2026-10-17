@@ -234,7 +234,13 @@ class Browser(unittest.TestCase):
                 # Seed synthetic diagnostic history only; no worker/checker execution.
                 output=b'A'*70000+b'OUTPUT_AFTER_64K FLAG002000'
                 with sqlite3.connect(tmp/'db') as database:
+                    now=int(time.time())
+                    database.execute("INSERT INTO farm_services(id,name,port,created_at,updated_at,author_id) VALUES('browser-service','Readable service',12345,?,?,'alice')",[now,now])
+                    database.execute("INSERT INTO farm_teams(id,name,host,created_at,updated_at,author_id) VALUES('local','Readable team','127.0.0.10',?,?,'alice')",[now,now])
+                    database.execute("INSERT INTO farm_exploits(id,name,version,manifest,target_ids,initiated_by,created_at,updated_at) VALUES('browser-fixture','Readable exploit','v1','{}','[]','alice',?,?)",[now,now])
                     database.execute("INSERT INTO farm_runs(id,exploit_id,version,manifest,target_ids,initiated_by,status,created_at,logs_complete,stdout_bytes) VALUES('browser-run','browser-fixture','v1','{}','[\"local\"]','alice','succeeded',?,1,?)",[int(time.time()),len(output)])
+                    snapshot=[{'id':'local','name':'Readable team / Readable service','host':'127.0.0.9','port':12345,'transport':'tcp','enabled':True,'revision':1}]
+                    database.execute("UPDATE farm_runs SET service_id='browser-service',team_ids='[\"local\"]',target_snapshot=?,started_at=?,finished_at=? WHERE id='browser-run'",[json.dumps(snapshot),now-25,now-2])
                     for position in range(0,len(output),32768):
                         chunk=output[position:position+32768]
                         database.execute("INSERT INTO farm_log_chunks(run_id,stream,offset,raw_bytes,gzip) VALUES('browser-run','stdout',?,?,?)",[position,len(chunk),gzip.compress(chunk)])
@@ -306,14 +312,21 @@ class Browser(unittest.TestCase):
                         wait("!document.querySelector('#traffic-sessions [data-blocked=\"true\"]')")
                         wait("Boolean(document.querySelector('#traffic-sessions [data-has-flag=\"true\"]'))")
                     if section == 'Farm':
-                        wait("document.querySelector('#page').innerText.includes('browser-run')")
-                        cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Logs').click()")
+                        wait("document.querySelector('[data-farm-runs]')?.innerText.includes('Readable exploit')")
+                        self.assertEqual(cdp.evaluate("[...document.querySelectorAll('[data-farm-runs] th')].map(e=>e.textContent)"),['Run time','Team','Exploit','Service','Duplicate flags','New flags','State','Actions'])
+                        for text in ['Readable team','127.0.0.9','Readable service','23s']:
+                            self.assertIn(text,cdp.evaluate("document.querySelector('[data-farm-runs]').innerText"))
+                        cdp.click("[...document.querySelectorAll('[data-farm-runs] button')].find(b=>b.textContent==='Logs')")
                         wait("document.querySelector('[data-log-stream=stdout]')?.innerText.includes('OUTPUT_AFTER_64K FLAG002000')")
-                        self.assertIn('1 new · 1 existing',cdp.evaluate("document.querySelector('#page').innerText"))
+                        self.assertIn('1 new · 1 existing',cdp.evaluate("document.querySelector('[role=dialog]').innerText"))
                         cdp.evaluate("[...document.querySelectorAll('[data-log-stream=stdout] button')].find(b=>b.textContent==='First retained').click()")
                         wait("!document.querySelector('[data-log-stream=stdout] pre').innerText.includes('OUTPUT_AFTER_64K')")
                         cdp.evaluate("[...document.querySelectorAll('[data-log-stream=stdout] button')].find(b=>b.textContent==='Next output').click()")
                         wait("document.querySelector('[data-log-stream=stdout] pre').innerText.includes('OUTPUT_AFTER_64K')")
+                        self.assertIn('Run logs',cdp.evaluate("document.querySelector('[role=dialog]').innerText"))
+                        cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Close logs').click()")
+                        wait("!document.querySelector('[role=dialog]')")
+                        wait("document.activeElement?.textContent==='Logs'")
                     if section == 'Flags':
                         wait("Boolean(document.querySelector('#flag-paste') && document.querySelector('#submitter-manual-count'))")
                         wait("document.querySelector('#page').innerText.includes('submission stdout FLAG002000') && document.querySelector('#page').innerText.includes('submission stderr FLAG002000')")
