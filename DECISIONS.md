@@ -117,3 +117,16 @@ Size metadata is carried in existing typed event fields, with closure-only metad
 
 ### Nested group removal and explicit enforcement state
 
+### Captured-traffic picker for filter rehearsal
+
+The required exact-rule saved-traffic test was exposed as a JSON message-ID
+prompt; enforcement shortcuts consequently failed for new or edited rules with
+an opaque policy error. Keep SPEC's rehearsal requirement, but provide a session
+and parsed-message picker scoped to the rule's service. Test and enforce reads
+the current saved revision, tests that message, and submits a writable-fields-only
+Enforce update when it matches. Revision conflicts and test failures prevent the
+update; a no-match leaves the existing mode unchanged. Saving in Enforce mode
+first saves Shadow and opens this dialog, with an explicit warning that the rule
+will observe without blocking until enforcement is applied. Session choices are
+bounded (25/page, 100 retained) and messages are bounded to 100 per session.
+Existing REST handlers/contracts and the proxy data path are unchanged.

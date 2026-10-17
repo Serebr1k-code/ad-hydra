@@ -99,7 +99,9 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
           <div class="space-y-2 md:col-span-2"><Label for="filter-description">Description</Label><Textarea id="filter-description" v-model="form.description" maxlength="4096" rows="2" /></div>
         </div>
 
-        <p v-if="form.mode === 'shadow'" role="status" class="rounded-md border p-3 text-sm">Shadow mode: matches are counted, but traffic is allowed through. Test the saved filter, then switch to Enforce to apply its action.</p>
+        <p v-if="form.mode === 'shadow'" role="status" class="rounded-md border p-3 text-sm">Shadow mode: matches are counted, but traffic is allowed through. Choose Test and enforce in the filter list to test captured traffic and activate the rule.</p>
+
+        <p v-if="form.mode === 'enforce'" role="status" class="rounded-md border p-3 text-sm">Saving first puts this rule in Shadow and opens a captured-traffic test. It will not block traffic until you complete Test and enforce.</p>
 
         <section class="space-y-2" :aria-disabled="!expressionEditable">
           <div><h3 class="font-medium">Match conditions</h3><p class="text-sm text-muted-foreground">Groups add parentheses. Choose whether all or any conditions inside a group must match.</p></div>
@@ -115,7 +117,7 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
           <label class="flex items-center gap-2 self-end pb-2"><Checkbox :model-value="form.enabled" @update:model-value="value => form.enabled = value === true" /><span class="text-sm">Enabled</span></label>
         </div>
         <p v-if="ruleError || error" role="alert" class="text-sm text-destructive">{{ ruleError || error }}</p>
-        <DialogFooter><Button type="button" variant="outline" :disabled="busy" @click="isOpen = false">Cancel</Button><Button type="submit" :disabled="busy || !form.service_id || !expressionEditable">{{ busy ? 'Saving…' : 'Save filter' }}</Button></DialogFooter>
+        <DialogFooter><Button type="button" variant="outline" :disabled="busy" @click="isOpen = false">Cancel</Button><Button type="submit" :disabled="busy || !form.service_id || !expressionEditable">{{ busy ? 'Saving…' : form.mode === 'enforce' ? 'Save and test for enforcement' : 'Save filter' }}</Button></DialogFooter>
       </form>
     </DialogContent>
   </Dialog>

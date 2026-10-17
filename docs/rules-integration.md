@@ -116,9 +116,20 @@ its last parent child inserts a default condition so the parent stays editable;
 review that condition before saving. The root group stays in place.
 
 **Enabled** and **Enforce** are separate settings. An enabled **Shadow** filter
-counts matches but allows traffic through, including HTTP block actions. Test the
-saved filter with **Test saved message**, using a message ID from Traffic Explorer,
-then choose **Enforce tested rule** (or edit its mode to Enforce). The exact saved
-expression and action must have been tested; changing either requires a new test.
-Check that desired and applied revisions agree before checking the service's
-public proxy port. Requests sent directly to its private upstream bypass Hydra.
+counts matches but allows traffic through, including HTTP block actions. Choose
+**Test and enforce** in the filter list, select a captured session and message,
+then click **Test and enforce** in the dialog. No JSON or copied message IDs are
+needed. **Test only** evaluates saved fields without changing the mode. A no-match
+result leaves the mode unchanged; choose a matching message or edit the rule.
+
+Saving an edited or new filter with mode **Enforce** first saves it in **Shadow**
+and opens this test dialog. While it is in Shadow it does not block traffic;
+closing the dialog leaves it in Shadow. This implements the required saved-traffic
+rehearsal for the exact new rule version instead of rejecting the save. Check that
+desired and applied revisions agree before checking the service's public proxy
+port. Requests sent directly to its private upstream bypass Hydra.
+
+The picker loads 25 sessions per page, retains at most 100 session choices, and
+shows at most 100 messages from the selected session. Use **Older sessions** or
+**Refresh traffic** to select other retained sessions. If no parsed messages are
+available, check the decoder profile and send a normal request through the proxy.
