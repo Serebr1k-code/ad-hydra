@@ -397,9 +397,53 @@ class Browser(unittest.TestCase):
                         wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent==='Add service' && !b.disabled)")
                         cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add service').click()")
                         wait("document.querySelector('#service-form') && !document.querySelector('#service-save').disabled")
-                        new_module_service={**service,'listen_address':f'127.0.0.1:{port()}','protocol_id':'custom:browser-wasm/v1'}
-                        fill_service(new_module_service)
-                        with sqlite3.connect(tmp/'db') as db:self.assertEqual(db.execute("SELECT protocol_id,version,applied FROM protocol_activations WHERE protocol_id='browser-wasm'").fetchall(),[('browser-wasm','v1',1)])
+                        # Exercise actual module output through both processes and the
+                        # default conversation view, not just the activation ACK.
+                        with socket.socket() as decoder_backend:
+                            decoder_backend.bind(('127.0.0.1',0));decoder_backend.listen();decoder_backend.settimeout(10)
+                            marker=b'WASM_DECODED_RESPONSE_'+b'K'*1230
+                            if 'crypter' in str(module):
+                                def h2frame(kind,flags,stream,payload):return len(payload).to_bytes(3,'big')+bytes([kind,flags])+stream.to_bytes(4,'big')+payload
+                                path=b'/crypter.Crypter/GetUserPublicKey'
+                                headers=b'\x83\x86\x04'+bytes([len(path)])+path
+                                request_bytes=b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n'+h2frame(4,0,0,b'')+h2frame(1,4,1,headers)+h2frame(0,1,1,b'\x00\x00\x00\x00\x00')
+                                n=len(marker);protobuf=b'\x0a'+bytes([(n&127)|128,n>>7])+marker
+                                grpc=b'\x00'+len(protobuf).to_bytes(4,'big')+protobuf
+                                response_bytes=h2frame(4,0,0,b'')+h2frame(1,4,1,b'\x88')+h2frame(0,1,1,grpc)
+                                expected_output='protobuf.field_1: WASM_DECODED_RESPONSE_'
+                            else:
+                                request_bytes=b'\x00\x04PING'
+                                response_bytes=len(marker).to_bytes(2,'big')+marker
+                                expected_output='protocol.payload:'
+                            def decoder_reply():
+                                try:
+                                    peer,_=decoder_backend.accept()
+                                    with peer:
+                                        peer.settimeout(3);received=b''
+                                        while len(received)<len(request_bytes):
+                                            data=peer.recv(4096)
+                                            if not data:return
+                                            received+=data
+                                        peer.sendall(response_bytes)
+                                except OSError:pass
+                            threading.Thread(target=decoder_reply,daemon=True).start()
+                            new_module_service={**service,'listen_address':f'127.0.0.1:{port()}','upstream_address':f'127.0.0.1:{decoder_backend.getsockname()[1]}','protocol_id':'custom:browser-wasm/v1'}
+                            fill_service(new_module_service)
+                            with sqlite3.connect(tmp/'db') as db:
+                                activation=db.execute("SELECT service_id,protocol_id,version,applied FROM protocol_activations WHERE protocol_id='browser-wasm'").fetchone()
+                                self.assertEqual(activation[1:],('browser-wasm','v1',1));module_service_id=activation[0]
+                            cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Traffic').click()")
+                            wait("document.querySelector('#traffic-live-status')?.textContent==='Live'")
+                            cdp.click("document.querySelector('#traffic-service')")
+                            wait("document.querySelectorAll('[role=option]').length>2")
+                            cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==={json.dumps(module_service_id)})")
+                            with socket.create_connection(('127.0.0.1',int(new_module_service['listen_address'].split(':')[1])),timeout=3) as peer:
+                                peer.sendall(request_bytes);received=b''
+                                while len(received)<len(response_bytes):received+=peer.recv(4096)
+                                self.assertEqual(received,response_bytes)
+                            wait(f"document.querySelector('#traffic-stream').innerText.includes({json.dumps(expected_output)})")
+                            self.assertEqual(cdp.evaluate("document.querySelector('[aria-label=\"Stream view\"]').textContent"),'Decoded conversation')
+                            self.assertTrue(cdp.evaluate("Boolean(document.querySelector('#traffic-stream [data-direction=\"2\"]'))"))
                     if section == 'Flags':
                         wait("Boolean(document.querySelector('#flag-paste') && document.querySelector('#submitter-manual-count'))")
                         wait("document.querySelector('#page').innerText.includes('submission stdout FLAG002000') && document.querySelector('#page').innerText.includes('submission stderr FLAG002000')")

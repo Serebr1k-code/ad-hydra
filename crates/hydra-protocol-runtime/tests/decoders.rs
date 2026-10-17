@@ -511,3 +511,21 @@ fn chunked_response_trailer_bytes_count_and_syntax_are_bounded() {
             .is_err()
     );
 }
+
+#[test]
+fn large_feed_still_traps_infinite_wasm_at_the_hard_fuel_cap() {
+    let bytes = fixture("(loop br 0) i64.const 0");
+    let version = PluginVersion::load(&bytes, Sha256::digest(&bytes).into()).unwrap();
+    let mut session = WasmSession::new(version).unwrap();
+    let error = session
+        .feed(Direction::ClientToServer, &vec![0; 4096])
+        .unwrap_err();
+    assert!(error.to_string().contains("fuel"));
+    assert!(
+        session
+            .feed(Direction::ClientToServer, b"next")
+            .unwrap_err()
+            .to_string()
+            .contains("disabled")
+    );
+}

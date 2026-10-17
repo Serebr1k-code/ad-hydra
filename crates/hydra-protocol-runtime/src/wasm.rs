@@ -6,6 +6,13 @@ use std::{
     sync::{Arc, Weak},
 };
 use wasmi::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
+const BASE_FUEL: u64 = 200_000;
+const MAX_DECODE_FUEL: u64 = 4_000_000;
+fn decode_fuel(bytes: usize, state: usize) -> u64 {
+    BASE_FUEL
+        .saturating_add((bytes.saturating_add(state) as u64).saturating_mul(1024))
+        .min(MAX_DECODE_FUEL)
+}
 fn error(e: impl std::fmt::Display) -> DecodeError {
     DecodeError(e.to_string())
 }
@@ -201,7 +208,9 @@ impl WasmSession {
         if input.len() > 512 * 1024 {
             return Err(error("encoded input limit"));
         }
-        self.store.set_fuel(200_000).map_err(error)?;
+        self.store
+            .set_fuel(decode_fuel(bytes.len(), self.state[index].len()))
+            .map_err(error)?;
         let alloc = self
             .instance
             .get_typed_func::<i32, i32>(&self.store, "hydra_alloc")
@@ -245,5 +254,17 @@ impl WasmSession {
         }
         self.state[index] = output.state;
         Ok(output.messages)
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn fuel_scales_with_bounded_work_and_has_a_hard_ceiling() {
+        assert_eq!(decode_fuel(0, 0), BASE_FUEL);
+        assert!(decode_fuel(1250, 512) > BASE_FUEL);
+        assert_eq!(decode_fuel(65536, 65536), MAX_DECODE_FUEL);
+        assert_eq!(decode_fuel(usize::MAX, usize::MAX), MAX_DECODE_FUEL);
     }
 }

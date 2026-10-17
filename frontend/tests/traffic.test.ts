@@ -65,3 +65,12 @@ test('blocked streams are hidden by default and service colors are stable',()=>{
  expect(new Set(['docs','ark','crypter','aquarius'].map(traffic.serviceColor)).size).toBe(4)
  expect(traffic.serviceColor('untrusted; color:red')).toMatch(/^hsl\(\d+(?:\.\d+)? 65% 55%\)$/)
 })
+
+test('activated WASM overrides raw fallback when opening the decoded conversation',()=>{
+ expect(traffic).toHaveProperty('serviceProtocol')
+ const protocol=Reflect.get(traffic,'serviceProtocol') as (service:{id:string;protocol_id:string},activations:{service_id:string;id:string;version:string;applied:boolean}[])=>string
+ expect(protocol({id:'crypter',protocol_id:'raw'},[{service_id:'crypter',id:'sys-grpc',version:'1',applied:true}])).toBe('custom:sys-grpc/1')
+ expect(traffic.initialStreamMode(protocol({id:'crypter',protocol_id:'raw'},[{service_id:'crypter',id:'sys-grpc',version:'1',applied:true}]))).toBe('decoded')
+ expect(protocol({id:'ark',protocol_id:'raw'},[])).toBe('raw')
+ expect(protocol({id:'crypter',protocol_id:'raw'},[{service_id:'crypter',id:'sys-grpc',version:'1',applied:false}])).toBe('raw')
+})

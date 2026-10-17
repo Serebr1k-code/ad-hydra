@@ -88,7 +88,7 @@ cargo build --locked --manifest-path path/to/my-decoder/Cargo.toml \
 
 The artifact is `path/to/my-decoder/target/wasm32-unknown-unknown/release/<crate_name>.wasm` (hyphens in crate names become underscores). Before upload, test boundary cases in the decoder crate or with Hydra's sample-test screen: fragmented records, multiple records in one input, both directions, invalid lengths, empty payloads, and the maximum supported frame.
 
-Hydra enforces these ABI/resource bounds: module 4 MiB; no imports (including WASI); 200,000 fuel per initialization/feed; guest memory 4 MiB; input 64 KiB; serialized input/output and explicit state 64 KiB; 32 messages per feed; 256 typed values total; nesting depth 8; keys 128 bytes; strings/bytes 8192 bytes; metadata 8192 bytes and 64 declared fields. These checks are in addition to the parser's own protocol-specific bounds. See [`PLUGIN_ABI.md`](PLUGIN_ABI.md) for pointer ownership, traps, compatibility, and exact validation rules.
+Hydra enforces these ABI/resource bounds: module 4 MiB; no imports (including WASI); 200,000 fuel per initialization/metadata call; decode fuel is 200,000 + 1024 × (input bytes + direction state bytes), capped at 4,000,000 per feed; guest memory 4 MiB; input 64 KiB; serialized input/output and explicit state 64 KiB; 32 messages per feed; 256 typed values total; nesting depth 8; keys 128 bytes; strings/bytes 8192 bytes; metadata 8192 bytes and 64 declared fields. These checks are in addition to the parser's own protocol-specific bounds. See [`PLUGIN_ABI.md`](PLUGIN_ABI.md) for pointer ownership, traps, compatibility, and exact validation rules.
 
 ## Upload, test, and activate
 

@@ -1,6 +1,6 @@
 # Hydra parser ABI 1
 
-The Rust SDK builds for `wasm32-unknown-unknown`. No imports are accepted (including WASI): filesystem, sockets, clocks and host callbacks are unavailable. The host uses wasmi with 200,000 fuel per initialization/feed, one memory capped at 4 MiB, one table capped at 1024 entries, and one instance per session. Modules are limited to 4 MiB and must match the supplied SHA-256 before compilation. The registry allows at most sixteen live versions. Activation replaces an immutable Arc snapshot; active sessions keep their old instance/version.
+The Rust SDK builds for `wasm32-unknown-unknown`. No imports are accepted (including WASI): filesystem, sockets, clocks and host callbacks are unavailable. The host uses wasmi with 200,000 fuel per initialization/metadata call and size-based decode fuel: 200,000 + 1024 × (input bytes + direction state bytes), capped at 4,000,000 per feed, one memory capped at 4 MiB, one table capped at 1024 entries, and one instance per session. Modules are limited to 4 MiB and must match the supplied SHA-256 before compilation. The registry allows at most sixteen live versions. Activation replaces an immutable Arc snapshot; active sessions keep their old instance/version.
 
 Exports:
 

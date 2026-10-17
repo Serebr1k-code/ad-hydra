@@ -15,6 +15,10 @@ export function mergeFlows(current: Flow[], incoming: Flow[], older = false): Fl
 }
 export function messageRows(page: Page) { return page.items.map(item => ({ ...item, blocked:item.blocked===true, message_id:text(item.message_id), occurred_ms:item.occurred_ms, direction:item.direction, message_type:text(item.message_type), protocol_id:text(item.protocol_id), fields:record(item.fields), truncated:item.truncated===true })) }
 export type Message = ReturnType<typeof messageRows>[number]
+export function serviceProtocol(service:{id:string;protocol_id:string},activations:{service_id:string;id:string;version:string;applied:boolean}[]):string {
+ const active=activations.find(item=>item.service_id===service.id&&item.applied)
+ return active?`custom:${active.id}/${active.version}`:service.protocol_id
+}
 export function initialStreamMode(protocolId: string): 'bytes'|'decoded' { return protocolId==='raw'?'bytes':'decoded' }
 export function fields(message: Pick<Message,'fields'>) { return Object.entries(message.fields).map(([key,value])=>({key,type:text(record(value).type),value:JSON.stringify(record(value).value)??''})) }
 /** Retained HTTP headers, preserving observed spelling, duplicates and whitespace. */

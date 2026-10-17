@@ -7,7 +7,7 @@ import { Alert,AlertDescription } from '@/components/ui/alert'
 import TrafficQuery from './TrafficQuery.vue'
 import FlowConversation from './FlowConversation.vue'
 import SessionList from './SessionList.vue'
-import { flowRows,mergeFlows,visibleFlows,text,type Flow } from './traffic'
+import { flowRows,mergeFlows,visibleFlows,text,serviceProtocol,type Flow } from './traffic'
 import { trafficEvent,updateFlows } from './live'
 import { parseEventFrame } from '@/shared/api/sse'
 const rows=ref<Flow[]>([]),services=ref<{id:string;name:string;protocol_id:string}[]>([]),service=ref('all'),selected=ref<Flow>()
@@ -79,6 +79,11 @@ onMounted(async()=>{
   }while(after&&services.value.length<128)
  }catch(e){serviceError.value=errorMessage(e)}
  if(disposed)return
+ try {
+  const catalog=await api<{activations:{service_id:string;id:string;version:string;applied:boolean}[]}>('/protocols')
+  if(disposed)return
+  services.value=services.value.map(item=>({...item,protocol_id:serviceProtocol(item,catalog.activations)}))
+ }catch(e){serviceError.value=errorMessage(e)}
  await load()
  if(!disposed)void events(receive,controller.signal,state=>{liveState.value=state;if(state==='live')reconcile()})
 })
