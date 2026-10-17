@@ -29,3 +29,14 @@ test('SSE parses loss, multiline data, ignores keepalive and rejects malformed t
  expect(()=>trafficEvent('event: traffic\ndata: {}')).toThrow('Invalid')
  expect(trafficEvent('event: loss\ndata: 7')).toBeUndefined()
 })
+
+test('blocking and flag events update cards without confusing shadow hits with blocking',()=>{
+ const rows=updateFlows([],{...opened})
+ const shadow=updateFlows(rows,{...opened,kind:'rule_hit',mode:1,action:3})
+ expect(shadow[0]?.blocked).toBe(false)
+ const flagged=updateFlows(shadow,{...opened,kind:'flag_detected',has_flag:true})
+ expect(flagged[0]?.has_flag).toBe(true)
+ const blocked=updateFlows(flagged,{...opened,kind:'rule_hit',mode:2,action:6,blocked:true})
+ expect(blocked[0]?.blocked).toBe(true)
+ expect(updateFlows(blocked,{...opened})[0]).toMatchObject({blocked:true,has_flag:true})
+})

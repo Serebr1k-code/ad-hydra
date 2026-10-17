@@ -1243,6 +1243,12 @@ paths:
       - traffic
       operationId: flows
       parameters:
+      - name: include_blocked
+        in: query
+        description: Include traffic blocked by enforced rules (default true for API compatibility).
+        required: false
+        schema:
+          type: boolean
       - name: after
         in: query
         required: false
@@ -1420,6 +1426,12 @@ paths:
         required: true
         schema:
           type: string
+      - name: include_blocked
+        in: query
+        description: Include traffic blocked by enforced rules (default true for API compatibility).
+        required: false
+        schema:
+          type: boolean
       - name: after
         in: query
         required: false

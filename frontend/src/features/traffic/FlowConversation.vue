@@ -10,7 +10,7 @@ import { Select,SelectContent,SelectItem,SelectTrigger,SelectValue } from '@/com
 import FlowCapture from './FlowCapture.vue'
 import { eventMessage,mergeMessages,type TrafficEvent } from './live'
 import { differences,direction,fields,flowRows,historyPreview,historySegments,historyTextSegments,initialStreamMode,messageRows,record,streamText,timestamp,type Flow,type Message } from './traffic'
-const props=defineProps<{flowId:string;flow?:Flow;protocolId?:string}>()
+const props=defineProps<{flowId:string;flow?:Flow;protocolId?:string;showBlocked?:boolean}>()
 const detail=ref<Flow|undefined>(props.flow),messages=ref<Message[]>([]),cursor=ref<number|null>()
 const inspect=ref<Message>(),selected=ref<Message>(),comparison=ref<ReturnType<typeof differences>>([]),comparisonTitle=ref('')
 const streamBody=ref<HTMLElement>()
@@ -19,7 +19,7 @@ const closureHistoryLost=computed(()=>record(detail.value?.closed).history_trunc
 const hasHistoryTextFallback=computed(()=>detail.value?.state==='Closed'&&messages.value.length===0&&historyState.value==='ready'&&history.value!==undefined)
 const mode=ref(initialStreamMode(props.protocolId??'raw')),side=ref<'both'|'1'|'2'>('both'),loading=ref(false),error=ref(''),notice=ref('')
 const byteMode=ref<'hex'|'utf8'|'ascii'>('hex'),history=ref<FlowHistory>(),historyState=ref<'idle'|'loading'|'ready'|'missing'|'active'|'unavailable'>('idle')
-const visible=computed(()=>messages.value.filter(m=>side.value==='both'||String(m.direction)===side.value))
+const visible=computed(()=>messages.value.filter(m=>(props.showBlocked||m.blocked!==true)&&(side.value==='both'||String(m.direction)===side.value)))
 const path=`/traffic/flows/${encodeURIComponent(props.flowId)}`
 let disposed=false,request=0,dirty=false
 function receive(event:TrafficEvent) {
@@ -40,7 +40,7 @@ async function load(more=false) {
   const received=flowRows({items:[flow],next_cursor:null})[0]
   if(!detail.value?.closed||received?.closed)detail.value=received
   if(received?.closed)void loadHistory()
-  const page=await api<Page>(`${path}/messages?limit=100&newest_first=true${more&&cursor.value?'&after='+cursor.value:''}`)
+  const page=await api<Page>(`${path}/messages?limit=100&include_blocked=${props.showBlocked===true}&newest_first=true${more&&cursor.value?'&after='+cursor.value:''}`)
   if(disposed||current!==request)return
   const initial=!messages.value.length
   messages.value=mergeMessages(messages.value,messageRows(page));cursor.value=page.next_cursor
@@ -72,7 +72,7 @@ onUnmounted(()=>{disposed=true;request++})
  <section id="traffic-stream" aria-label="Session stream" class="flex min-h-0 min-w-0 flex-col">
   <header class="space-y-3 border-b p-4">
    <div class="flex items-start justify-between gap-3"><div class="min-w-0"><h2 class="!m-0 text-base">Follow TCP stream</h2><p class="truncate font-mono text-xs text-muted-foreground">{{detail?.client}} ↔ {{detail?.destination}}</p></div><Button variant="ghost" size="sm" :disabled="loading" @click="load()">Refresh</Button></div>
-   <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{{detail?.service_id}}</span><span>· {{detail?.state??'Loading'}}</span><span v-if="detail?.bytesUp">· {{detail.bytesUp}} B sent / {{detail.bytesDown}} B received</span><span>· {{messages.length}} decoded messages</span></div>
+   <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{{detail?.service_id}}</span><span v-if="flow?.has_flag||detail?.has_flag" class="rounded border border-amber-500/60 bg-amber-500/10 px-2 py-1 font-medium text-amber-500">Flag detected</span><span v-if="flow?.blocked||detail?.blocked" class="text-destructive">Blocked</span><span>· {{detail?.state??'Loading'}}</span><span v-if="detail?.bytesUp">· {{detail.bytesUp}} B sent / {{detail.bytesDown}} B received</span><span>· {{messages.length}} decoded messages</span></div>
    <div class="flex flex-wrap gap-2"><Select v-model="mode"><SelectTrigger aria-label="Stream view" class="w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="decoded">Decoded conversation</SelectItem><SelectItem value="bytes">Captured bytes</SelectItem></SelectContent></Select><Select v-if="mode==='decoded'||detail?.state==='Closed'" v-model="side"><SelectTrigger aria-label="Stream direction" class="w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="both">Both directions</SelectItem><SelectItem value="1">Client → server</SelectItem><SelectItem value="2">Server → client</SelectItem></SelectContent></Select><Select v-if="mode==='bytes'&&detail?.state==='Closed'" v-model="byteMode"><SelectTrigger aria-label="Raw byte format" class="w-36"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="hex">Hex dump</SelectItem><SelectItem value="utf8">UTF-8</SelectItem><SelectItem value="ascii">ASCII</SelectItem></SelectContent></Select></div>
    <p class="truncate text-[10px] text-muted-foreground" :title="flowId">Session {{flowId}} · {{detail?.started}}</p>
   </header>

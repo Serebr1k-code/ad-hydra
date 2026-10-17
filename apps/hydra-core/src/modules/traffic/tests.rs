@@ -311,6 +311,7 @@ async fn explorer_filters_share_message_predicate_and_stable_pagination() {
         .unwrap();
     assert_eq!(flagged.items.len(), 1);
     assert_eq!(flagged.items[0]["flow_id"], "flow2");
+    assert_eq!(flagged.items[0]["has_flag"], true);
     assert!(
         !serde_json::to_string(&flagged.items)
             .unwrap()
@@ -443,5 +444,81 @@ async fn bounded_header_fields_commit_before_live_publication_without_losing_dup
     );
     assert!(serde_json::to_vec(&stored).unwrap().len() < 65536);
     drop(traffic);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn blocked_visibility_is_applied_before_pagination_and_ignores_shadow() {
+    let (t, path) = setup().await;
+    let mut events = Vec::new();
+    for (i, mode, action) in [(0, 2, 3), (1, 1, 3), (2, 2, 2), (3, 2, 4), (4, 2, 6)] {
+        let flow = format!("visibility{i}");
+        events.push(proto::Event {
+            event_id: format!("visibility-open{i}"),
+            flow_id: flow.clone(),
+            service_id: "svc".into(),
+            payload: Some(Payload::FlowOpened(Default::default())),
+            ..Default::default()
+        });
+        events.push(proto::Event {
+            event_id: format!("visibility-message{i}"),
+            flow_id: flow.clone(),
+            service_id: "svc".into(),
+            payload: Some(Payload::Message(proto::ParsedMessage {
+                message_id: format!("visibility-m{i}"),
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+        events.push(proto::Event {
+            event_id: format!("visibility-hit{i}"),
+            flow_id: flow,
+            service_id: "svc".into(),
+            payload: Some(Payload::RuleHit(proto::RuleHit {
+                mode,
+                action,
+                blocked: i == 4,
+                message_id: format!("visibility-m{i}"),
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+    }
+    t.ingest(proto::EventBatch {
+        events,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let query = |after| {
+        serde_json::from_value(serde_json::json!({"include_blocked":false,"limit":1,"after":after}))
+            .unwrap()
+    };
+    let first = t.flows(query(None::<i64>)).await.unwrap();
+    assert_eq!(first.items[0]["flow_id"], "visibility1");
+    assert_eq!(first.items[0]["blocked"], false);
+    let second = t.flows(query(first.next_cursor)).await.unwrap();
+    assert_eq!(second.items[0]["flow_id"], "visibility2");
+    assert!(second.next_cursor.is_none());
+    assert_eq!(t.flows(Query::default()).await.unwrap().items.len(), 5);
+    assert_eq!(
+        t.flow("visibility0".into()).await.unwrap().unwrap()["blocked"],
+        true
+    );
+    assert!(
+        t.messages("visibility0".into(), query(None))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert_eq!(
+        t.messages("visibility0".into(), Query::default())
+            .await
+            .unwrap()
+            .items[0]["blocked"],
+        true
+    );
+    drop(t);
     std::fs::remove_dir_all(path).unwrap();
 }

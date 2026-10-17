@@ -7,15 +7,21 @@ import { Alert,AlertDescription } from '@/components/ui/alert'
 import TrafficQuery from './TrafficQuery.vue'
 import FlowConversation from './FlowConversation.vue'
 import SessionList from './SessionList.vue'
-import { flowRows,mergeFlows,text,type Flow } from './traffic'
+import { flowRows,mergeFlows,visibleFlows,text,type Flow } from './traffic'
 import { trafficEvent,updateFlows } from './live'
 import { parseEventFrame } from '@/shared/api/sse'
 const rows=ref<Flow[]>([]),services=ref<{id:string;name:string;protocol_id:string}[]>([]),service=ref('all'),selected=ref<Flow>()
 const cursor=ref<number|null>(),query=ref(''),loading=ref(false),error=ref(''),serviceError=ref(''),advanced=ref(false)
 const liveState=ref<LiveState>('connecting'),liveNotice=ref(''),conversation=ref<InstanceType<typeof FlowConversation>>()
 const selectedProtocol=computed(()=>services.value.find(s=>s.id===selected.value?.service_id)?.protocol_id??'raw')
+const showBlocked=ref(false)
+const visible=computed(()=>visibleFlows(rows.value,showBlocked.value))
 const controller=new AbortController()
 let request=0,catchup:ReturnType<typeof setTimeout>|undefined,disposed=false,loadAgain=false
+function selectVisible() {
+ if(selected.value)selected.value=visible.value.find(flow=>flow.flow_id===selected.value?.flow_id)
+ if(!selected.value)selected.value=visible.value[0]
+}
 function reconcile() {
  if(disposed)return
  if(loading.value){loadAgain=true;return}
@@ -29,11 +35,11 @@ function receive(frame:string) {
   if(!event)return
   if(event.kind==='event_loss'){liveNotice.value='Proxy reported telemetry loss. Some traffic may be unavailable.';reconcile();return}
   if(service.value!=='all'&&event.service_id!==service.value)return
-  if(query.value){reconcile()}else if(event.kind==='flow_opened'||event.kind==='flow_closed') {
+  if(query.value){reconcile()}else if(['flow_opened','flow_closed','rule_hit','flag_detected'].includes(event.kind)) {
    if(event.kind==='flow_opened'&&event.transport!==1)return
    rows.value=updateFlows(rows.value,event)
-   if(!selected.value&&rows.value.length)selected.value=rows.value[0]
-   else if(selected.value)selected.value=rows.value.find(f=>f.flow_id===selected.value?.flow_id)??selected.value
+   selectVisible()
+   if(event.kind==='flag_detected'&&!rows.value.some(flow=>flow.flow_id===event.flow_id))reconcile()
   }
   if(event.flow_id===selected.value?.flow_id)conversation.value?.receive(event)
  } catch {liveNotice.value='Live event could not be read. Reloading retained traffic.';reconcile()}
@@ -42,7 +48,7 @@ async function load(more=false,live=false) {
  const current=++request;loading.value=true;error.value=''
  const parameters=new URLSearchParams(query.value)
  if(!parameters.has('transport'))parameters.set('transport','1')
- parameters.set('limit','100');parameters.set('newest_first','true')
+ parameters.set('limit','100');parameters.set('newest_first','true');parameters.set('include_blocked',String(showBlocked.value))
  if(service.value!=='all')parameters.set('service_id',service.value)
  if(more&&cursor.value)parameters.set('after',String(cursor.value))
  try {
@@ -50,16 +56,17 @@ async function load(more=false,live=false) {
   if(disposed||current!==request)return
   const received=flowRows(page).map(flow=>{
    const old=rows.value.find(row=>row.flow_id===flow.flow_id)
-   return old?.closed&&!flow.closed?{...flow,closed:old.closed,state:old.state,bytesUp:old.bytesUp,bytesDown:old.bytesDown}:flow
+   const merged={...flow,blocked:flow.blocked||old?.blocked===true,has_flag:flow.has_flag||old?.has_flag===true}
+   return old?.closed&&!flow.closed?{...merged,closed:old.closed,state:old.state,bytesUp:old.bytesUp,bytesDown:old.bytesDown}:merged
   })
   rows.value=mergeFlows(more||live?rows.value:[],received,more)
   if(!live||!cursor.value)cursor.value=page.next_cursor
-  if(!selected.value&&rows.value.length)selected.value=rows.value[0]
-  else if(selected.value)selected.value=rows.value.find(f=>f.flow_id===selected.value?.flow_id)??selected.value
+  selectVisible()
  }catch(e){if(current===request)error.value=errorMessage(e)}
  finally{if(current===request){loading.value=false;if(loadAgain){loadAgain=false;reconcile()}}}
 }
 function search(value:string){query.value=value;selected.value=undefined;void load()}
+watch(showBlocked,()=>{selectVisible();void load()})
 watch(service,()=>{selected.value=undefined;rows.value=[];void load()})
 onMounted(async()=>{
  try {
@@ -84,8 +91,8 @@ onUnmounted(()=>{disposed=true;request++;controller.abort();clearTimeout(catchup
   <TrafficQuery v-if="advanced" @search="search" />
   <Alert v-if="error||serviceError" variant="destructive"><AlertDescription>{{error||serviceError}}</AlertDescription></Alert>
   <div class="grid min-h-[640px] overflow-hidden rounded-md border bg-card md:h-[calc(100dvh-230px)] md:min-h-[480px] md:grid-cols-[300px_minmax(0,1fr)] lg:grid-cols-[330px_minmax(0,1fr)]">
-   <SessionList :rows="rows" :services="services" :service="service" :selected="selected?.flow_id??''" :loading="loading" :more="Boolean(cursor)" @service="service=$event" @select="selected=$event" @refresh="load()" @more="load(true)" />
-   <FlowConversation ref="conversation" v-if="selected" :key="selected.flow_id+':'+selectedProtocol" :flow-id="selected.flow_id" :flow="selected" :protocol-id="selectedProtocol" />
+   <SessionList :rows="visible" :show-blocked="showBlocked" @show-blocked="showBlocked=$event" :services="services" :service="service" :selected="selected?.flow_id??''" :loading="loading" :more="Boolean(cursor)" @service="service=$event" @select="selected=$event" @refresh="load()" @more="load(true)" />
+   <FlowConversation ref="conversation" v-if="selected" :key="selected.flow_id+':'+selectedProtocol" :flow-id="selected.flow_id" :flow="selected" :protocol-id="selectedProtocol" :show-blocked="showBlocked" />
    <section v-else id="traffic-stream" class="flex min-h-80 items-center justify-center p-8 text-center"><div><h2 class="!mt-0">Follow TCP stream</h2><p class="text-sm text-muted-foreground">Choose a service and select a session to inspect its conversation.</p></div></section>
   </div>
  </section>

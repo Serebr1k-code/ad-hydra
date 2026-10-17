@@ -56,7 +56,7 @@ pub async fn commit(flags: &Flags, traffic: &Traffic, batch: &EventBatch) -> any
     fresh.events = fresh.events.into_iter().skip(skip).collect();
     fresh.first_sequence += skip as u64;
     flags.ingest_proxy(&fresh).await?;
-    // Never send flags to the traffic index/SSE; losses get deterministic epoch+seq IDs.
+    // Never send flag values to traffic; losses get deterministic epoch+seq IDs.
     let mut losses = fresh.clone();
     losses.events = fresh
         .events
@@ -91,7 +91,13 @@ pub async fn commit(flags: &Flags, traffic: &Traffic, batch: &EventBatch) -> any
         tx.execute("INSERT INTO critical_receipts(proxy_epoch_id,through_sequence,last_event_id) VALUES(?1,?2,?3) ON CONFLICT(proxy_epoch_id) DO UPDATE SET through_sequence=excluded.through_sequence,last_event_id=excluded.last_event_id WHERE excluded.through_sequence>critical_receipts.through_sequence", params![epoch,last as i64,last_id])?;
         tx.commit()?;
         Ok(())
-    }).await
+    }).await?;
+    for event in &fresh.events {
+        if matches!(event.payload, Some(Payload::Flag(_))) {
+            traffic.flag_detected(&event.flow_id, &event.service_id);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -144,6 +150,8 @@ mod tests {
             events: vec![
                 v1::Event {
                     event_id: "flag-id".into(),
+                    flow_id: "flagged-flow".into(),
+                    service_id: "svc".into(),
                     payload: Some(Payload::Flag(v1::FlagFinding {
                         flag_value: "FLAG123".into(),
                         source_kind: "own_exposed".into(),
@@ -165,8 +173,18 @@ mod tests {
     #[tokio::test]
     async fn flags_and_losses_are_durable_before_receipt_and_replay_is_idempotent() {
         let (flags, traffic, dir) = fixture().await;
+        let mut live = traffic.events.subscribe();
         commit(&flags, &traffic, &batch()).await.unwrap();
         commit(&flags, &traffic, &batch()).await.unwrap();
+        let loss = live.try_recv().unwrap();
+        let finding = live.try_recv().unwrap();
+        assert_eq!(loss["kind"], "event_loss");
+        assert_eq!(
+            finding,
+            serde_json::json!({"kind":"flag_detected","flow_id":"flagged-flow","service_id":"svc","has_flag":true})
+        );
+        assert!(!serde_json::to_string(&finding).unwrap().contains("FLAG123"));
+        assert!(live.try_recv().is_err());
         flags.auth.db.run(|db|{
             assert_eq!(db.query_row("SELECT count(*) FROM flags",[],|r|r.get::<_,i64>(0))?,1);
             assert_eq!(db.query_row("SELECT count(*) FROM traffic_events WHERE kind='event_loss'",[],|r|r.get::<_,i64>(0))?,1);

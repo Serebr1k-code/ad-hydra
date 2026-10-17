@@ -194,6 +194,15 @@ impl CompiledSnapshot {
                     Some(r.action.clone())
                 };
                 result.hits.push(RuleHit {
+                    blocked: r.mode == Mode::Enforce
+                        && matches!(
+                            action,
+                            Some(
+                                Action::Block { .. }
+                                    | Action::DropConnection
+                                    | Action::DropDatagram
+                            )
+                        ),
                     rule_id: r.id.clone(),
                     mode: r.mode,
                     action: r.action.clone(),

@@ -86,8 +86,10 @@ class Browser(unittest.TestCase):
             tmp = pathlib.Path(directory)
             ap, debug = port(), port()
             sock = str(tmp / 'proxy.sock')
-            (tmp / 'proxy.json').write_text(json.dumps({'socket': sock, 'state_file': str(tmp / 'saved.json')}))
+            (tmp / 'proxy.json').write_text(json.dumps({'socket': sock, 'state_file': str(tmp / 'saved.json'), 'flag_pattern':'FLAG[0-9]{6}'}))
             subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(tmp/'tls.key'),'-out',str(tmp/'tls.crt'),'-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1','-days','1'],check=True,capture_output=True)
+            (tmp/'operations.json').write_text(json.dumps({'flag_pattern':'FLAG[0-9]{6}','auto_submit_captured':False}))
+            (tmp/'operations.json').chmod(0o600)
             args = [str(BIN/'hydra-core'),'--database',str(tmp/'db'),'--key',str(tmp/'jwt.pem'),'--socket',sock]
             log = open(tmp/'process.log','w+')
             cdp=None
@@ -100,7 +102,7 @@ class Browser(unittest.TestCase):
                     self.assertTrue(dist.is_dir(), 'Build frontend/dist before this smoke test')
                     hidden_dist = dist.with_name(f'dist.browser-hidden-{os.getpid()}')
                     rename_dist_preserving_parent_mtime(dist, hidden_dist)
-                processes.append(subprocess.Popen(args+['serve','--listen',f'127.0.0.1:{ap}','--origin',f'https://localhost:{ap}','--tls-cert',str(tmp/'tls.crt'),'--tls-key',str(tmp/'tls.key')],stdout=log,stderr=log))
+                processes.append(subprocess.Popen(args+['serve','--listen',f'127.0.0.1:{ap}','--origin',f'https://localhost:{ap}','--tls-cert',str(tmp/'tls.crt'),'--tls-key',str(tmp/'tls.key'),'--operations',str(tmp/'operations.json')],stdout=log,stderr=log))
                 for _ in range(100):
                     try:
                         c=http.client.HTTPSConnection('127.0.0.1',ap,context=ssl._create_unverified_context(),timeout=2)
@@ -194,12 +196,16 @@ class Browser(unittest.TestCase):
                     except OSError:time.sleep(.05)
                 else:self.fail('Fixture listener did not apply')
                 with connection:
-                    connection.sendall(b'GET /browser-stream HTTP/1.1\r\nHost: browser-fixture\r\nX-Visible: one\r\nX-Visible: two\r\nConnection: close\r\n\r\n')
+                    connection.sendall(b'GET /browser-stream HTTP/1.1\r\nHost: browser-fixture\r\nX-Fixture-Flag: FLAG123456\r\nX-Visible: one\r\nX-Visible: two\r\nConnection: close\r\n\r\n')
                     wait("Boolean(document.querySelector('#traffic-stream [data-direction=\"1\"]'))")
                     release_response.set()
                     self.assertIn(b'200 OK',connection.recv(4096))
                 wait("Boolean(document.querySelector('#traffic-sessions [data-flow-id]') && document.querySelector('#traffic-stream [data-message-id]'))")
                 self.assertIn('/browser-stream',cdp.evaluate("document.querySelector('#traffic-stream').innerText"))
+                wait("Boolean(document.querySelector('#traffic-sessions [data-has-flag=\"true\"]'))")
+                self.assertIn('Flag',cdp.evaluate("document.querySelector('#traffic-sessions [data-has-flag=\"true\"]').innerText"))
+                self.assertTrue(cdp.evaluate("document.querySelector('#traffic-sessions [data-flow-id]').style.borderLeftColor.length>0"))
+                self.assertEqual(cdp.evaluate("document.querySelector('#traffic-show-blocked').getAttribute('aria-checked')"), 'false')
                 self.assertIn('X-Visible: one',cdp.evaluate("document.querySelector('#traffic-stream').innerText"))
                 self.assertIn('X-Visible: two',cdp.evaluate("document.querySelector('#traffic-stream').innerText"))
                 self.assertTrue(cdp.evaluate("document.querySelector('#traffic-stream [data-direction=\"1\"]')!==null"))
@@ -267,6 +273,7 @@ class Browser(unittest.TestCase):
                         cdp.evaluate("document.querySelector('[role=dialog] form').requestSubmit()")
                         wait("!document.querySelector('[role=dialog]') && document.querySelector('#page').innerText.includes('Enforce — applies action to matches')")
                         # Saved-traffic testing is still an optional diagnostic.
+                        wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent==='Test saved message'&&!b.disabled)")
                         cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Test saved message').click()")
                         wait("Boolean(document.querySelector('[role=dialog] [aria-label=\"Test message\"]'))")
                         cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Test only').click()")
@@ -274,6 +281,19 @@ class Browser(unittest.TestCase):
                         cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Close').click()")
                         wait("!document.querySelector('[role=dialog]')")
                         self.assertFalse(cdp.evaluate("[...document.querySelectorAll('#page [role=alert]')].some(e=>e.textContent.trim())"))
+                        # A real blocked HTTP flow is absent by default and
+                        # appears only when the operator requests blocked traffic.
+                        with socket.create_connection(('127.0.0.1',int(service['listen_address'].split(':')[1])),timeout=3) as blocked:
+                            blocked.sendall(b'GET /blocked-browser HTTP/1.1\r\nHost: browser-fixture\r\nConnection: close\r\n\r\n')
+                            self.assertIn(b'402',blocked.recv(4096))
+                        cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Traffic').click()")
+                        wait("document.querySelector('#traffic-live-status')?.textContent==='Live' && Boolean(document.querySelector('#traffic-sessions [data-flow-id]'))")
+                        self.assertFalse(cdp.evaluate("Boolean(document.querySelector('#traffic-sessions [data-blocked=\"true\"]'))"))
+                        cdp.click("document.querySelector('#traffic-show-blocked')")
+                        wait("Boolean(document.querySelector('#traffic-sessions [data-blocked=\"true\"]'))")
+                        cdp.click("document.querySelector('#traffic-show-blocked')")
+                        wait("!document.querySelector('#traffic-sessions [data-blocked=\"true\"]')")
+                        wait("Boolean(document.querySelector('#traffic-sessions [data-has-flag=\"true\"]'))")
                 self.assertIn('alice',cdp.evaluate("document.querySelector('#page').innerText"))
                 cdp.evaluate("document.querySelector('#logout').click()")
                 wait("document.querySelector('#login') && !document.querySelector('#login').hidden")

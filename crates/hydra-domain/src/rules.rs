@@ -103,6 +103,8 @@ pub struct EvaluationContext<'a> {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuleHit {
+    /// Actual enforced block/drop; false for shadow and unexceeded rate limits.
+    pub blocked: bool,
     pub rule_id: String,
     pub mode: Mode,
     pub action: Action,

@@ -145,3 +145,19 @@ This supersedes earlier decisions making captured-traffic rehearsal mandatory.
 The from-message creation endpoint also defaults to Enforce instead of Shadow;
 this changes activation behavior while preserving request/response fields and
 status codes. Its Explorer button and confirmation text now reflect activation.
+
+### Traffic visibility, flag markers and service colors
+
+The user requested blocked traffic hidden by default, flagged connections
+highlighted, and a service-color line on stream cards. Console Show blocked is
+opt-in; API include_blocked defaults to previous include-all behavior and filters
+before pagination when false. A connection with any actual enforced block/drop is
+classified as blocked, not a Shadow hit or an ordinary backend error. Metadata is
+computed from retained events/indexes; no new unbounded state or storage migration.
+Add compatible RuleHit.blocked field 5 and a domain hit indicator to distinguish
+actual exceeded-rate-limit enforcement from allowed rate-limit matches. Legacy
+normal block/drop hits remain recognizable; older rate-limit hits are ambiguous.
+After durable critical commit, publish only redacted flag_detected SSE metadata,
+never flag values. Lifecycle events hydrate indexes to cover cross-stream ordering.
+Service stripes use a stable hashed HSL color, with text labels for service, Flag
+and Blocked so color is supplementary. See docs/traffic-view.md for limits.

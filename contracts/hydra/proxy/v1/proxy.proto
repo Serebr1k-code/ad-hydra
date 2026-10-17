@@ -292,6 +292,8 @@ message ParsedMessage {
   bool truncated = 8;
 }
 message RuleHit {
+  // True only when this hit actually enforces a block/drop, including exceeded rate limits.
+  bool blocked = 5;
   string rule_id = 1;
   Action action = 2;
   RuleMode mode = 3;

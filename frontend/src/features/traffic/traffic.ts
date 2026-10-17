@@ -4,7 +4,7 @@ export function text(value: unknown) { return typeof value === 'string' || typeo
 export function direction(value: unknown) { return value === 1 ? 'Client → server' : value === 2 ? 'Server → client' : 'Unknown direction' }
 export function timestamp(value: unknown) { return typeof value === 'number' && Number.isFinite(value) ? new Date(value).toISOString() : 'Unknown time' }
 export function endpoint(value: unknown) { const v=record(value), ip=text(v.ip); return ip ? `${ip.includes(':')?'['+ip+']':ip}:${text(v.port)}` : 'Unknown endpoint' }
-export function flowRows(page: Page) { return page.items.map(item => ({ ...item, closed:item.closed, flow_id:text(item.flow_id), service_id:text(item.service_id), client:endpoint(item.client), destination:endpoint(item.upstream), started:timestamp(item.occurred_ms), state:item.closed?'Closed':'Open', bytesUp:text(record(item.closed).bytes_client_to_server), bytesDown:text(record(item.closed).bytes_server_to_client) })) }
+export function flowRows(page: Page) { return page.items.map(item => ({ ...item, closed:item.closed, blocked:item.blocked===true, has_flag:item.has_flag===true, flow_id:text(item.flow_id), service_id:text(item.service_id), client:endpoint(item.client), destination:endpoint(item.upstream), started:timestamp(item.occurred_ms), state:item.closed?'Closed':'Open', bytesUp:text(record(item.closed).bytes_client_to_server), bytesDown:text(record(item.closed).bytes_server_to_client) })) }
 export type Flow = ReturnType<typeof flowRows>[number]
 export function mergeFlows(current: Flow[], incoming: Flow[], older = false): Flow[] {
  const unique = new Map<string, Flow>()
@@ -13,7 +13,7 @@ export function mergeFlows(current: Flow[], incoming: Flow[], older = false): Fl
  }
  return [...unique.values()].slice(0,500)
 }
-export function messageRows(page: Page) { return page.items.map(item => ({ ...item, message_id:text(item.message_id), occurred_ms:item.occurred_ms, direction:item.direction, message_type:text(item.message_type), protocol_id:text(item.protocol_id), fields:record(item.fields), truncated:item.truncated===true })) }
+export function messageRows(page: Page) { return page.items.map(item => ({ ...item, blocked:item.blocked===true, message_id:text(item.message_id), occurred_ms:item.occurred_ms, direction:item.direction, message_type:text(item.message_type), protocol_id:text(item.protocol_id), fields:record(item.fields), truncated:item.truncated===true })) }
 export type Message = ReturnType<typeof messageRows>[number]
 export function initialStreamMode(protocolId: string): 'bytes'|'decoded' { return protocolId==='raw'?'bytes':'decoded' }
 export function fields(message: Pick<Message,'fields'>) { return Object.entries(message.fields).map(([key,value])=>({key,type:text(record(value).type),value:JSON.stringify(record(value).value)??''})) }
@@ -78,4 +78,17 @@ export function differences(a:Pick<Message,'fields'>,b:Pick<Message,'fields'>) {
   const left=JSON.stringify(a.fields[key]),right=JSON.stringify(b.fields[key])
   return {key,left:left??'Absent',right:right??'Absent',change:left===right?'Unchanged':left===undefined?'Added':right===undefined?'Removed':'Changed'}
  })
+}
+
+export function visibleFlows(rows: Flow[], showBlocked: boolean): Flow[] {
+ return showBlocked ? rows : rows.filter(flow=>!flow.blocked)
+}
+/** Stable across service ordering, pagination, sessions and reloads. */
+export function serviceColor(id: string): string {
+ let hash=2166136261
+ for(const character of id)hash=Math.imul(hash ^ character.charCodeAt(0),16777619)>>>0
+ return `hsl(${(hash%36000)/100} 65% 55%)`
+}
+export function isBlockedHit(event: Record<string,unknown>): boolean {
+ return event.kind==='rule_hit'&&event.mode===2&&(event.blocked===true||[3,4,5].includes(Number(event.action)))
 }

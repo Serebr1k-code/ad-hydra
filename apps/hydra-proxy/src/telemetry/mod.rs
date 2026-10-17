@@ -150,6 +150,7 @@ impl Telemetry {
                 &service.id,
                 flow_id,
                 Payload::RuleHit(v1::RuleHit {
+                    blocked: hit.blocked,
                     rule_id: hit.rule_id,
                     action: hydra_wire::rules::action_code(&hit.action),
                     mode: if hit.mode == hydra_domain::Mode::Shadow {

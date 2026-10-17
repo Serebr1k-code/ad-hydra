@@ -15,6 +15,8 @@ pub struct Traffic {
 #[into_params(parameter_in=Query)]
 #[serde(deny_unknown_fields)]
 pub struct Query {
+    /// Include traffic blocked by enforced rules (default true for API compatibility).
+    pub include_blocked: Option<bool>,
     pub after: Option<i64>,
     pub limit: Option<usize>,
     /// Descending ingestion order with an exclusive older-than cursor; default remains oldest-first.
@@ -65,6 +67,14 @@ impl Traffic {
             streams: Arc::new(Semaphore::new(8)),
         })
     }
+    /// Redacted metadata only; called after durable critical finding commit.
+    pub fn flag_detected(&self, flow: &str, service: &str) {
+        if !flow.is_empty() && flow.len() <= 128 && service.len() <= 128 {
+            let _ = self.events.send(
+                json!({"kind":"flag_detected","flow_id":flow,"service_id":service,"has_flag":true}),
+            );
+        }
+    }
     pub async fn ingest(&self, batch: proto::EventBatch) -> anyhow::Result<IngestResult> {
         anyhow::ensure!(batch.events.len() <= 256, "batch exceeds 256 events");
         // Convert and bound the complete batch before entering its atomic write transaction.
@@ -99,6 +109,15 @@ impl Traffic {
    tx.execute("DELETE FROM traffic_messages WHERE seq<=(SELECT COALESCE(MAX(seq),0)-100000 FROM traffic_messages)",[])?;
    tx.execute("DELETE FROM traffic_flows WHERE seq<=(SELECT COALESCE(MAX(seq),0)-10000 FROM traffic_flows)",[])?;
    tx.execute("DELETE FROM traffic_events WHERE seq<=(SELECT COALESCE(MAX(seq),0)-100000 FROM traffic_events)",[])?;
+   // A critical finding or hit may arrive before the normal opening event.
+   // Hydrate lifecycle notifications from committed indexes to preserve that state.
+   for data in &mut published {
+    if matches!(data["kind"].as_str(), Some("flow_opened" | "flow_closed")) {
+     let sql=format!("SELECT {},EXISTS(SELECT 1 FROM flag_events WHERE flow_id=?1)",super::visibility::blocked_sql("?1",None));
+     let (blocked,flagged)=tx.query_row(&sql,[data["flow_id"].as_str().unwrap_or_default()],|r|Ok((r.get::<_,bool>(0)?,r.get::<_,bool>(1)?)))?;
+     data["blocked"]=blocked.into();data["has_flag"]=flagged.into();
+    }
+   }
    tx.commit()?;Ok((result,published))}).await?;
         for event in published {
             let _ = self.events.send(event);
@@ -167,7 +186,10 @@ impl Traffic {
             let flow_ref=if messages {"t.flow_id"} else {"t.id"};
             let newest = q.newest_first.unwrap_or(false);
             let comparison = if newest { "<" } else { ">" };
-            let mut sql=format!("SELECT t.seq,t.data FROM {table} t WHERE t.seq{comparison}?");
+            let blocked=super::visibility::blocked_sql(flow_ref, messages.then_some("t.id"));
+            let flagged=format!("EXISTS(SELECT 1 FROM flag_events fe WHERE fe.flow_id={flow_ref})");
+            let mut sql=format!("SELECT t.seq,json_set(t.data,'$.blocked',json(CASE WHEN {blocked} THEN 'true' ELSE 'false' END),'$.has_flag',json(CASE WHEN {flagged} THEN 'true' ELSE 'false' END)) FROM {table} t WHERE t.seq{comparison}?");
+            if q.include_blocked == Some(false) { sql.push_str(&format!(" AND NOT ({blocked})")); }
             let mut values=vec![Sql::Integer(q.after.unwrap_or(if newest {i64::MAX}else{0}))];
             { let mut add=|clause:&str,value:Sql| {sql.push_str(clause);values.push(value);};
             if let Some(v)=flow {add(" AND t.flow_id=?",v.into());}
@@ -213,6 +235,18 @@ impl Traffic {
             let has_flag:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM flag_events WHERE flow_id=?1)",[id],|r|r.get(0))?;
             Ok((findings,has_flag))
         }).await?;
+        let blocked = self
+            .auth
+            .db
+            .run({
+                let id = value["flow_id"].as_str().unwrap_or_default().to_owned();
+                move |db| {
+                    let sql = format!("SELECT {}", super::visibility::blocked_sql("?1", None));
+                    Ok(db.query_row(&sql, [id], |r| r.get::<_, bool>(0))?)
+                }
+            })
+            .await?;
+        value["blocked"] = blocked.into();
         value["findings_truncated"] = (findings.len() > 100).into();
         value["rule_hits"] = Value::Array(
             findings
@@ -315,7 +349,7 @@ fn convert(event: proto::Event) -> anyhow::Result<Row> {
         }
         Some(Payload::RuleHit(h)) => (
             "rule_hit",
-            json!({"rule_id":h.rule_id,"action":h.action,"mode":h.mode,"message_id":h.message_id}),
+            json!({"rule_id":h.rule_id,"action":h.action,"mode":h.mode,"message_id":h.message_id,"blocked":h.blocked || (h.mode == 2 && matches!(h.action, 3..=5))}),
         ),
         Some(Payload::Loss(l)) => (
             "event_loss",

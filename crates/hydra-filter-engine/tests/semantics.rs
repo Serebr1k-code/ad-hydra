@@ -397,12 +397,13 @@ fn bounded_rate_windows_separate_keys_and_missing_fields() {
             FieldValue::String("10.0.0.1".into()),
         ),
     ]);
+    let first = snapshot.evaluate(&context(&fields));
+    assert!(first.action.is_none());
+    assert!(!first.hits[0].blocked);
     assert!(snapshot.evaluate(&context(&fields)).action.is_none());
-    assert!(snapshot.evaluate(&context(&fields)).action.is_none());
-    assert_eq!(
-        snapshot.evaluate(&context(&fields)).action,
-        Some(Action::DropConnection)
-    );
+    let exceeded = snapshot.evaluate(&context(&fields));
+    assert_eq!(exceeded.action, Some(Action::DropConnection));
+    assert!(exceeded.hits[0].blocked);
     fields.insert(
         "network.src_ip".into(),
         FieldValue::String("10.0.0.2".into()),

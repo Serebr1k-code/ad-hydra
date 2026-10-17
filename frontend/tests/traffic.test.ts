@@ -56,3 +56,12 @@ test('stream previews are bounded and visibly report omitted content', () => {
  expect(output.length).toBeLessThan(8300)
  expect(output).toContain('[preview truncated]')
 })
+
+test('blocked streams are hidden by default and service colors are stable',()=>{
+ const rows=traffic.flowRows({items:[{flow_id:'ok'},{flow_id:'blocked',blocked:true,has_flag:true}],next_cursor:null})
+ expect(traffic.visibleFlows(rows,false).map(f=>f.flow_id)).toEqual(['ok'])
+ expect(traffic.visibleFlows(rows,true)).toHaveLength(2)
+ expect(traffic.serviceColor('docs')).toBe(traffic.serviceColor('docs'))
+ expect(new Set(['docs','ark','crypter','aquarius'].map(traffic.serviceColor)).size).toBe(4)
+ expect(traffic.serviceColor('untrusted; color:red')).toMatch(/^hsl\(\d+(?:\.\d+)? 65% 55%\)$/)
+})
