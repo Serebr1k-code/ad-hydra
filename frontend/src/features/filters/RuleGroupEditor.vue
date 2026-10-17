@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { fields, fieldKind, createCondition, createGroup, type Condition, type Group, type RuleNode } from './ruleBuilder'
+import { fields, fieldKind, createCondition, createGroup, removeChild, type Condition, type Group, type RuleNode } from './ruleBuilder'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 defineProps<{ group: Group; depth?: number }>()
+const emit = defineEmits<{ remove: [] }>()
 const operators = {
   string: [
     { value: 'eq', label: 'equals' }, { value: 'ne', label: 'does not equal' },
@@ -25,7 +26,6 @@ function setField(condition: Condition, value: unknown) {
 }
 function setOperator(condition: Condition, value: unknown) { if (typeof value === 'string') condition.op = value }
 function add(group: Group, child: RuleNode) { group.children.push(child) }
-function remove(group: Group, index: number) { if (group.children.length > 1) group.children.splice(index, 1) }
 function setCustomField(condition: Condition, value: string | number) { condition.field = String(value) }
 function isKnownField(field: string) { return fields.some(item => item.value === field) }
 function setNegate(node: Condition | Group, value: boolean | 'indeterminate') { node.negate = value === true }
@@ -41,7 +41,7 @@ function setNegate(node: Condition | Group, value: boolean | 'indeterminate') { 
       </Select>
       <span class="text-sm text-muted-foreground">of these rules</span>
       <label class="ml-auto flex items-center gap-2 text-sm"><Checkbox :model-value="group.negate === true" aria-label="Invert group" @update:model-value="value => setNegate(group, value)" />Invert group</label>
-      <span v-if="depth" class="ml-auto text-xs text-muted-foreground">Grouped</span>
+      <Button v-if="depth" type="button" variant="ghost" size="sm" aria-label="Remove group" @click="emit('remove')">Remove group</Button>
     </div>
     <div v-for="(node, index) in group.children" :key="node.id" class="space-y-2">
       <template v-if="node.kind === 'condition'">
@@ -59,11 +59,11 @@ function setNegate(node: Condition | Group, value: boolean | 'indeterminate') { 
             <SelectContent><SelectItem v-for="op in operators[fieldKind(node.field)]" :key="op.value" :value="op.value">{{ op.label }}</SelectItem></SelectContent>
           </Select>
           <Input v-model="node.value" :aria-label="fieldKind(node.field) === 'number' ? 'Rule numeric value' : 'Rule text value'" :placeholder="fieldKind(node.field) === 'number' ? 'e.g. 512kb' : 'Value or regular expression'" />
-          <Button variant="ghost" size="sm" aria-label="Remove rule" :disabled="group.children.length === 1" @click="remove(group, index)">Remove</Button>
+          <Button type="button" variant="ghost" size="sm" aria-label="Remove rule" :disabled="group.children.length === 1" @click="removeChild(group, node.id)">Remove</Button>
         </div>
         <label v-if="node.op !== 'not_regex'" class="flex items-center gap-2 pl-1 text-xs text-muted-foreground"><Checkbox :model-value="node.negate === true" aria-label="Invert condition" @update:model-value="value => setNegate(node, value)" />Invert condition</label>
       </template>
-      <RuleGroupEditor v-else :group="node" :depth="(depth ?? 0) + 1" />
+      <RuleGroupEditor v-else :group="node" :depth="(depth ?? 0) + 1" @remove="removeChild(group, node.id)" />
       <p v-if="index < group.children.length - 1" class="pl-2 text-xs font-medium uppercase text-muted-foreground">{{ group.join === 'all' ? 'and' : 'or' }}</p>
     </div>
     <div class="flex flex-wrap gap-2">

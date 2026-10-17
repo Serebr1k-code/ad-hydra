@@ -99,6 +99,8 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
           <div class="space-y-2 md:col-span-2"><Label for="filter-description">Description</Label><Textarea id="filter-description" v-model="form.description" maxlength="4096" rows="2" /></div>
         </div>
 
+        <p v-if="form.mode === 'shadow'" role="status" class="rounded-md border p-3 text-sm">Shadow mode: matches are counted, but traffic is allowed through. Test the saved filter, then switch to Enforce to apply its action.</p>
+
         <section class="space-y-2" :aria-disabled="!expressionEditable">
           <div><h3 class="font-medium">Match conditions</h3><p class="text-sm text-muted-foreground">Groups add parentheses. Choose whether all or any conditions inside a group must match.</p></div>
           <RuleGroupEditor :group="form.rules" />

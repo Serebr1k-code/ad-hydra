@@ -110,3 +110,15 @@ canonical contracts implicitly to match these internal representations.
 
 Validation: `cargo test --offline -p hydra-filter-engine -p hydra-domain` and
 `cargo clippy --offline -p hydra-filter-engine --all-targets -- -D warnings`.
+
+In the visual editor, every nested group has a **Remove group** button. Removing
+its last parent child inserts a default condition so the parent stays editable;
+review that condition before saving. The root group stays in place.
+
+**Enabled** and **Enforce** are separate settings. An enabled **Shadow** filter
+counts matches but allows traffic through, including HTTP block actions. Test the
+saved filter with **Test saved message**, using a message ID from Traffic Explorer,
+then choose **Enforce tested rule** (or edit its mode to Enforce). The exact saved
+expression and action must have been tested; changing either requires a new test.
+Check that desired and applied revisions agree before checking the service's
+public proxy port. Requests sent directly to its private upstream bypass Hydra.

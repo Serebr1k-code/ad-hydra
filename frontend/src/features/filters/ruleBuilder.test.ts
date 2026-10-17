@@ -53,3 +53,18 @@ describe('visual filter expression builder', () => {
     expect(() => toExpression({ ...condition, value: '0.1B' })).toThrow()
   })
 })
+
+test('removes nested groups without changing siblings and keeps an editable last condition', async () => {
+  const { createGroup, removeChild } = await import('./ruleBuilder')
+  const root = createGroup()
+  const sibling = root.children[0]!
+  const nested = createGroup()
+  root.children.push(nested)
+  removeChild(root, nested.id)
+  expect(root.children).toEqual([sibling])
+  root.children = [createGroup()]
+  removeChild(root, root.children[0]!.id)
+  expect(root.children).toHaveLength(1)
+  expect(root.children[0]!.kind).toBe('condition')
+  expect(() => toExpression(root)).not.toThrow()
+})

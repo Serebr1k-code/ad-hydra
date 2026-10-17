@@ -130,3 +130,6 @@ Changed/new implementation files: `modules/flags/{mod,http,repository,submitter,
 ### 2026-10-17 — Reinstall after the operator reset the A/D environment
 
 Post-smoke 2-second sample: Core 36,524 KiB RSS/Proxy 7,240 KiB RSS, combined 42.7 MiB; 0% CPU registered at this sampling resolution. Guest 2 vCPU/3915 MiB RAM, 996 MiB used/2919 MiB available with games. Detailed commands, files, measurements and limitations are in the reinstall report. The operator credential is generated/stored only root-private on the VM and handed directly to the user. Old erased state cannot be restored from this fresh install; submission remains paused pending the actual user-supplied checker script.
+
+### 2026-10-17 — Group removal and Docs filter enforcement
+

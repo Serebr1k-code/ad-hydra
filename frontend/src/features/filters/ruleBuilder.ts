@@ -111,3 +111,11 @@ export function fromExpression(expression: Expression): Group {
   const node = parseNode(expression)
   return node.kind === 'group' ? node : { id: crypto.randomUUID(), kind: 'group', join: 'all', negate: false, children: [node] }
 }
+
+/** Keep the editor valid when its only nested group is removed. */
+export function removeChild(group: Group, id: string) {
+  const index = group.children.findIndex(child => child.id === id)
+  if (index < 0) return
+  group.children.splice(index, 1)
+  if (!group.children.length) group.children.push(createCondition())
+}
