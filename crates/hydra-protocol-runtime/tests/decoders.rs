@@ -107,6 +107,24 @@ fn utf8_decoder_handles_fragmented_and_invalid_text_without_losing_data() {
 }
 
 #[test]
+fn utf8_decoder_keeps_fragment_tails_separate_between_directions() {
+    let mut decoder = SessionDecoder::Utf8(hydra_protocol_runtime::Utf8Decoder::default());
+    assert!(
+        decoder
+            .feed(Direction::ClientToServer, &[0xe2, 0x82])
+            .unwrap()
+            .is_empty()
+    );
+    let response = decoder.feed(Direction::ServerToClient, b"reply").unwrap();
+    assert_eq!(
+        response[0].fields["utf8.text"],
+        Value::String("reply".into())
+    );
+    let request = decoder.feed(Direction::ClientToServer, &[0xac]).unwrap();
+    assert_eq!(request[0].fields["utf8.text"], Value::String("€".into()));
+}
+
+#[test]
 fn utf8_decoder_splits_large_reads_into_bounded_text_events() {
     let mut decoder = SessionDecoder::Utf8(hydra_protocol_runtime::Utf8Decoder::default());
     let input = vec![b'a'; 16 * 1024];

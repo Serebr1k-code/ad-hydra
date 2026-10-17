@@ -9,13 +9,14 @@ import { Alert,AlertDescription } from '@/components/ui/alert'
 import { Select,SelectContent,SelectItem,SelectTrigger,SelectValue } from '@/components/ui/select'
 import FlowCapture from './FlowCapture.vue'
 import { eventMessage,mergeMessages,type TrafficEvent } from './live'
-import { differences,direction,fields,flowRows,historyPreview,historySegments,initialStreamMode,messageRows,record,streamText,timestamp,type Flow,type Message } from './traffic'
+import { differences,direction,fields,flowRows,historyPreview,historySegments,historyTextSegments,initialStreamMode,messageRows,record,streamText,timestamp,type Flow,type Message } from './traffic'
 const props=defineProps<{flowId:string;flow?:Flow;protocolId?:string}>()
 const detail=ref<Flow|undefined>(props.flow),messages=ref<Message[]>([]),cursor=ref<number|null>()
 const inspect=ref<Message>(),selected=ref<Message>(),comparison=ref<ReturnType<typeof differences>>([]),comparisonTitle=ref('')
 const streamBody=ref<HTMLElement>()
 const rawProfile=computed(()=>props.protocolId==='raw')
 const closureHistoryLost=computed(()=>record(detail.value?.closed).history_truncated===true)
+const hasHistoryTextFallback=computed(()=>detail.value?.state==='Closed'&&messages.value.length===0&&historyState.value==='ready'&&history.value!==undefined)
 const mode=ref(initialStreamMode(props.protocolId??'raw')),side=ref<'both'|'1'|'2'>('both'),loading=ref(false),error=ref(''),notice=ref('')
 const byteMode=ref<'hex'|'utf8'|'ascii'>('hex'),history=ref<FlowHistory>(),historyState=ref<'idle'|'loading'|'ready'|'missing'|'active'|'unavailable'>('idle')
 const visible=computed(()=>messages.value.filter(m=>side.value==='both'||String(m.direction)===side.value))
@@ -98,7 +99,14 @@ onUnmounted(()=>{disposed=true;request++})
     <p v-if="messages.length>=500" class="text-xs text-muted-foreground">Showing the latest 500 decoded messages in this session.</p>
     <p class="text-xs text-muted-foreground">Decoded fields in session order. Client traffic is red; server traffic is blue. Byte samples are available under Captured bytes.</p>
     <p v-if="loading&&!messages.length" role="status">Loading conversation…</p>
-    <p v-if="!loading&&!messages.length" class="py-8 text-sm text-muted-foreground">No decoded messages were retained for this session. Unknown and encrypted protocols still have session metadata. On a live session, use Captured bytes to inspect the next chunk.</p>
+    <template v-if="hasHistoryTextFallback&&history">
+     <p class="text-xs text-muted-foreground">No parser messages were retained. Showing saved stream bytes as UTF-8, grouped by direction; packet timing and protocol fields are unavailable. Switch to Captured bytes for the default hex view.</p>
+     <article v-for="(segment,index) in historyTextSegments(history,side)" :key="index" class="space-y-1 border-l-2 pl-3" :class="segment.direction===1?'border-red-400/60':'border-blue-400/60'">
+      <div class="text-[11px] text-muted-foreground">{{direction(segment.direction)}} · {{segment.data.length}} retained bytes<span v-if="segment.truncated"> · direction tail truncated</span></div>
+      <pre class="!max-h-none !rounded-none !border-0 !bg-transparent !p-0 font-mono !text-[13px] !leading-6">{{historyPreview(segment,'utf8')||'(empty)'}}</pre>
+     </article>
+    </template>
+    <p v-else-if="!loading&&!messages.length" class="py-8 text-sm text-muted-foreground">No decoded messages were retained for this session. Unknown and encrypted protocols still have session metadata. Closed streams appear here as UTF-8 when saved history is available; use Captured bytes to inspect the next chunk on a live session.</p>
     <article v-for="message in visible" :key="message.message_id" :data-message-id="message.message_id" :data-direction="message.direction" class="border-l-2 pl-3" :class="message.direction===1?'border-red-400/60':message.direction===2?'border-blue-400/60':'border-border'">
      <div class="mb-1 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground"><span :class="message.direction===1?'text-red-300':message.direction===2?'text-blue-300':''">{{direction(message.direction)}}</span><span>{{timestamp(message.occurred_ms)}}</span><span>{{message.message_type||message.protocol_id}}</span><span v-if="message.truncated">Truncated</span></div>
      <pre class="!max-h-none !rounded-none !border-0 !bg-transparent !p-0 font-mono !text-[13px] !leading-6">{{streamText(message)}}</pre>

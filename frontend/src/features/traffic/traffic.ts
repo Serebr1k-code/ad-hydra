@@ -58,6 +58,16 @@ export type HistoryDisplaySegment = HistorySegment & { truncated: boolean }
 export function historySegments(history: Pick<FlowHistory,'segments'|'truncated_client_to_server'|'truncated_server_to_client'>, side: 'both'|'1'|'2'): HistoryDisplaySegment[] {
  return history.segments.filter(segment=>side==='both'||String(segment.direction)===side).map(segment=>({...segment,truncated:segment.direction===1?history.truncated_client_to_server:history.truncated_server_to_client}))
 }
+/** Combine saved chunks per direction so split UTF-8 code points decode correctly. */
+export function historyTextSegments(history: Pick<FlowHistory,'segments'|'truncated_client_to_server'|'truncated_server_to_client'>, side: 'both'|'1'|'2'): HistoryDisplaySegment[] {
+ const grouped=new Map<number,HistoryDisplaySegment>()
+ for(const segment of historySegments(history,side)) {
+  const existing=grouped.get(segment.direction)
+  if(existing){existing.data.push(...segment.data);existing.truncated ||= segment.truncated}
+  else grouped.set(segment.direction,{...segment,data:[...segment.data]})
+ }
+ return [...grouped.values()]
+}
 /** Raw defaults to the hex dump; text decoding is an explicit operator choice. */
 export function historyPreview(segment: Pick<HistorySegment,'data'>, mode: 'hex'|'utf8'|'ascii'): string {
  const preview=bytePreview(segment.data)

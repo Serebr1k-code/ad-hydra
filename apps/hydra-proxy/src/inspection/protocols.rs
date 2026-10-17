@@ -50,10 +50,10 @@ impl ProtocolSession {
             _ => None,
         }
     }
-    pub fn is_wasm(&self) -> bool {
+    pub fn is_stream_decoder(&self) -> bool {
         matches!(
             self.decoder,
-            SessionDecoder::Wasm(_) | SessionDecoder::Framing(_)
+            SessionDecoder::Wasm(_) | SessionDecoder::Framing(_) | SessionDecoder::Utf8(_)
         )
     }
     pub fn feed(&mut self, direction: Direction, bytes: &[u8]) -> Result<Vec<ParsedMessage>> {

@@ -1,6 +1,6 @@
 # Hydra — Product & Architecture Specification (authoritative handoff)
 
-Status: agreed product decisions + implementation guidance. Version: handoff 1.0. Audience: coding agent (GPT-6.1 Sol) and human maintainer.
+Status: agreed product decisions + implementation guidance. Farm host-execution amendment 2026-10-17: the user explicitly authorized ordinary host child execution for Binary, Python (uv with optional versioned dependencies), and Bash. Farm has separate service(name/port) and team(name/IP) catalogs, per-exploit service selection, direct/all-team runs, and gzip-compressed rotating logs. The previous mandatory exploit-isolation requirement is superseded for explicitly configured host mode; retain sandbox mode as an alternative. See docs/farm.md and DECISIONS.md. Python submission amendment 2026-10-17: Farm output regex matches enter a persistent flag queue; an editable uploaded/pasted Python script with optional uv dependencies receives flags as positional arguments in30-second batch windows. Exit0 accepts the whole call; failures retry up to10times. See docs/farm.md for bounded chunks and gzip history. Version: handoff 1.0. Audience: coding agent (GPT-6.1 Sol) and human maintainer.
 
 ## 1. Goal and environment
 

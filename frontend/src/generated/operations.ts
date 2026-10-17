@@ -76,6 +76,30 @@ export const operations = {
     "method": "GET",
     "path": "/api/v1/config/export"
   },
+  "farm_service_delete": {
+    "method": "DELETE",
+    "path": "/api/v1/farm/services/{id}"
+  },
+  "farm_service_write": {
+    "method": "PUT",
+    "path": "/api/v1/farm/services"
+  },
+  "farm_services": {
+    "method": "GET",
+    "path": "/api/v1/farm/services"
+  },
+  "farm_team_delete": {
+    "method": "DELETE",
+    "path": "/api/v1/farm/teams/{id}"
+  },
+  "farm_team_write": {
+    "method": "PUT",
+    "path": "/api/v1/farm/teams"
+  },
+  "farm_teams": {
+    "method": "GET",
+    "path": "/api/v1/farm/teams"
+  },
   "farm_upload": {
     "method": "PUT",
     "path": "/api/v1/farm/exploits/{id}/versions/{version}"
@@ -160,6 +184,10 @@ export const operations = {
     "method": "POST",
     "path": "/api/v1/farm/runs/{id}/retry"
   },
+  "rotate": {
+    "method": "DELETE",
+    "path": "/api/v1/farm/runs"
+  },
   "run": {
     "method": "POST",
     "path": "/api/v1/farm/runs"
@@ -195,6 +223,14 @@ export const operations = {
   "submit": {
     "method": "POST",
     "path": "/api/v1/flags/{id}/submit"
+  },
+  "submitter_config": {
+    "method": "GET",
+    "path": "/api/v1/submitter"
+  },
+  "submitter_configure": {
+    "method": "PUT",
+    "path": "/api/v1/submitter"
   },
   "target": {
     "method": "PUT",

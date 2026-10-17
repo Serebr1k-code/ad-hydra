@@ -12,13 +12,13 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use utoipa::{OpenApi, ToSchema};
-struct Error(StatusCode);
+pub(super) struct Error(pub(super) StatusCode);
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         (self.0,Json(serde_json::json!({"error":{"code":"flags_request_failed","message":"Flag operation failed"}}))).into_response()
     }
 }
-async fn actor(f: &Flags, h: &HeaderMap, mutation: bool) -> Result<Actor, Error> {
+pub(super) async fn actor(f: &Flags, h: &HeaderMap, mutation: bool) -> Result<Actor, Error> {
     if mutation && h.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(&f.auth.origin) {
         return Err(Error(StatusCode::FORBIDDEN));
     }
@@ -108,8 +108,25 @@ async fn triage(
 }
 #[derive(OpenApi)]
 #[openapi(
-    paths(list, create, submit, submissions, triage),
-    components(schemas(FlagView, SubmissionView, ManualFlag, FlagCreated, Triage))
+    paths(
+        list,
+        create,
+        submit,
+        submissions,
+        triage,
+        super::script_http::view,
+        super::script_http::configure
+    ),
+    components(schemas(
+        FlagView,
+        SubmissionView,
+        ManualFlag,
+        FlagCreated,
+        Triage,
+        super::script_config::SubmitterConfig,
+        super::script_config::SubmitterView,
+        super::script_config::SubmitterBatch
+    ))
 )]
 pub struct FlagsApi;
 pub fn router(flags: Flags) -> Router {
@@ -119,5 +136,6 @@ pub fn router(flags: Flags) -> Router {
         .route("/api/v1/flags/{id}/triage", post(triage))
         .route("/api/v1/submissions", get(submissions))
         .layer(DefaultBodyLimit::max(4096))
-        .with_state(flags)
+        .with_state(flags.clone())
+        .merge(super::script_http::router(flags))
 }

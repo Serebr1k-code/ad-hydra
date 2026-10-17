@@ -53,3 +53,10 @@ version = "1"
 version = "0.26"
 default-features = false
 features = ["ring", "tls12"]
+
+[dependencies.nix]
+workspace = true
+features = ["process", "signal"]
+
+[dependencies.flate2]
+version = "1"

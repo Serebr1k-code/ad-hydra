@@ -58,12 +58,14 @@ class Relay(unittest.TestCase):
 
             threading.Thread(target=echo_tcp, daemon=True).start()
             threading.Thread(target=echo_udp, daemon=True).start()
-            tp, up = port(), port(socket.SOCK_DGRAM)
+            tp, up, text_port = port(), port(socket.SOCK_DGRAM), port()
             snapshot = {'revision': 1, 'services': [
                 {'id': 'tcp', 'transport': 'tcp', 'listen_address': f'127.0.0.1:{tp}',
                  'upstream_address': f'127.0.0.1:{tcp.getsockname()[1]}', 'enabled': True, 'protocol_id': 'raw'},
                 {'id': 'udp', 'transport': 'udp', 'listen_address': f'127.0.0.1:{up}',
-                 'upstream_address': f'127.0.0.1:{udp.getsockname()[1]}', 'enabled': True, 'protocol_id': 'raw'}]}
+                 'upstream_address': f'127.0.0.1:{udp.getsockname()[1]}', 'enabled': True, 'protocol_id': 'raw'},
+                {'id': 'text', 'transport': 'tcp', 'listen_address': f'127.0.0.1:{text_port}',
+                 'upstream_address': f'127.0.0.1:{tcp.getsockname()[1]}', 'enabled': True, 'protocol_id': 'utf8'}]}
             sock = str(tmp / 'proxy.sock')
             cfg = {'socket': sock, 'state_file': str(tmp / 'last-good.json'),
                    'snapshot': snapshot, 'limits': {'max_flows': 4, 'udp_idle_ms': 200}}
@@ -170,6 +172,27 @@ class Relay(unittest.TestCase):
                         got += data
                     self.assertEqual(got, payload + b'after-half-close')
 
+            def check_utf8_conversation(token):
+                sent = 'UTF-8 conversation: привет €\n'.encode()
+                with socket.create_connection(('127.0.0.1', text_port), timeout=2) as client:
+                    client_port = client.getsockname()[1]
+                    client.sendall(sent)
+                    client.shutdown(socket.SHUT_WR)
+                    received = b''
+                    while data := client.recv(8192):
+                        received += data
+                self.assertEqual(received, sent + b'after-half-close')
+                for _ in range(60):
+                    _, page = api_request('GET', '/api/v1/traffic/flows?service_id=text&newest_first=true&limit=50', token)
+                    flow = next((item for item in page['items'] if item.get('client', {}).get('port') == client_port), None)
+                    if flow:
+                        _, messages = api_request('GET', f'/api/v1/traffic/flows/{flow["flow_id"]}/messages?limit=100', token)
+                        texts = {direction: ''.join(item['fields']['utf8.text']['value'] for item in messages['items'] if item['direction'] == direction) for direction in (1, 2)}
+                        if texts == {1: sent.decode(), 2: received.decode()}:
+                            return
+                    time.sleep(.05)
+                self.fail('UTF-8 client/server messages were not parsed, transferred over gRPC and indexed by Core')
+
             def check_udp():
                 clients = [socket.socket(type=socket.SOCK_DGRAM) for _ in range(2)]
                 try:
@@ -205,6 +228,7 @@ class Relay(unittest.TestCase):
                 else:
                     self.fail('Core HTTP did not become ready for login')
                 check_saved_history(token)
+                check_utf8_conversation(token)
                 check_tcp()
                 check_udp()
                 live = socket.create_connection(('127.0.0.1', tp), timeout=2)

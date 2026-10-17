@@ -36,3 +36,6 @@ offline apart from its explicit target broker. Keep the short private runtime di
 on persistent storage when exact resolved Python environments must survive restarts,
 and provision a filesystem quota if a hard disk cap is required. See
 [Python preparation limits](../docs/sandbox-integration.md#python-packages-and-uv).
+
+## Farm host runner
+

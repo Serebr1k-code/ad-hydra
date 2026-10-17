@@ -4,7 +4,7 @@ use crate::{
     modules::{audit::Actor, auth::AuthState},
 };
 use std::{os::unix::fs::PermissionsExt, sync::Arc};
-async fn setup() -> (Farm, std::path::PathBuf) {
+pub(super) async fn setup() -> (Farm, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("hydra-farm-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&dir).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -32,7 +32,7 @@ fn target() -> Target {
         revision: 0,
     }
 }
-fn exploit() -> Exploit {
+pub(super) fn exploit() -> Exploit {
     Exploit {
         id: "toy".into(),
         name: "toy".into(),
@@ -48,6 +48,8 @@ fn exploit() -> Exploit {
             python_packages: vec![],
         },
         target_ids: vec!["local".into()],
+        service_id: None,
+        team_ids: vec![],
         interval_seconds: None,
     }
 }
@@ -92,13 +94,13 @@ async fn persisted_queue_audit_idempotency_and_fail_closed() {
     f.auth
         .db
         .run(move |db| {
-            let (status, err): (String, String) = db.query_row(
-                "SELECT status,stderr FROM farm_runs WHERE id=?1",
+            let (status, err): (String, Vec<u8>) = db.query_row(
+                "SELECT status,stderr_gzip FROM farm_runs WHERE id=?1",
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             assert_eq!(status, "failed");
-            assert!(err.contains("sandbox prerequisites"));
+            assert!(String::from_utf8(super::runtimes::decode_log(&err)?).unwrap().contains("sandbox prerequisites"));
             let n: i64 = db.query_row(
                 "SELECT count(*) FROM audit WHERE actor_id='operator' AND action LIKE 'farm.%'",
                 [],

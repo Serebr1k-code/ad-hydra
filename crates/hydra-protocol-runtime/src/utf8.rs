@@ -8,7 +8,7 @@ const TEXT_CHUNK: usize = 4096;
 /// when a UTF-8 code point is split across transport reads.
 #[derive(Default)]
 pub struct Utf8Decoder {
-    tail: Vec<u8>,
+    tails: [Vec<u8>; 2],
 }
 
 impl Utf8Decoder {
@@ -20,10 +20,14 @@ impl Utf8Decoder {
         if bytes.len() > MAX_INPUT {
             return Err(DecodeError("UTF-8 decoder input exceeds 64 KiB".into()));
         }
-        let mut input = Vec::with_capacity(self.tail.len() + bytes.len());
-        input.extend_from_slice(&self.tail);
+        let tail = &mut self.tails[match direction {
+            Direction::ClientToServer => 0,
+            Direction::ServerToClient => 1,
+        }];
+        let mut input = Vec::with_capacity(tail.len() + bytes.len());
+        input.extend_from_slice(tail);
         input.extend_from_slice(bytes);
-        self.tail.clear();
+        tail.clear();
         let mut decoded = String::with_capacity(input.len());
         let mut offset = 0;
         while offset < input.len() {
@@ -43,8 +47,8 @@ impl Utf8Decoder {
                         decoded.push('\u{fffd}');
                         offset += invalid_len;
                     } else {
-                        self.tail.extend_from_slice(&input[offset..]);
-                        if self.tail.len() > 3 {
+                        tail.extend_from_slice(&input[offset..]);
+                        if tail.len() > 3 {
                             return Err(DecodeError(
                                 "UTF-8 decoder retained an invalid tail".into(),
                             ));

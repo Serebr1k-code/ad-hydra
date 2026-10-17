@@ -172,7 +172,13 @@ pub async fn run() -> anyhow::Result<()> {
                     .parent()
                     .unwrap_or(std::path::Path::new("."))
                     .join("exploits"),
-                crate::infrastructure::operations::runner(settings.sandbox, flags.clone()),
+                crate::infrastructure::operations::runner(
+                    settings.sandbox,
+                    settings.execution_mode,
+                    settings.host_runtime,
+                    flags.clone(),
+                    auth.db.clone(),
+                ),
             )
             .await?;
             let control = Control::open(auth.clone()).await?;

@@ -18,6 +18,10 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 type Decoder = Arc<Mutex<Option<ProtocolSession>>>;
 
+#[cfg(test)]
+#[path = "tcp_tests.rs"]
+mod tests;
+
 pub async fn listen(
     listener: Arc<TcpListener>,
     mut service: watch::Receiver<Option<Service>>,
@@ -284,7 +288,7 @@ fn inspect_raw(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
                                     .collect()
                             }),
                     )
-                } else if d.is_wasm() {
+                } else if d.is_stream_decoder() {
                     Some(
                         d.feed(direction, bytes).map(|messages| {
                             messages.into_iter().map(|m| (m, 0)).collect::<Vec<_>>()
@@ -293,7 +297,7 @@ fn inspect_raw(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
                 } else {
                     None
                 }
-            } else if d.is_wasm() {
+            } else if d.is_stream_decoder() {
                 Some(
                     d.feed(direction, bytes)
                         .map(|messages| messages.into_iter().map(|m| (m, 0)).collect::<Vec<_>>()),
@@ -334,7 +338,7 @@ fn inspect_raw(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
                     if native_http {
                         "http_response_decoder_disabled"
                     } else {
-                        "wasm_decoder_disabled"
+                        "protocol_decoder_disabled"
                     },
                 );
             }

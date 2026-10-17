@@ -108,7 +108,7 @@ impl Flags {
         self.auth.db.run(move|db|{let tx=db.transaction()?;
             if let Some(event)=&event && let Some(id)=tx.query_row("SELECT flag_id FROM flag_events WHERE event_id=?1",[event],|r|r.get::<_,String>(0)).optional()? {return Ok(id)}
             if category=="captured" {anyhow::ensure!(!tx.query_row("SELECT EXISTS(SELECT 1 FROM flags WHERE digest=?1 AND category='own_exposed')",[&digest],|r|r.get::<_,bool>(0))?,"defensive flag cannot become captured");}
-            if let Some(target)=&target {let enabled:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM farm_targets WHERE id=?1 AND enabled=1)",[target],|r|r.get(0))?;anyhow::ensure!(enabled,"target not enabled");}
+            if let Some(target)=&target {anyhow::ensure!(farm_target_enabled(&tx,target,run.as_deref())?,"target not enabled");}
             let existing=tx.query_row("SELECT id FROM flags WHERE digest=?1 AND category=?2",params![digest,category],|r|r.get::<_,String>(0)).optional()?;
             let id=existing.clone().unwrap_or_else(||uuid::Uuid::new_v4().to_string());
             let count:i64=tx.query_row("SELECT count(*) FROM flags",[],|r|r.get(0))?;anyhow::ensure!(count<100000,"flag vault full");
@@ -121,7 +121,6 @@ impl Flags {
         }).await
     }
     pub async fn submit(&self, id: String, actor: Actor, request: String) -> anyhow::Result<()> {
-        anyhow::ensure!(self.settings.checker.is_some(), "checker not configured");
         self.auth
             .db
             .run(move |db| {
@@ -228,4 +227,28 @@ impl Flags {
  audit::append_change(&tx,&actor,"flags.triage",&id,&request,true,now(),&serde_json::json!({"before":{"category":category,"triage":before},"after":{"resolution":body.resolution,"target_id":body.target_id}}))?;
  tx.commit()?;Ok(())}).await
     }
+}
+
+// Catalog team IDs are accepted only with the immutable run that selected them.
+fn farm_target_enabled(
+    tx: &Transaction<'_>,
+    target: &str,
+    run: Option<&str>,
+) -> anyhow::Result<bool> {
+    if tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM farm_targets WHERE id=?1 AND enabled=1)",
+        [target],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Ok(true);
+    }
+    let Some(run) = run else { return Ok(false) };
+    if !tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='farm_teams')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Ok(false);
+    }
+    Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM farm_teams t JOIN farm_runs r ON r.id=?2 JOIN farm_services s ON s.id=r.service_id WHERE t.id=?1 AND t.enabled=1 AND s.enabled=1 AND EXISTS(SELECT 1 FROM json_each(r.team_ids) WHERE value=t.id))",params![target,run],|r|r.get(0))?)
 }

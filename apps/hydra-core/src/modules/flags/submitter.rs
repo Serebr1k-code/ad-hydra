@@ -10,27 +10,48 @@ impl Flags {
         self,
         cancel: tokio_util::sync::CancellationToken,
     ) -> anyhow::Result<()> {
+        let mut recovery_needed = true;
+        let mut next_rotation = tokio::time::Instant::now();
+        loop {
+            tokio::select! { _=cancel.cancelled()=>return Ok(()), _=tokio::time::sleep(std::time::Duration::from_millis(250))=>{} }
+            if tokio::time::Instant::now() >= next_rotation {
+                if self.rotate_submitter_logs().await.is_err() {
+                    tracing::warn!("submitter log rotation persistence operation failed");
+                }
+                next_rotation = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+            }
+            if recovery_needed {
+                if self.recover_submissions().await.is_err() {
+                    tracing::warn!("submission recovery persistence operation failed");
+                    continue;
+                }
+                recovery_needed = false;
+            }
+            if self.dispatch_cycle(cancel.clone()).await.is_err() {
+                tracing::warn!("submission persistence operation failed");
+                recovery_needed = true;
+            }
+        }
+    }
+    pub(super) async fn recover_submissions(&self) -> anyhow::Result<()> {
+        let _permit = self.submission_slot.acquire().await?;
         self.auth.db.run(|db|{let tx=db.transaction()?;
         let defensive=tx.prepare("SELECT DISTINCT f.digest FROM flags f JOIN submissions s ON s.flag_id=f.id JOIN flags own ON own.digest=f.digest AND own.category='own_exposed' WHERE s.state IN ('queued','retry','inflight') LIMIT 5000")?.query_map([],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
         for digest in defensive {super::repository::quarantine_defensive(&tx,&digest,&Actor{kind:"system".into(),id:"submitter".into()},&uuid::Uuid::new_v4().to_string())?;}
         let rows=tx.prepare("SELECT id,attempts,initiated_by FROM submissions WHERE state='inflight' LIMIT 5000")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,u32>(1)?,r.get::<_,String>(2)?)))?.collect::<Result<Vec<_>,_>>()?;
-        for (id,attempts,initiated) in rows {let state=if attempts>=10 {"failed"}else{"retry"};tx.execute("UPDATE submissions SET state=?2 WHERE id=?1",params![id,state])?;
+        for (id,attempts,initiated) in rows {let state=if attempts>=10 {"failed"}else{"retry"};tx.execute("UPDATE submissions SET state=?2,next_attempt=?3 WHERE id=?1",params![id,state,now()+30])?;
         audit::append_change(&tx,&Actor{kind:"system".into(),id:"submitter".into()},"submissions.recover",&id,&uuid::Uuid::new_v4().to_string(),true,now(),&serde_json::json!({"initiated_by":initiated,"before":{"state":"inflight","attempts":attempts},"after":{"state":state,"attempts":attempts}}))?;}
-        tx.commit()?;Ok(())}).await?;
-        loop {
-            tokio::select! { _=cancel.cancelled()=>return Ok(()), _=tokio::time::sleep(std::time::Duration::from_millis(250))=>{} }
-            if self.settings.checker.is_none() {
-                continue;
-            }
-            if self.submit_once().await.is_err() {
-                tracing::warn!("submission persistence operation failed");
-            }
-        }
+        let running=tx.prepare("SELECT id FROM flag_submitter_batches WHERE status='running'")?.query_map([],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+        for id in running {tx.execute("UPDATE flag_submitter_batches SET status='interrupted',finished_at=?2 WHERE id=?1",params![id,now()])?;audit::append(&tx,&Actor{kind:"system".into(),id:"submitter".into()},"submitter.batch.recover",&id,&id,true,now())?;}
+        tx.commit()?;Ok(())}).await
     }
     pub async fn submit_once(&self) -> anyhow::Result<bool> {
         let Ok(_permit) = self.submission_slot.try_acquire() else {
             return Ok(false);
         };
+        self.legacy_submit_once().await
+    }
+    pub(super) async fn legacy_submit_once(&self) -> anyhow::Result<bool> {
         let Some(checker) = self.settings.checker.as_ref() else {
             return Ok(false);
         };

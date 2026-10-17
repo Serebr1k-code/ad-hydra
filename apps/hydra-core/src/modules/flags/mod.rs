@@ -1,6 +1,9 @@
 mod adapters;
 mod http;
 mod repository;
+mod script_config;
+mod script_dispatch;
+mod script_http;
 mod submitter;
 use crate::modules::{audit::Actor, auth::AuthState};
 pub use adapters::{Checker, CheckerAdapter, CheckerReply};
@@ -13,12 +16,16 @@ pub struct Settings {
     pub pattern: Option<String>,
     pub auto_submit_captured: bool,
     pub checker: Option<Checker>,
+    pub script_runtime: Option<crate::infrastructure::operations::HostRuntimeSettings>,
 }
 #[derive(Clone)]
 pub struct Flags {
     pub auth: AuthState,
     settings: Arc<Settings>,
     regex: Option<Regex>,
+    farm_regex: Arc<std::sync::RwLock<Option<Regex>>>,
+    script: Arc<std::sync::RwLock<Option<script_config::SubmitterConfig>>>,
+    configuration: Arc<tokio::sync::Mutex<()>>,
     submission_slot: Arc<tokio::sync::Semaphore>,
 }
 impl Flags {
@@ -52,22 +59,42 @@ impl Flags {
                 include_str!("../../../../../migrations/0011_flag_triage.sql"),
             )
             .await?;
+        auth.db
+            .migrate(
+                17,
+                include_str!("../../../../../migrations/0017_python_submitter.sql"),
+            )
+            .await?;
+        let script = auth.db.run(|db| script_config::load(db)).await?;
+        let farm_regex = script
+            .as_ref()
+            .map(|s| s.validate())
+            .transpose()?
+            .or_else(|| regex.clone());
         Ok(Self {
             auth,
             settings: Arc::new(settings),
             regex,
+            farm_regex: Arc::new(std::sync::RwLock::new(farm_regex)),
+            script: Arc::new(std::sync::RwLock::new(script)),
+            configuration: Arc::new(tokio::sync::Mutex::new(())),
             submission_slot: Arc::new(tokio::sync::Semaphore::new(1)),
         })
     }
     fn validate(&self, value: &str) -> anyhow::Result<()> {
         anyhow::ensure!(
-            !value.is_empty() && value.len() <= 256,
+            !value.is_empty() && value.len() <= 256 && !value.contains('\0'),
             "invalid flag length"
         );
-        let re = self
-            .regex
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("flag pattern not configured"))?;
+        let regex = self.farm_regex.read().unwrap_or_else(|e| e.into_inner());
+        Self::validate_with(regex.as_ref(), value)
+    }
+    fn validate_with(regex: Option<&Regex>, value: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !value.is_empty() && value.len() <= 256 && !value.contains('\0'),
+            "invalid flag length"
+        );
+        let re = regex.ok_or_else(|| anyhow::anyhow!("flag pattern not configured"))?;
         anyhow::ensure!(
             re.find(value)
                 .is_some_and(|m| m.start() == 0 && m.end() == value.len()),
@@ -78,8 +105,8 @@ impl Flags {
     pub fn extract(&self, input: &[u8]) -> anyhow::Result<Vec<String>> {
         anyhow::ensure!(input.len() <= 65536, "scan input too large");
         let text = String::from_utf8_lossy(input);
-        Ok(self
-            .regex
+        let regex = self.farm_regex.read().unwrap_or_else(|e| e.into_inner());
+        Ok(regex
             .as_ref()
             .map(|r| {
                 r.find_iter(&text)
@@ -99,6 +126,7 @@ impl Flags {
         request_id: String,
     ) -> anyhow::Result<String> {
         self.validate(&value)?;
+        let auto = run_id.is_some() || self.settings.auto_submit_captured;
         self.insert(
             value,
             "captured".into(),
@@ -107,7 +135,7 @@ impl Flags {
             actor,
             request_id,
             None,
-            self.settings.auto_submit_captured,
+            auto,
         )
         .await
     }
@@ -116,7 +144,7 @@ impl Flags {
         // Each committed event is replay safe; caller ACKs only after all writes succeed.
         for event in &batch.events {
             if let Some(hydra_wire::v1::event::Payload::Flag(f)) = &event.payload {
-                self.validate(&f.flag_value)?;
+                Self::validate_with(self.regex.as_ref(), &f.flag_value)?;
                 let category = if f.source_kind == "own_exposed" {
                     "own_exposed"
                 } else {
@@ -199,3 +227,6 @@ impl Flags {
 }
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod script_tests;

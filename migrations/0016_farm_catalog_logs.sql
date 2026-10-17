@@ -1,0 +1,10 @@
+CREATE TABLE farm_services(id TEXT PRIMARY KEY,name TEXT NOT NULL,port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),transport TEXT NOT NULL DEFAULT 'tcp',enabled INTEGER NOT NULL DEFAULT 1,revision INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,author_id TEXT NOT NULL);
+CREATE TABLE farm_teams(id TEXT PRIMARY KEY,name TEXT NOT NULL,host TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,revision INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,author_id TEXT NOT NULL);
+ALTER TABLE farm_exploits ADD COLUMN service_id TEXT;
+ALTER TABLE farm_exploits ADD COLUMN team_ids TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE farm_runs ADD COLUMN service_id TEXT;
+ALTER TABLE farm_runs ADD COLUMN team_ids TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE farm_runs ADD COLUMN target_snapshot TEXT;
+ALTER TABLE farm_runs ADD COLUMN stdout_gzip BLOB;
+ALTER TABLE farm_runs ADD COLUMN stderr_gzip BLOB;
+CREATE INDEX farm_runs_finished ON farm_runs(status,finished_at);

@@ -1,99 +1,127 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
-import type { Exploit, Target } from '@/generated/contracts'
-import type { FarmKind, FarmPage, FarmRun } from './types'
+import { onMounted, onUnmounted, reactive, ref } from 'vue'
+import { RouterLink } from 'vue-router'
+import type { Exploit, FarmService, FarmTeam } from '@/generated/contracts'
+import type { FarmPage, FarmRun, FarmRunDetail } from './types'
 import { api, errorMessage } from '@/shared/api/client'
+import { catalog } from './farmApi'
+import { exploitDto } from './farmDto'
 import DataTable from '@/components/DataTable.vue'
 import { Button } from '@/components/ui/button'
-import TargetForm from './TargetForm.vue'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import FarmCatalog from './FarmCatalog.vue'
 import ExploitForm from './ExploitForm.vue'
 import FarmRuns from './FarmRuns.vue'
+import FarmRunDetailView from './FarmRunDetail.vue'
 const empty = <T,>(): FarmPage<T> => ({ items: [], next_cursor: null })
-const targets = ref(empty<Target>()), exploits = ref(empty<Exploit>()), runs = ref(empty<FarmRun>())
-const selectedTarget = ref<Target | null>(null), selectedExploit = ref<Exploit | null>(null)
-const cursors = reactive<Record<FarmKind, string>>({ targets: '', exploits: '', runs: '' })
-const busy = ref(false), loading = ref(true), error = ref(''), detail = ref(''), detailTitle = ref('')
+const services = ref<FarmService[]>([]), teams = ref<FarmTeam[]>([])
+const exploits = ref(empty<Exploit>()), runs = ref(empty<FarmRun>())
+const selectedExploit = ref<Exploit | null>(null), selectedTeams = reactive<Record<string, string>>({})
+const cursors = reactive({ exploits: '', runs: '' })
+const busy = ref(false), loading = ref(true), error = ref(''), notice = ref('')
+const detail = ref<FarmRunDetail | null>(null), detailLoading = ref(false), requestedDetail = ref('')
+const versionDetail = ref(''), versionTitle = ref('')
 const keys = new Map<string, string>()
-const targetColumns = [{ key: 'name', label: 'Target' }, { key: 'address', label: 'Address' }, { key: 'transport', label: 'Transport' }, { key: 'enabled', label: 'Enabled' }, { key: 'actions', label: 'Actions' }]
-const exploitColumns = [{ key: 'name', label: 'Exploit' }, { key: 'version', label: 'Version' }, { key: 'enabled', label: 'Enabled' }, { key: 'schedule', label: 'Schedule' }, { key: 'actions', label: 'Actions' }]
-const query = (kind: FarmKind) => cursors[kind] ? `?after=${encodeURIComponent(cursors[kind])}` : ''
+let detailRefreshUntil = 0
+let mounted = true, polling = false, timer: ReturnType<typeof setInterval> | undefined
+const exploitColumns = [{ key: 'name', label: 'Exploit' }, { key: 'service', label: 'Service' }, { key: 'enabled', label: 'Enabled' }, { key: 'schedule', label: 'Schedule' }, { key: 'actions', label: 'Actions' }]
+const query = (kind: 'exploits' | 'runs') => cursors[kind] ? `?after=${encodeURIComponent(cursors[kind])}` : ''
 async function load() {
-  loading.value = true
-  try {
-    const result = await Promise.all([api<FarmPage<Target>>(`/farm/targets${query('targets')}`), api<FarmPage<Exploit>>(`/farm/exploits${query('exploits')}`), api<FarmPage<FarmRun>>(`/farm/runs${query('runs')}`)])
-    ;[targets.value, exploits.value, runs.value] = result
-  } finally { loading.value = false }
+  const result = await Promise.all([catalog<FarmService>('services'), catalog<FarmTeam>('teams'), api<FarmPage<Exploit>>(`/farm/exploits${query('exploits')}`), api<FarmPage<FarmRun>>(`/farm/runs${query('runs')}`)])
+  if (mounted) [services.value, teams.value, exploits.value, runs.value] = result
 }
 async function action(work: () => Promise<unknown>, reload = true) {
   if (busy.value) return
-  busy.value = true; error.value = ''
+  busy.value = true; error.value = ''; notice.value = ''
   try { await work(); if (reload) await load() }
-  catch (e) { error.value = errorMessage(e) }
-  finally { busy.value = false }
+  catch (e) { if (mounted) error.value = errorMessage(e) }
+  finally { busy.value = false; loading.value = false }
 }
-function saved(kind: 'targets' | 'exploits') {
-  if (kind === 'targets') selectedTarget.value = null
-  else selectedExploit.value = null
-  void action(load, false)
+function saved() { selectedExploit.value = null; void action(load, false) }
+function toggleExploit(e: Exploit) { void action(() => api('/farm/exploits', 'PUT', exploitDto({ ...e, enabled: !e.enabled }))) }
+function remove(e: Exploit) { void action(() => api(`/farm/exploits/${encodeURIComponent(e.id)}?revision=${e.revision}`, 'DELETE')) }
+function allowedTeams(exploit: Exploit) { return teams.value.filter(team => team.enabled && (!(exploit.team_ids?.length) || exploit.team_ids.includes(team.id))) }
+function enqueue(e: Exploit) {
+  const team = selectedTeams[e.id] || 'all'
+  void idempotent(`run:${e.id}:${e.revision}:${team}`, '/farm/runs', { exploit_id: e.id, revision: e.revision, ...(team === 'all' ? {} : { team_id: team }) }, true)
 }
-function toggleTarget(t: Target) {
-  void action(() => api('/farm/targets', 'PUT', { id: t.id, name: t.name, host: t.host, port: t.port, transport: t.transport, enabled: !t.enabled, revision: t.revision }))
-}
-function toggleExploit(e: Exploit) {
-  void action(() => api('/farm/exploits', 'PUT', { id: e.id, name: e.name, version: e.version, enabled: !e.enabled, revision: e.revision, manifest: e.manifest, target_ids: e.target_ids, interval_seconds: e.interval_seconds ?? null }))
-}
-function remove(kind: 'targets' | 'exploits', row: Target | Exploit) {
-  void action(() => api(`/farm/${kind}/${encodeURIComponent(row.id)}?revision=${row.revision}`, 'DELETE'))
-}
-function enqueue(e: Exploit) { void idempotent(`run:${e.id}:${e.revision}`, '/farm/runs', { exploit_id: e.id, revision: e.revision }) }
-async function idempotent(operation: string, path: string, body: unknown = null) {
+async function idempotent(operation: string, path: string, body: unknown = null, firstRuns = false) {
   await action(async () => {
     const key = keys.get(operation) ?? crypto.randomUUID()
     keys.set(operation, key)
     await api(path, 'POST', body, true, { 'Idempotency-Key': key })
     keys.delete(operation)
+    if (firstRuns) cursors.runs = ''
   })
 }
-function retry(run: FarmRun) { void idempotent(`retry:${run.id}`, `/farm/runs/${encodeURIComponent(run.id)}/retry`) }
+function retry(run: FarmRun) { void idempotent(`retry:${run.id}`, `/farm/runs/${encodeURIComponent(run.id)}/retry`, null, true) }
 function cancel(run: FarmRun) { void action(() => api(`/farm/runs/${encodeURIComponent(run.id)}/cancel`, 'POST')) }
-function showDetail(title: string, path: string) {
-  void action(async () => { const value = await api<unknown>(path); detail.value = JSON.stringify(value, null, 2) ?? ''; detailTitle.value = title }, false)
+async function readDetail(id: string) {
+  detailLoading.value = true
+  try {
+    const value = await api<FarmRunDetail>(`/farm/runs/${encodeURIComponent(id)}`)
+    if (mounted && requestedDetail.value === id) {
+      detail.value = value
+      if (['queued', 'running'].includes(value.status)) detailRefreshUntil = Date.now() + 10000
+    }
+  } finally { detailLoading.value = false }
 }
-function next(kind: FarmKind) {
-  const page = kind === 'targets' ? targets.value : kind === 'exploits' ? exploits.value : runs.value
+function showLogs(run: FarmRun) { detailRefreshUntil = Date.now() + 10000; requestedDetail.value = run.id; void action(() => readDetail(run.id), false) }
+function closeLogs() { requestedDetail.value = ''; detail.value = null }
+function showVersions(e: Exploit) {
+  void action(async () => { const value = await api<unknown>(`/farm/exploits/${encodeURIComponent(e.id)}/versions`); versionDetail.value = JSON.stringify(value, null, 2) ?? ''; versionTitle.value = `Versions: ${e.name}` }, false)
+}
+function next(kind: 'exploits' | 'runs') {
+  const page = kind === 'exploits' ? exploits.value : runs.value
   if (!page.next_cursor) return
   cursors[kind] = page.next_cursor
   void action(load, false)
 }
-function first() {
-  cursors.targets = ''; cursors.exploits = ''; cursors.runs = ''
-  void action(load, false)
+function first(kind: 'exploits' | 'runs') { cursors[kind] = ''; void action(load, false) }
+function cleanup() {
+  void action(async () => {
+    const result = await api<{ deleted: number }>('/farm/runs?older_than_days=7', 'DELETE')
+    cursors.runs = ''; notice.value = `Removed ${result.deleted} completed runs under the retention policy (7 days, 1,000 runs, 64 MiB compressed).`
+  })
 }
-onMounted(() => { void action(load, false) })
+async function poll() {
+  if (!mounted || polling || busy.value) return
+  polling = true
+  try {
+    const cursor = cursors.runs
+    const result = await api<FarmPage<FarmRun>>(`/farm/runs${query('runs')}`)
+    if (mounted && cursor === cursors.runs) runs.value = result
+    // Cancellation is terminal before the worker finishes draining its output pipes.
+    if (detail.value && (['queued', 'running'].includes(detail.value.status) || Date.now() < detailRefreshUntil)) await readDetail(detail.value.id)
+  } catch (e) { if (mounted) error.value = errorMessage(e) }
+  finally { polling = false }
+}
+onMounted(() => { void action(load, false); timer = setInterval(() => { void poll() }, 2000) })
+onUnmounted(() => { mounted = false; if (timer) clearInterval(timer) })
 </script>
 <template>
   <div class="space-y-6">
-    <header><h1 class="text-2xl font-semibold">Exploit farm</h1><p class="text-muted-foreground">Enabled numeric-IP competition targets only. Entrypoints are immutable, limited to 2 MiB, and run in the configured sandbox. One worker; bounded logs.</p></header>
-    <p v-if="error" role="alert" class="text-destructive">{{ error }}</p>
-    <p v-if="loading" role="status">Loading farm…</p>
-    <TargetForm :target="selectedTarget" @saved="saved('targets')" @cancel="selectedTarget = null" />
-    <section class="space-y-3"><h2 class="text-lg font-semibold">Target allowlist</h2>
-      <DataTable :columns="targetColumns" :rows="targets.items">
-        <template #cell-address="{ row }">{{ row.host }}:{{ row.port }}</template>
-        <template #cell-actions="{ row }"><div class="flex flex-wrap gap-2"><Button variant="outline" :disabled="busy" @click="selectedTarget = row">Edit</Button><Button variant="outline" :disabled="busy" @click="toggleTarget(row)">{{ row.enabled ? 'Disable' : 'Enable' }}</Button><Button variant="outline" :disabled="busy" @click="remove('targets', row)">Delete</Button></div></template>
-      </DataTable>
-      <Button v-if="targets.items.length === 100 && targets.next_cursor" variant="outline" :disabled="busy" @click="next('targets')">Next targets</Button>
-    </section>
-    <ExploitForm :exploit="selectedExploit" :targets="targets.items" @saved="saved('exploits')" @cancel="selectedExploit = null" />
+    <header><h1 class="text-2xl font-semibold">Exploit farm</h1><p class="text-muted-foreground">Add services and authorized teams, then upload an exploit and run it against one team or all selected teams.</p></header>
+    <div class="flex flex-wrap items-center gap-3"><Button as-child variant="outline"><RouterLink to="/flags">Flag queue / submitter</RouterLink></Button><p class="text-sm text-muted-foreground">The configured flag regex extracts matches from Farm stdout and stderr and queues captures automatically.</p></div>
+    <p v-if="error" role="alert" class="text-destructive">{{ error }}</p><p v-if="notice" role="status">{{ notice }}</p><p v-if="loading" role="status">Loading farm…</p>
+    <FarmCatalog kind="services" :items="services" @saved="action(load, false)" />
+    <FarmCatalog kind="teams" :items="teams" @saved="action(load, false)" />
+    <ExploitForm :exploit="selectedExploit" :services="services" :teams="teams" @saved="saved" @cancel="selectedExploit = null" />
     <section class="space-y-3"><h2 class="text-lg font-semibold">Exploits</h2>
       <DataTable :columns="exploitColumns" :rows="exploits.items">
+        <template #cell-service="{ row }">{{ services.find(s => s.id === row.service_id)?.name ?? (row.service_id || 'Legacy targets') }}</template>
         <template #cell-schedule="{ row }">{{ row.interval_seconds ? `${row.interval_seconds}s` : 'Manual' }}</template>
-        <template #cell-actions="{ row }"><div class="flex flex-wrap gap-2"><Button variant="outline" :disabled="busy" @click="selectedExploit = row">Edit</Button><Button variant="outline" :disabled="busy" @click="toggleExploit(row)">{{ row.enabled ? 'Disable' : 'Enable' }}</Button><Button variant="outline" :disabled="busy" @click="showDetail(`Versions: ${row.name}`, `/farm/exploits/${encodeURIComponent(row.id)}/versions`)">Versions</Button><Button variant="outline" :disabled="busy || !row.enabled" @click="enqueue(row)">Run</Button><Button variant="outline" :disabled="busy" @click="remove('exploits', row)">Delete</Button></div></template>
+        <template #cell-actions="{ row }"><div class="flex flex-wrap items-center gap-2"><Button variant="outline" :disabled="busy" @click="selectedExploit = row">Edit</Button><Button variant="outline" :disabled="busy" @click="toggleExploit(row)">{{ row.enabled ? 'Disable' : 'Enable' }}</Button><Button variant="outline" :disabled="busy" @click="showVersions(row)">Versions</Button>
+          <div v-if="row.service_id"><Label class="sr-only" :for="`run-team-${row.id}`">Team for {{ row.name }}</Label><Select :model-value="selectedTeams[row.id] || 'all'" @update:model-value="selectedTeams[row.id] = String($event)" :disabled="busy"><SelectTrigger :id="`run-team-${row.id}`" class="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All selected teams</SelectItem><SelectItem v-for="team in allowedTeams(row)" :key="team.id" :value="team.id">{{ team.name }}</SelectItem></SelectContent></Select></div>
+          <Button variant="outline" :disabled="busy || !row.enabled" @click="enqueue(row)">Run</Button><Button variant="outline" :disabled="busy" @click="remove(row)">Delete</Button></div></template>
       </DataTable>
-      <Button v-if="exploits.items.length === 100 && exploits.next_cursor" variant="outline" :disabled="busy" @click="next('exploits')">Next exploits</Button>
+      <div class="flex gap-2"><Button v-if="cursors.exploits" variant="outline" :disabled="busy" @click="first('exploits')">First exploits</Button><Button v-if="exploits.items.length === 100 && exploits.next_cursor" variant="outline" :disabled="busy" @click="next('exploits')">Next exploits</Button></div>
     </section>
-    <FarmRuns :runs="runs.items" :busy="busy" @refresh="action(load, false)" @logs="run => showDetail(`Run: ${run.id}`, `/farm/runs/${encodeURIComponent(run.id)}`)" @cancel="cancel" @retry="retry" />
-    <div class="flex gap-2"><Button v-if="runs.items.length === 100 && runs.next_cursor" variant="outline" :disabled="busy" @click="next('runs')">Next runs</Button><Button v-if="Object.values(cursors).some(Boolean)" variant="outline" :disabled="busy" @click="first">First pages</Button></div>
-    <section v-if="detail" class="space-y-2"><div class="flex items-center justify-between"><h2 class="text-lg font-semibold">{{ detailTitle }}</h2><Button variant="outline" @click="detail = ''">Close details</Button></div><pre class="max-h-96 overflow-auto rounded border p-3 text-sm">{{ detail }}</pre></section>
+    <FarmRuns :runs="runs.items" :busy="busy" @refresh="action(load, false)" @logs="showLogs" @cancel="cancel" @retry="retry" />
+    <p class="text-sm text-muted-foreground">Runs refresh every 2 seconds, newest first. Gzip compressed logs are retained for 7 days, with at most 1,000 completed runs, 1 MiB per output stream, and a total compressed disk budget of 64 MiB. Truncated output is marked in the logs.</p>
+    <div class="flex flex-wrap gap-2"><Button v-if="cursors.runs" variant="outline" :disabled="busy" @click="first('runs')">Newest runs</Button><Button v-if="runs.items.length === 100 && runs.next_cursor" variant="outline" :disabled="busy" @click="next('runs')">Older runs</Button><Button variant="outline" :disabled="busy" @click="cleanup">Apply log retention policy</Button></div>
+    <FarmRunDetailView v-if="detail" :run="detail" :loading="detailLoading" @close="closeLogs" />
+    <section v-if="versionDetail" class="space-y-2"><div class="flex items-center justify-between"><h2 class="text-lg font-semibold">{{ versionTitle }}</h2><Button variant="outline" @click="versionDetail = ''">Close versions</Button></div><pre class="max-h-96 overflow-auto rounded border p-3 text-sm">{{ versionDetail }}</pre></section>
   </div>
 </template>

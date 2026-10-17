@@ -283,6 +283,25 @@ paths:
             application/json:
               schema:
                 type: object
+    delete:
+      tags:
+      - farm
+      operationId: rotate
+      parameters:
+      - name: older_than_days
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
   /api/v1/farm/runs/{id}:
     get:
       tags:
@@ -338,6 +357,53 @@ paths:
             application/json:
               schema:
                 type: object
+  /api/v1/farm/services:
+    get:
+      tags:
+      - farm
+      operationId: farm_services
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+    put:
+      tags:
+      - farm
+      operationId: farm_service_write
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FarmService'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: ''
+  /api/v1/farm/services/{id}:
+    delete:
+      tags:
+      - farm
+      operationId: farm_service_delete
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: revision
+        in: query
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: ''
   /api/v1/farm/targets:
     get:
       tags:
@@ -370,6 +436,53 @@ paths:
       tags:
       - farm
       operationId: delete_target
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: revision
+        in: query
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: ''
+  /api/v1/farm/teams:
+    get:
+      tags:
+      - farm
+      operationId: farm_teams
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+    put:
+      tags:
+      - farm
+      operationId: farm_team_write
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FarmTeam'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: ''
+  /api/v1/farm/teams/{id}:
+    delete:
+      tags:
+      - farm
+      operationId: farm_team_delete
       parameters:
       - name: id
         in: path
@@ -1050,6 +1163,41 @@ paths:
                   $ref: '#/components/schemas/SubmissionView'
         '401':
           description: ''
+  /api/v1/submitter:
+    get:
+      tags:
+      - flags
+      operationId: submitter_config
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmitterView'
+        '401':
+          description: ''
+    put:
+      tags:
+      - flags
+      operationId: submitter_configure
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitterConfig'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmitterView'
+        '400':
+          description: ''
+        '401':
+          description: ''
   /api/v1/system/proxy:
     get:
       tags: []
@@ -1556,7 +1704,6 @@ components:
       - revision
       - version
       - manifest
-      - target_ids
       properties:
         enabled:
           type: boolean
@@ -1575,12 +1722,62 @@ components:
         revision:
           type: integer
           format: int64
+        service_id:
+          type:
+          - string
+          - 'null'
         target_ids:
+          type: array
+          items:
+            type: string
+        team_ids:
           type: array
           items:
             type: string
         version:
           type: string
+      additionalProperties: false
+    FarmService:
+      type: object
+      required:
+      - id
+      - name
+      - port
+      properties:
+        enabled:
+          type: boolean
+        id:
+          type: string
+        name:
+          type: string
+        port:
+          type: integer
+          format: int32
+          minimum: 0
+        revision:
+          type: integer
+          format: int64
+        transport:
+          type: string
+      additionalProperties: false
+    FarmTeam:
+      type: object
+      required:
+      - id
+      - name
+      - host
+      properties:
+        enabled:
+          type: boolean
+        host:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        revision:
+          type: integer
+          format: int64
       additionalProperties: false
     FilterInput:
       type: object
@@ -1882,7 +2079,7 @@ components:
           type: array
           items:
             type: string
-          description: Exact PyPI name==version pins prepared with uv before isolated execution.
+          description: PyPI package names, optionally pinned with ==version, prepared by uv.
         runtime:
           type: string
         timeout_seconds:
@@ -2044,6 +2241,10 @@ components:
         revision:
           type: integer
           format: int64
+        team_id:
+          type:
+          - string
+          - 'null'
       additionalProperties: false
     Sample:
       type: object
@@ -2206,6 +2407,99 @@ components:
           type: string
         state:
           type: string
+    SubmitterBatch:
+      type: object
+      required:
+      - id
+      - revision
+      - flag_count
+      - status
+      - started_at
+      - stdout
+      - stderr
+      properties:
+        exit_code:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        finished_at:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        flag_count:
+          type: integer
+          format: int32
+          minimum: 0
+        id:
+          type: string
+        revision:
+          type: integer
+          format: int64
+        started_at:
+          type: integer
+          format: int64
+        status:
+          type: string
+        stderr:
+          type: string
+        stdout:
+          type: string
+    SubmitterConfig:
+      type: object
+      required:
+      - revision
+      - enabled
+      - flag_pattern
+      - source
+      properties:
+        enabled:
+          type: boolean
+        flag_pattern:
+          type: string
+        python_packages:
+          type: array
+          items:
+            type: string
+        revision:
+          type: integer
+          format: int64
+        source:
+          type: string
+        timeout_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+      additionalProperties: false
+    SubmitterView:
+      type: object
+      required:
+      - config
+      - queued_flags
+      - next_batch_at
+      - interval_seconds
+      - runtime_available
+      properties:
+        config:
+          $ref: '#/components/schemas/SubmitterConfig'
+        interval_seconds:
+          type: integer
+          format: int32
+          minimum: 0
+        last_batch:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SubmitterBatch'
+        next_batch_at:
+          type: integer
+          format: int64
+        queued_flags:
+          type: integer
+          format: int64
+          minimum: 0
+        runtime_available:
+          type: boolean
     Target:
       type: object
       required:

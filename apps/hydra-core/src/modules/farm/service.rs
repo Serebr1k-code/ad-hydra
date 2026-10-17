@@ -34,7 +34,7 @@ pub struct Manifest {
     pub timeout_seconds: u64,
     pub memory_mib: u64,
     pub cpu_percent: u64,
-    /// Exact PyPI name==version pins prepared with uv before isolated execution.
+    /// PyPI package names, optionally pinned with ==version, prepared by uv.
     #[serde(default)]
     pub python_packages: Vec<String>,
 }
@@ -48,7 +48,7 @@ impl Manifest {
                 && (10..=100).contains(&self.cpu_percent),
             "invalid manifest"
         );
-        crate::infrastructure::sandbox::validate_python_packages(&self.python_packages)?;
+        super::packages::validate(&self.python_packages)?;
         anyhow::ensure!(
             self.runtime == "python" || self.python_packages.is_empty(),
             "packages require Python runtime"
@@ -65,7 +65,12 @@ pub struct Exploit {
     pub revision: i64,
     pub version: String,
     pub manifest: Manifest,
+    #[serde(default)]
     pub target_ids: Vec<String>,
+    #[serde(default)]
+    pub service_id: Option<String>,
+    #[serde(default)]
+    pub team_ids: Vec<String>,
     pub interval_seconds: Option<u64>,
 }
 #[derive(Clone)]
@@ -108,6 +113,7 @@ pub struct Farm {
     pub(super) runner: Arc<dyn Runner>,
     pub(super) active: Arc<tokio::sync::Mutex<Option<(String, CancellationToken)>>>,
     _lock: Arc<std::fs::File>,
+    pub(super) last_cleanup: Arc<std::sync::atomic::AtomicI64>,
 }
 pub(super) fn identifier(s: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -159,6 +165,12 @@ impl Farm {
             )
             .await?;
         auth.db
+            .migrate(
+                16,
+                include_str!("../../../../../migrations/0016_farm_catalog_logs.sql"),
+            )
+            .await?;
+        auth.db
             .run(|db| {
                 let tx = db.transaction()?;
                 let rows = tx
@@ -188,12 +200,14 @@ impl Farm {
                 Ok(())
             })
             .await?;
+        super::runtimes::compress_legacy_logs(&auth.db).await?;
         Ok(Self {
             auth,
             directory,
             runner,
             active: Default::default(),
             _lock: Arc::new(lock),
+            last_cleanup: Default::default(),
         })
     }
     pub async fn target(&self, a: Actor, t: Target) -> anyhow::Result<()> {
@@ -215,7 +229,7 @@ impl Farm {
         anyhow::ensure!(
             !e.name.is_empty()
                 && e.name.len() <= 128
-                && !e.target_ids.is_empty()
+                && (e.service_id.is_some() || !e.target_ids.is_empty())
                 && e.target_ids.len() <= 256
                 && e.target_ids
                     .iter()
@@ -225,7 +239,14 @@ impl Farm {
                 && e.interval_seconds.is_none_or(|n| (10..=86400).contains(&n)),
             "invalid exploit schedule"
         );
-        self.auth.db.run(move|db|{let tx=db.transaction()?;let old:Option<i64>=tx.query_row("SELECT revision FROM farm_exploits WHERE id=?1",[&e.id],|r|r.get(0)).optional()?;anyhow::ensure!(old.unwrap_or(0)==e.revision,"revision conflict");let binding = serde_json::to_string(&(e.manifest.runtime.as_str(), &e.manifest.python_packages))?; let previous:Option<Option<String>>=tx.query_row("SELECT runtime_binding FROM farm_versions WHERE exploit_id=?1 AND version=?2",params![e.id,e.version],|r|r.get(0)).optional()?; if let Some(previous)=previous {anyhow::ensure!(previous.as_ref().is_none_or(|old|old==&binding),"immutable version runtime/packages differ; upload a new version");tx.execute("UPDATE farm_versions SET runtime_binding=?3 WHERE exploit_id=?1 AND version=?2 AND runtime_binding IS NULL",params![e.id,e.version,binding])?;} let count:i64=tx.query_row("SELECT count(*) FROM farm_exploits",[],|r|r.get(0))?;anyhow::ensure!(old.is_some() || count<64,"exploit quota exhausted");let mut endpoints = std::collections::HashSet::new();for id in &e.target_ids {if e.manifest.mode == "batch" {let endpoint:(String,u16,String)=tx.query_row("SELECT host,port,transport FROM farm_targets WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;anyhow::ensure!(endpoints.insert(endpoint),"duplicate batch target endpoint: selected target aliases share an address and transport");}anyhow::ensure!(tx.query_row("SELECT EXISTS(SELECT 1 FROM farm_targets WHERE id=?1 AND enabled=1)",[id],|r|r.get::<_,bool>(0))?,"target unavailable");}tx.execute("INSERT INTO farm_exploits VALUES(?1,?2,?3,1,?4,?5,?6,?7,?8,?9,?10,?10) ON CONFLICT(id) DO UPDATE SET name=excluded.name,enabled=excluded.enabled,revision=farm_exploits.revision+1,version=excluded.version,manifest=excluded.manifest,target_ids=excluded.target_ids,interval_seconds=excluded.interval_seconds,next_run=excluded.next_run,initiated_by=excluded.initiated_by,updated_at=excluded.updated_at",params![e.id,e.name,e.enabled,e.version,serde_json::to_string(&e.manifest)?,serde_json::to_string(&e.target_ids)?,e.interval_seconds.map(|n|n as i64),e.interval_seconds.map(|n|now()+n as i64),a.id,now()])?;audit::append(&tx,&a,"farm.exploit.write",&e.id,"farm",true,now())?;tx.commit()?;Ok(())}).await
+        if let Some(service) = &e.service_id {
+            identifier(service)?;
+            anyhow::ensure!(
+                e.target_ids.is_empty() && e.team_ids.len() <= 256,
+                "catalog exploits use team IDs, not legacy target IDs"
+            );
+        }
+        self.auth.db.run(move|db|{let tx=db.transaction()?;if let Some(service)=&e.service_id {anyhow::ensure!(tx.query_row("SELECT EXISTS(SELECT 1 FROM farm_services WHERE id=?1 AND enabled=1)",[service],|r|r.get::<_,bool>(0))?,"service unavailable");if !e.team_ids.is_empty(){super::catalog::resolve(&tx,service,&e.team_ids,None)?;}}let old:Option<i64>=tx.query_row("SELECT revision FROM farm_exploits WHERE id=?1",[&e.id],|r|r.get(0)).optional()?;anyhow::ensure!(old.unwrap_or(0)==e.revision,"revision conflict");let binding = serde_json::to_string(&(e.manifest.runtime.as_str(), &e.manifest.python_packages))?; let previous:Option<Option<String>>=tx.query_row("SELECT runtime_binding FROM farm_versions WHERE exploit_id=?1 AND version=?2",params![e.id,e.version],|r|r.get(0)).optional()?; if let Some(previous)=previous {anyhow::ensure!(previous.as_ref().is_none_or(|old|old==&binding),"immutable version runtime/packages differ; upload a new version");tx.execute("UPDATE farm_versions SET runtime_binding=?3 WHERE exploit_id=?1 AND version=?2 AND runtime_binding IS NULL",params![e.id,e.version,binding])?;} let count:i64=tx.query_row("SELECT count(*) FROM farm_exploits",[],|r|r.get(0))?;anyhow::ensure!(old.is_some() || count<64,"exploit quota exhausted");let mut endpoints = std::collections::HashSet::new();for id in &e.target_ids {if e.manifest.mode == "batch" {let endpoint:(String,u16,String)=tx.query_row("SELECT host,port,transport FROM farm_targets WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;anyhow::ensure!(endpoints.insert(endpoint),"duplicate batch target endpoint: selected target aliases share an address and transport");}anyhow::ensure!(tx.query_row("SELECT EXISTS(SELECT 1 FROM farm_targets WHERE id=?1 AND enabled=1)",[id],|r|r.get::<_,bool>(0))?,"target unavailable");}tx.execute("INSERT INTO farm_exploits(id,name,enabled,revision,version,manifest,target_ids,interval_seconds,next_run,initiated_by,created_at,updated_at) VALUES(?1,?2,?3,1,?4,?5,?6,?7,?8,?9,?10,?10) ON CONFLICT(id) DO UPDATE SET name=excluded.name,enabled=excluded.enabled,revision=farm_exploits.revision+1,version=excluded.version,manifest=excluded.manifest,target_ids=excluded.target_ids,interval_seconds=excluded.interval_seconds,next_run=excluded.next_run,initiated_by=excluded.initiated_by,updated_at=excluded.updated_at",params![e.id,e.name,e.enabled,e.version,serde_json::to_string(&e.manifest)?,serde_json::to_string(&e.target_ids)?,e.interval_seconds.map(|n|n as i64),e.interval_seconds.map(|n|now()+n as i64),a.id,now()])?;tx.execute("UPDATE farm_exploits SET service_id=?2,team_ids=?3 WHERE id=?1",params![e.id,e.service_id,serde_json::to_string(&e.team_ids)?])?;audit::append(&tx,&a,"farm.exploit.write",&e.id,"farm",true,now())?;tx.commit()?;Ok(())}).await
     }
     pub async fn upload(
         &self,
@@ -263,6 +284,8 @@ impl Farm {
                 let sql = match kind.as_str() {
                     "targets" => "DELETE FROM farm_targets WHERE id=?1 AND revision=?2",
                     "exploits" => "DELETE FROM farm_exploits WHERE id=?1 AND revision=?2",
+                    "services" => "DELETE FROM farm_services WHERE id=?1 AND revision=?2",
+                    "teams" => "DELETE FROM farm_teams WHERE id=?1 AND revision=?2",
                     _ => anyhow::bail!("invalid resource"),
                 };
                 anyhow::ensure!(

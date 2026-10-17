@@ -1,6 +1,6 @@
 //! Operator-only execution and checker configuration; never populated from HTTP input.
 use crate::{
-    infrastructure::sandbox,
+    infrastructure::{db::Database, sandbox},
     modules::{farm, flags},
 };
 use serde::Deserialize;
@@ -20,6 +20,23 @@ pub struct Settings {
     pub auto_submit_captured: bool,
     pub checker: Option<Checker>,
     pub sandbox: Option<SandboxSettings>,
+    #[serde(default)]
+    pub execution_mode: ExecutionMode,
+    pub host_runtime: Option<HostRuntimeSettings>,
+}
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    #[default]
+    Sandbox,
+    Host,
+}
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostRuntimeSettings {
+    #[serde(default = "default_uv")]
+    pub uv: PathBuf,
+    pub work_dir: PathBuf,
 }
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -101,6 +118,9 @@ impl Settings {
     pub fn flags(&self) -> flags::Settings {
         flags::Settings {
             pattern: self.flag_pattern.clone(),
+            script_runtime: (self.execution_mode == ExecutionMode::Host)
+                .then(|| self.host_runtime.clone())
+                .flatten(),
             auto_submit_captured: self.auto_submit_captured,
             checker: self.checker.as_ref().map(|c| match c {
                 Checker::Https {
@@ -152,6 +172,9 @@ impl Settings {
 pub struct Runner {
     pub settings: Option<SandboxSettings>,
     pub flags: flags::Flags,
+    pub execution_mode: ExecutionMode,
+    pub host_runtime: Option<HostRuntimeSettings>,
+    pub db: Database,
 }
 impl farm::Runner for Runner {
     fn run(
@@ -162,6 +185,15 @@ impl farm::Runner for Runner {
     {
         let settings = self.settings.clone();
         let flags = self.flags.clone();
+        if self.execution_mode == ExecutionMode::Host {
+            let settings = self.host_runtime.clone();
+            let db = self.db.clone();
+            return Box::pin(async move {
+                let settings =
+                    settings.ok_or_else(|| anyhow::anyhow!("host runtime not configured"))?;
+                crate::infrastructure::host_process::run(settings, job, cancel, flags, db).await
+            });
+        }
         Box::pin(async move {
             let settings = settings
                 .ok_or_else(|| anyhow::anyhow!("sandbox not configured; execution refused"))?;
@@ -304,21 +336,33 @@ impl farm::Runner for Runner {
         })
     }
 }
-fn append_bounded(to: &mut Vec<u8>, bytes: &[u8]) {
-    let n = (65536 - to.len()).min(bytes.len());
+pub(crate) fn append_bounded(to: &mut Vec<u8>, bytes: &[u8]) {
+    let n = ((1024 * 1024usize).saturating_sub(to.len())).min(bytes.len());
     to.extend_from_slice(&bytes[..n]);
     if n < bytes.len() {
         let marker = b"\n[aggregate output truncated]\n";
-        to.truncate(65536 - marker.len());
+        to.truncate(1024 * 1024 - marker.len());
         to.extend_from_slice(marker);
     }
 }
-pub fn runner(settings: Option<SandboxSettings>, flags: flags::Flags) -> Arc<dyn farm::Runner> {
-    Arc::new(Runner { settings, flags })
+pub fn runner(
+    settings: Option<SandboxSettings>,
+    execution_mode: ExecutionMode,
+    host_runtime: Option<HostRuntimeSettings>,
+    flags: flags::Flags,
+    db: Database,
+) -> Arc<dyn farm::Runner> {
+    Arc::new(Runner {
+        settings,
+        execution_mode,
+        host_runtime,
+        flags,
+        db,
+    })
 }
 
 /// Batch attribution is explicit and restricted to this immutable job's targets.
-fn batch_captures(
+pub(crate) fn batch_captures(
     flags: &flags::Flags,
     bytes: &[u8],
     targets: &[farm::Target],
@@ -334,7 +378,7 @@ fn batch_captures(
         let Ok(capture) = serde_json::from_slice::<Capture>(line) else {
             continue;
         };
-        if !targets.iter().any(|t| t.id == capture.target_id) {
+        if capture.flag.len() > 256 || !targets.iter().any(|t| t.id == capture.target_id) {
             continue;
         }
         if flags
@@ -374,6 +418,7 @@ mod tests {
                 pattern: Some("FLAG_[A-Z]+".into()),
                 auto_submit_captured: false,
                 checker: None,
+                ..Default::default()
             },
         )
         .await
@@ -402,9 +447,9 @@ FLAG_UNATTRIBUTED
     #[test]
     fn aggregate_output_loss_is_explicit_and_bounded() {
         let mut output = Vec::new();
-        append_bounded(&mut output, &vec![b'x'; 65536]);
+        append_bounded(&mut output, &vec![b'x'; 1024 * 1024]);
         append_bounded(&mut output, b"extra");
-        assert_eq!(output.len(), 65536);
+        assert_eq!(output.len(), 1024 * 1024);
         assert!(output.ends_with(b"[aggregate output truncated]\n"));
     }
 }

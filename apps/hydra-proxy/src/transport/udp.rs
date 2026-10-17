@@ -44,13 +44,16 @@ impl Context {
         self.flow.scan(direction, bytes);
         let mut decoder = self.decoder.lock().unwrap_or_else(|e| e.into_inner());
         let result = match decoder.as_mut() {
-            Some(d) if d.is_wasm() => Some(d.feed(direction, bytes)),
+            Some(d) if d.is_stream_decoder() => Some(d.feed(direction, bytes)),
             _ => None,
         };
         if matches!(result, Some(Err(_))) {
             *decoder = None;
-            self.telemetry
-                .decoder_error(&self.config.id, &self.flow.id, "wasm_decoder_disabled");
+            self.telemetry.decoder_error(
+                &self.config.id,
+                &self.flow.id,
+                "protocol_decoder_disabled",
+            );
         }
         drop(decoder);
         let mut evaluated = false;
