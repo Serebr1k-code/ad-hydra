@@ -9,10 +9,20 @@ export async function testSavedFilter(call: Call, id: string, messageId: string,
   const saved = await call(path) as SavedFilter
   const tested = await call(`${path}/test`, 'POST', { message_id: messageId }) as { matched: boolean }
   if (!enforce || !tested.matched) return { matched: tested.matched, enforced: false }
+  await writeEnforce(call, path, saved)
+  return { matched: true, enforced: true }
+}
+
+/** Direct activation is independent of optional saved-message diagnostics. */
+export async function enforceSavedFilter(call: Call, id: string) {
+  const path = `/filters/${encodeURIComponent(id)}`
+  await writeEnforce(call, path, await call(path) as SavedFilter)
+}
+
+async function writeEnforce(call: Call, path: string, saved: SavedFilter) {
   const { service_id, name, description, enabled, priority, expression, action, backend, expires_at_ms } = saved
   await call(path, 'PATCH', {
     service_id, name, description, enabled, priority, expression, action, backend, expires_at_ms,
     mode: 'enforce', expected_revision: saved.desired_revision,
   })
-  return { matched: true, enforced: true }
 }

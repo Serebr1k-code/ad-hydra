@@ -239,7 +239,7 @@ async fn from_message(
         name: input.name,
         description: format!("From saved message {}", input.message_id),
         enabled: true,
-        mode: Mode::Shadow,
+        mode: Mode::Enforce,
         priority: 10,
         expression: Expression::Predicate {
             field: input.field,

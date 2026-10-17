@@ -94,21 +94,36 @@ async fn revision_conflicts_atomic_reference_validation_and_real_ack() {
     std::fs::remove_dir_all(path).unwrap();
 }
 #[tokio::test]
-async fn enforce_requires_test_and_rule_change_invalidates_it() {
+async fn enforce_create_edit_and_bulk_enable_do_not_require_rehearsal() {
     let (c, path) = setup().await;
     c.put_service(actor("alice"), 0, service(), true, "test".into())
         .await
         .unwrap();
-    c.put_rule(actor("alice"), 1, rule(), true, "test".into())
-        .await
-        .unwrap();
     let mut enforce = rule();
     enforce.mode = Mode::Enforce;
-    assert!(
-        c.put_rule(actor("alice"), 2, enforce.clone(), false, "test".into())
+    c.put_rule(actor("alice"), 1, enforce.clone(), true, "test".into())
+        .await
+        .unwrap();
+    enforce.priority = 2;
+    c.put_rule(actor("bob"), 2, enforce.clone(), false, "test".into())
+        .await
+        .unwrap();
+    enforce.enabled = false;
+    c.put_rule(actor("alice"), 3, enforce, false, "test".into())
+        .await
+        .unwrap();
+    c.bulk_rule_state(actor("bob"), 4, vec!["rule".into()], true, "test".into())
+        .await
+        .unwrap();
+    let desired = c.desired().await.unwrap();
+    assert_eq!(desired.rules.revision, 5);
+    assert!(desired.rules.rules[0].enabled);
+    assert_eq!(desired.rules.rules[0].mode, Mode::Enforce);
+    let tests: i64 =
+        c.db.run(|db| Ok(db.query_row("SELECT count(*) FROM rule_tests", [], |r| r.get(0))?))
             .await
-            .is_err()
-    );
+            .unwrap();
+    assert_eq!(tests, 0);
     let fields = std::collections::BTreeMap::from([(
         "http.path".into(),
         FieldValue::String("/secret".into()),
@@ -119,14 +134,9 @@ async fn enforce_requires_test_and_rule_change_invalidates_it() {
             .unwrap()["matched"],
         true
     );
-    c.put_rule(actor("bob"), 2, enforce.clone(), false, "test".into())
-        .await
-        .unwrap();
-    enforce.priority = 2;
-    assert!(
-        c.put_rule(actor("alice"), 3, enforce, false, "test".into())
-            .await
-            .is_err()
+    assert_eq!(
+        c.desired().await.unwrap().rules.rules[0].mode,
+        Mode::Enforce
     );
     drop(c);
     std::fs::remove_dir_all(path).unwrap();

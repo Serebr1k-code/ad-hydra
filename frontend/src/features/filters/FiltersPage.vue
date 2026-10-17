@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import type { FilterInput, ListResponse } from '@/generated/contracts'
 import { api, errorMessage } from '@/shared/api/client'
 import { date } from '@/shared/format'
+import { enforceSavedFilter } from './filterWorkflow'
 import FilterTestDialog from './FilterTestDialog.vue'
 import FilterEditorDialog, { type FilterRecord } from './FilterEditorDialog.vue'
 import { Button } from '@/components/ui/button'
@@ -58,17 +59,10 @@ async function saveFilter(value: Omit<FilterInput, 'expected_revision'>) {
   error.value = ''
   try {
     const current = await api<ListResponse>('/filters')
-    const needsTest = value.mode === 'enforce'
-    const saved = await api<{ rules: { rules: Array<{ id: string }> } }>(`/filters${editing.value ? '/' + encodeURIComponent(editing.value.id) : ''}`, editing.value ? 'PATCH' : 'POST', { ...value, mode: needsTest ? 'shadow' : value.mode, expected_revision: current.revision })
-    // Create appends its new rule to the returned desired snapshot.
-    const id = editing.value?.id ?? saved.rules.rules.at(-1)?.id
+    await api(`/filters${editing.value ? '/' + encodeURIComponent(editing.value.id) : ''}`, editing.value ? 'PATCH' : 'POST', { ...value, expected_revision: current.revision })
     editorOpen.value = false
+    notice.value = value.mode === 'enforce' ? 'Saved. Enforcement is requested; check the applied revision.' : 'Saved in Shadow (observe only).'
     await load('')
-    if (needsTest && id) {
-      testing.value = { id, name: value.name, service_id: value.service_id }
-      testOpen.value = true
-      notice.value = 'Saved in Shadow. Select captured traffic to test and enforce your changes.'
-    }
   } catch (cause) { error.value = errorMessage(cause) }
   finally { busy.value = false }
 }
@@ -100,6 +94,12 @@ async function remove(filter: Filter) {
     await api(`/filters/${encodeURIComponent(filter.id)}?expected_revision=${current.revision}`, 'DELETE')
   })
 }
+async function enforce(filter: Filter) {
+  await mutate(async () => {
+    await enforceSavedFilter(api, filter.id)
+    notice.value = 'Enforcement requested. Check the applied revision below.'
+  })
+}
 function test(filter: Filter) {
   testing.value = filter
   testOpen.value = true
@@ -126,14 +126,14 @@ onMounted(() => load(''))
     </div>
     <p v-if="error || data?.apply_error" role="alert" class="text-sm text-destructive">{{ error || data?.apply_error }}</p><p v-if="notice" role="status">{{ notice }}</p>
     <p v-if="busy" role="status">Loading filters…</p>
-    <p v-else-if="data && !data.items.length" class="text-muted-foreground">No filters. Start in shadow mode, inspect traffic, then test a saved message before enforcing.</p>
+    <p v-else-if="data && !data.items.length" class="text-muted-foreground">No filters. New enabled filters enforce as soon as the proxy applies them. Shadow mode and saved-traffic testing are optional.</p>
     <DataTable v-if="data?.items.length" :columns="columns" :rows="rows">
       <template #cell-select="{ row }"><Checkbox :model-value="selected.includes(row.id)" :aria-label="'Select ' + row.name" @update:model-value="value => toggleSelection(row.id, value)" /></template>
       <template #cell-name="{ row }"><div>{{ row.name }}</div><p class="text-sm" :class="row.mode === 'shadow' ? 'font-medium' : ''">{{ row.mode === 'shadow' ? 'Shadow — observes only; traffic passes' : 'Enforce — applies action to matches' }}</p></template>
       <template #cell-created_at="{ row }">{{ date(row.created_at) }}</template>
       <template #cell-author="{ row }"><div>{{ row.created_by }}</div><div class="text-muted-foreground">{{ row.updated_by }}</div></template>
       <template #cell-enabled="{ row }"><Button variant="outline" size="sm" :disabled="busy" @click="setState(row)">{{ row.enabled ? 'Turn off' : 'Turn on' }}</Button><p class="text-sm">Desired {{ row.desired_enabled ? 'on' : 'off' }} / applied {{ row.applied_enabled === null ? 'pending' : row.applied_enabled ? 'on' : 'off' }}</p></template>
-      <template #cell-actions="{ row }"><div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" :disabled="busy" @click="edit(row)">Edit</Button><Button variant="outline" size="sm" :disabled="busy" @click="test(row)">Test saved message</Button><Button v-if="row.mode === 'shadow'" variant="outline" size="sm" :disabled="busy" @click="test(row)">Test and enforce</Button><Button variant="destructive" size="sm" :disabled="busy" @click="remove(row)">Delete</Button></div></template>
+      <template #cell-actions="{ row }"><div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" :disabled="busy" @click="edit(row)">Edit</Button><Button variant="outline" size="sm" :disabled="busy" @click="test(row)">Test saved message</Button><Button v-if="row.mode === 'shadow'" variant="outline" size="sm" :disabled="busy" @click="enforce(row)">Enforce</Button><Button variant="destructive" size="sm" :disabled="busy" @click="remove(row)">Delete</Button></div></template>
     </DataTable>
     <div class="flex gap-2"><Button v-if="after" variant="outline" :disabled="busy" @click="load('')">First page</Button><Button v-if="data?.next_cursor" variant="outline" :disabled="busy" @click="load(data.next_cursor)">Next page</Button></div>
   </section>

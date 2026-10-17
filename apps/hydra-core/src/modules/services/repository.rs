@@ -6,7 +6,7 @@ use crate::{
     },
 };
 use hydra_domain::{Rule, RuleSnapshot, Service, ServiceSnapshot};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use sha2::{Digest, Sha256};
 fn fingerprint(rule: &Rule) -> anyhow::Result<String> {
     let mut rule = rule.clone();
@@ -198,25 +198,6 @@ impl Control {
         create: bool,
         request: String,
     ) -> anyhow::Result<Desired> {
-        if rule.mode == hydra_domain::Mode::Enforce {
-            anyhow::ensure!(!create, "create in shadow mode and test before enforcement");
-            let id = rule.id.clone();
-            let hash = fingerprint(&rule)?;
-            let tested = self
-                .db
-                .run(move |db| {
-                    Ok(db
-                        .query_row(
-                            "SELECT fingerprint FROM rule_tests WHERE id=?1",
-                            [id],
-                            |r| r.get::<_, String>(0),
-                        )
-                        .optional()?
-                        == Some(hash))
-                })
-                .await?;
-            anyhow::ensure!(tested, "test exact rule in shadow mode before enforcement");
-        }
         self.mutate(
             actor,
             expected,
@@ -255,10 +236,6 @@ impl Control {
             let before:Vec<_>=ids.iter().map(|id|desired.rules.rules.iter().find(|r|&r.id==id).map(|r|serde_json::json!({"id":id,"enabled":r.enabled})).ok_or_else(||anyhow::anyhow!("filter not found"))).collect::<anyhow::Result<_>>()?;
             for id in &ids {
                 let rule=desired.rules.rules.iter_mut().find(|r|&r.id==id).expect("validated");
-                if enabled && rule.mode==hydra_domain::Mode::Enforce {
-                    let hash=fingerprint(rule)?;let tested=tx.query_row("SELECT fingerprint FROM rule_tests WHERE id=?1",[id],|r|r.get::<_,String>(0)).optional()?;
-                    anyhow::ensure!(tested.as_deref()==Some(hash.as_str()),"test exact rule in shadow mode before enforcement");
-                }
                 rule.enabled=enabled;
             }
             hydra_filter_engine::CompiledSnapshot::compile(desired.rules.clone(),&desired.services.services)?;

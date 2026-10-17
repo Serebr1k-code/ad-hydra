@@ -71,7 +71,7 @@ class CDP:
         assert 'exceptionDetails' not in result, result
         return result.get('result', {}).get('value')
     def click(self, expression):
-        point=self.evaluate(f'(()=>{{const e=({expression}),r=e.getBoundingClientRect();return {{x:r.x+r.width/2,y:r.y+r.height/2}}}})()')
+        point=self.evaluate(f'(()=>{{const e=({expression});e.scrollIntoView({{block:"center"}});const r=e.getBoundingClientRect();return {{x:r.x+r.width/2,y:r.y+r.height/2}}}})()')
         for kind in ['mousePressed','mouseReleased']:
             self.call('Input.dispatchMouseEvent',{'type':kind,**point,'button':'left','clickCount':1})
 
@@ -237,7 +237,7 @@ class Browser(unittest.TestCase):
                         self.assertTrue(cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].some(b=>b.textContent==='Add group')"))
                         cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Add group').click()")
                         wait("document.querySelectorAll('[role=dialog] [aria-label=\"Group match mode\"]').length===2")
-                        self.assertIn('Shadow mode: matches are counted', cdp.evaluate("document.querySelector('[role=dialog]').innerText"))
+                        self.assertIn('No traffic test is required', cdp.evaluate("document.querySelector('[role=dialog]').innerText"))
                         # Remove the root condition, then its only remaining group.
                         # This must edit the expression without submitting the form.
                         cdp.evaluate("document.querySelector('[role=dialog] [aria-label=\"Remove rule\"]').click()")
@@ -248,58 +248,31 @@ class Browser(unittest.TestCase):
                         self.assertFalse(cdp.evaluate("Boolean(document.querySelector('[role=dialog] [aria-label=\"Remove group\"]'))"))
                         cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Cancel').click()")
                         wait("!document.querySelector('[role=dialog]')")
-                        # Rehearse a real saved request, then enforce through Vue.
-                        cdp.evaluate("""(async () => {
-                            const base = '/api/v1';
-                            const login = await (await fetch(base + '/auth/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:'alice',password:'test-password-1234'})})).json();
-                            const headers = {'Content-Type':'application/json', Authorization:'Bearer ' + login.access_token};
-                            async function api(path, body) {
-                                const response = await fetch(base + path, {method:body?'POST':'GET', headers, body:body?JSON.stringify(body):undefined});
-                                const result = await response.json();
-                                if (!response.ok) throw new Error(JSON.stringify(result));
-                                return result;
-                            }
-                            const services = await api('/services');
-                            const service = services.items.find(s => s.id === BROWSER_SERVICE_ID);
-                            const filters = await api('/filters');
-                            await api('/filters', {expected_revision:filters.revision, service_id:service.id, name:'Browser enforcement', description:'', enabled:true, mode:'shadow', priority:10, expression:{all:[{field:'http.path',op:'prefix',value:{type:'string',value:'/'}}]}, action:{type:'block',http_status:403}, backend:'userspace',expires_at_ms:null});
-                        })()""".replace('BROWSER_SERVICE_ID', json.dumps(service_id)))
-                        cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Refresh').click()")
-                        wait("document.querySelector('#page').innerText.includes('Shadow — observes only; traffic passes')")
-                        cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Test and enforce').click()")
-                        wait("Boolean(document.querySelector('[role=dialog] [aria-label=\"Test message\"]'))")
-                        self.assertFalse(cdp.evaluate("Boolean(document.querySelector('[role=dialog] textarea'))"), 'Testing must select captured traffic without JSON or copied IDs')
-                        cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Test and enforce').click()")
-                        wait("document.querySelector('[role=dialog]').innerText.includes('Matched. Enforcement requested')")
-                        cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Close').click()")
+                        # Default creation and editing enforce directly: no
+                        # staging in Shadow and no test-message selection.
+                        cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add filter').click()")
+                        wait("Boolean(document.querySelector('#filter-mode'))")
+                        self.assertIn('Enforce', cdp.evaluate("document.querySelector('#filter-mode').textContent"))
+                        cdp.click("document.querySelector('[aria-label=\"Filter service\"]')")
+                        wait("document.querySelectorAll('[role=option]').length===2")
+                        cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==={json.dumps(service_id)})")
+                        cdp.click("document.querySelector('[aria-label=\"Filter action\"]')")
+                        wait("document.querySelectorAll('[role=option]').length>2")
+                        cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='Block HTTP request')")
+                        cdp.evaluate("document.querySelector('[role=dialog] form').requestSubmit()")
                         wait("!document.querySelector('[role=dialog]') && document.querySelector('#page').innerText.includes('Enforce — applies action to matches')")
-                        # An edited enforced rule has a new fingerprint. Saving must
-                        # open the same usable rehearsal flow instead of an API error.
                         cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Edit').click()")
                         wait("Boolean(document.querySelector('#filter-status'))")
                         cdp.evaluate("{ const e = document.querySelector('#filter-status'); e.value='402'; e.dispatchEvent(new Event('input',{bubbles:true})); }")
                         cdp.evaluate("document.querySelector('[role=dialog] form').requestSubmit()")
-                        wait("Boolean(document.querySelector('[role=dialog] [aria-label=\"Test message\"]'))")
-                        cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Test and enforce').click()")
-                        wait("document.querySelector('[role=dialog]').innerText.includes('Matched. Enforcement requested')")
-                        cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Close').click()")
                         wait("!document.querySelector('[role=dialog]') && document.querySelector('#page').innerText.includes('Enforce — applies action to matches')")
-                        # Creating directly in Enforce mode must also stage a
-                        # new Shadow rule and open its own traffic picker.
-                        cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add filter').click()")
-                        wait("Boolean(document.querySelector('#filter-mode'))")
-                        cdp.click("document.querySelector('[aria-label=\"Filter service\"]')")
-                        wait("document.querySelectorAll('[role=option]').length===2")
-                        cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==={json.dumps(service_id)})")
-                        cdp.click("document.querySelector('#filter-mode')")
-                        wait("document.querySelectorAll('[role=option]').length===2")
-                        cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='Enforce')")
-                        cdp.evaluate("document.querySelector('[role=dialog] form').requestSubmit()")
+                        # Saved-traffic testing is still an optional diagnostic.
+                        cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Test saved message').click()")
                         wait("Boolean(document.querySelector('[role=dialog] [aria-label=\"Test message\"]'))")
-                        cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Test and enforce').click()")
-                        wait("document.querySelector('[role=dialog]').innerText.includes('Matched. Enforcement requested')")
+                        cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Test only').click()")
+                        wait("document.querySelector('[role=dialog]').innerText.includes('Matched.')")
                         cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Close').click()")
-                        wait("!document.querySelector('[role=dialog]') && document.querySelector('#page').innerText.split('Enforce — applies action to matches').length===3")
+                        wait("!document.querySelector('[role=dialog]')")
                         self.assertFalse(cdp.evaluate("[...document.querySelectorAll('#page [role=alert]')].some(e=>e.textContent.trim())"))
                 self.assertIn('alice',cdp.evaluate("document.querySelector('#page').innerText"))
                 cdp.evaluate("document.querySelector('#logout').click()")

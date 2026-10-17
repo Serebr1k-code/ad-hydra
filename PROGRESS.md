@@ -135,3 +135,5 @@ Post-smoke 2-second sample: Core 36,524 KiB RSS/Proxy 7,240 KiB RSS, combined 42
 
 ### 2026-10-17 — Usable saved-traffic test and enforcement flow
 
+### 2026-10-17 — Immediate filter activation (explicit user policy change)
+

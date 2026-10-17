@@ -62,7 +62,7 @@ function createFilter(message:Message,field:string) {
  openEditor('Create filter from saved field',{message_id:message.message_id,field,name:'Saved '+field,action:{type:'alert'}},async value=>{
   const filters=await api<ListResponse>('/filters')
   await api('/filters/from-message','POST',{...value,expected_revision:filters.revision})
-  notice.value='Shadow filter saved. Test it on the saved message in Filters before enforcement.'
+  notice.value='Filter saved in Enforce mode. Check the applied revision in Filters.'
  })
 }
 onMounted(()=>{void load()})
@@ -111,7 +111,7 @@ onUnmounted(()=>{disposed=true;request++})
      <div class="mb-1 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground"><span :class="message.direction===1?'text-red-300':message.direction===2?'text-blue-300':''">{{direction(message.direction)}}</span><span>{{timestamp(message.occurred_ms)}}</span><span>{{message.message_type||message.protocol_id}}</span><span v-if="message.truncated">Truncated</span></div>
      <pre class="!max-h-none !rounded-none !border-0 !bg-transparent !p-0 font-mono !text-[13px] !leading-6">{{streamText(message)}}</pre>
      <div class="flex gap-2"><Button size="sm" variant="ghost" @click="inspect=inspect?.message_id===message.message_id?undefined:message">{{inspect?.message_id===message.message_id?'Hide fields':'Inspect fields'}}</Button><Button size="sm" variant="ghost" @click="compare(message)">Compare</Button></div>
-     <DataTable v-if="inspect?.message_id===message.message_id" :columns="[{key:'key',label:'Field'},{key:'type',label:'Type'},{key:'value',label:'Value'},{key:'filter',label:'Filter'}]" :rows="fields(message)"><template #cell-filter="{row}"><Button size="sm" variant="outline" @click="createFilter(message,row.key)">Create shadow filter</Button></template></DataTable>
+     <DataTable v-if="inspect?.message_id===message.message_id" :columns="[{key:'key',label:'Field'},{key:'type',label:'Type'},{key:'value',label:'Value'},{key:'filter',label:'Filter'}]" :rows="fields(message)"><template #cell-filter="{row}"><Button size="sm" variant="outline" @click="createFilter(message,row.key)">Create filter</Button></template></DataTable>
     </article>
     <p v-if="selected" class="text-xs text-muted-foreground">Choose another message to compare with {{selected.message_id}}.</p>
     <section v-if="comparisonTitle"><h3 class="text-xs">{{comparisonTitle}}</h3><DataTable :columns="[{key:'key',label:'Field'},{key:'left',label:'Selected'},{key:'right',label:'Current'},{key:'change',label:'Difference'}]" :rows="comparison" /></section>

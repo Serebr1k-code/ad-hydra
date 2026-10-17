@@ -85,7 +85,7 @@ async function run(enforce: boolean) {
         <DialogDescription>Select captured traffic from this service. Testing evaluates saved fields without sending network traffic. Test and enforce activates the saved rule only when it matches.</DialogDescription>
       </DialogHeader>
       <div class="space-y-3">
-        <p class="text-sm">If you just saved changes for enforcement, that rule is now in Shadow and observes without blocking. Complete Test and enforce to activate it.</p>
+        <p class="text-sm">Testing is optional. You can save or enforce rules directly from the filter list without selecting captured traffic.</p>
         <div class="flex gap-2"><Button variant="outline" :disabled="loading || running" @click="loadFlows()">Refresh traffic</Button><Button v-if="cursor" variant="outline" :disabled="loading || running" @click="loadFlows(true)">Older sessions</Button></div>
         <p v-if="loading" role="status">Loading captured traffic…</p>
         <p v-else-if="!flows.length" role="status">No captured sessions for this service. Send a normal request through its proxy port, then refresh traffic.</p>

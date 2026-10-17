@@ -35,3 +35,15 @@ test('a failed rehearsal never sends an enforce request', async () => {
   await expect(testSavedFilter(call, 'r', 'missing', true)).rejects.toThrow('message expired')
   expect(methods).toEqual(['POST'])
 })
+
+test('direct enforcement needs no saved message or rehearsal', async () => {
+  const { enforceSavedFilter } = await import('./filterWorkflow')
+  const calls: Array<[string, string | undefined, unknown]> = []
+  await enforceSavedFilter(async (path, method, value) => {
+    calls.push([path, method, value])
+    return { desired_revision: 8, service_id: 'docs', enabled: true, mode: 'shadow', created_by: 'server' }
+  }, 'r')
+  expect(calls.map(([path, method]) => [path, method])).toEqual([['/filters/r', undefined], ['/filters/r', 'PATCH']])
+  expect(calls[1]![2]).toMatchObject({ expected_revision: 8, mode: 'enforce', enabled: true })
+  expect(calls[1]![2]).not.toHaveProperty('created_by')
+})

@@ -287,7 +287,7 @@ class Filters(unittest.TestCase):
                 good('PUT', '/filters/state', {'expected_revision': rev, 'ids': [rid], 'enabled': False}, bob)
                 wait_revision(rev + 1, alice)
                 created = good('POST', '/filters/from-message', {'expected_revision': rev + 1, 'message_id': saved_id, 'field': 'http.path', 'name': 'Saved field', 'action': {'type': 'alert'}}, bob)
-                self.assertTrue(any(r['name'] == 'Saved field' and r['mode'] == 'shadow' for r in created['rules']['rules']))
+                self.assertTrue(any(r['name'] == 'Saved field' and r['mode'] == 'enforce' for r in created['rules']['rules']))
                 wait_revision(rev + 2, alice)
                 profile = good('PUT', '/protocol-profiles/http-headers/1', {'framing': {'kind': 'delimiter', 'delimiter': [13, 10, 13, 10]}, 'max_frame': 8192}, alice)
                 self.assertEqual(profile['state'], 'installed')
@@ -298,7 +298,26 @@ class Filters(unittest.TestCase):
                 self.assertTrue(removed['applied'])
                 self.assertTrue(good('DELETE', '/protocols/activations/' + sid, token=alice, key='native-profile-deactivation')['applied'])
                 self.assertEqual(proxied('/restored-http')[0], 200)
-                print('Auth, filters, saved-field creation, native framing/restore, settings/export and traffic persistence: OK')
+                # New and edited Enforce rules block immediately, without a
+                # saved-message test, including re-enable via the bulk API.
+                current = good('GET', '/filters', token=alice)
+                instant = dict(rule, expected_revision=current['revision'], name='Immediate enforcement', mode='enforce', enabled=True,
+                    expression={'field':'http.path','op':'eq','value':{'type':'string','value':'/instant'}}, action={'type':'block','http_status':403})
+                made = good('POST', '/filters', instant, alice)
+                instant_id = made['rules']['rules'][-1]['id']
+                rev = made['rules']['revision']; wait_revision(rev, alice)
+                self.assertEqual(proxied('/instant')[0], 403)
+                instant.update(expected_revision=rev, action={'type':'block','http_status':402})
+                updated = good('PATCH', '/filters/' + instant_id, instant, alice)
+                rev = updated['rules']['revision']; wait_revision(rev, alice)
+                self.assertEqual(proxied('/instant')[0], 402)
+                good('PUT', '/filters/' + instant_id + '/state', {'expected_revision':rev,'enabled':False}, alice)
+                wait_revision(rev + 1, alice)
+                self.assertEqual(proxied('/instant')[0], 200)
+                good('PUT', '/filters/state', {'expected_revision':rev + 1,'ids':[instant_id],'enabled':True}, alice)
+                wait_revision(rev + 2, alice)
+                self.assertEqual(proxied('/instant')[0], 402)
+                print('Auth, optional tests, immediate enforcement/create/edit/bulk-enable, framing/restore and traffic persistence: OK')
             finally:
                 for p in processes:
                     if p.poll() is None:

@@ -17,7 +17,7 @@ the text field rather than silently truncated before matching.
 
 For live upload limits select **Request/body size in bytes (live)** (`body.size`),
 **is greater than**, a byte limit such as `524288` or `512KiB`, and **Block
-transfer**. Start in shadow mode, test a saved message, then enable enforcement.
+transfer**. Enabled filters default to Enforce and apply after Proxy ACK. Shadow mode and saved-message tests are optional.
 The Proxy checks this rule before forwarding every read. Crossing a TCP limit
 closes the connection and discards the entire offending read; previously
 forwarded bytes cannot be recalled. UDP drops the offending datagram.
@@ -115,19 +115,21 @@ In the visual editor, every nested group has a **Remove group** button. Removing
 its last parent child inserts a default condition so the parent stays editable;
 review that condition before saving. The root group stays in place.
 
-**Enabled** and **Enforce** are separate settings. An enabled **Shadow** filter
-counts matches but allows traffic through, including HTTP block actions. Choose
-**Test and enforce** in the filter list, select a captured session and message,
-then click **Test and enforce** in the dialog. No JSON or copied message IDs are
-needed. **Test only** evaluates saved fields without changing the mode. A no-match
-result leaves the mode unchanged; choose a matching message or edit the rule.
+New filters default to **Enabled** and **Enforce**. Saving creates or updates the
+rule immediately; Core audits the change, publishes the revision, and Proxy
+validates and applies it. No captured-traffic test is required. Check desired and
+applied revisions to confirm acknowledgement. Requests sent directly to the
+private upstream bypass Hydra.
 
-Saving an edited or new filter with mode **Enforce** first saves it in **Shadow**
-and opens this test dialog. While it is in Shadow it does not block traffic;
-closing the dialog leaves it in Shadow. This implements the required saved-traffic
-rehearsal for the exact new rule version instead of rejecting the save. Check that
-desired and applied revisions agree before checking the service's public proxy
-port. Requests sent directly to its private upstream bypass Hydra.
+Choose **Shadow** only when you want to count matches while allowing traffic.
+Click **Enforce** in the list to activate a Shadow rule directly. Enabled ON/OFF
+and bulk toggles also work without any prior test. Existing Shadow rules retain
+their selected mode until you change it.
+
+**Test saved message** is an optional diagnostic. Select a captured session and
+message, then **Test only** to evaluate without changing the rule's mode. The
+optional **Test and enforce** shortcut activates on a match; it does not restrict
+direct activation or saving. No JSON or copied message IDs are required.
 
 The picker loads 25 sessions per page, retains at most 100 session choices, and
 shows at most 100 messages from the selected session. Use **Older sessions** or

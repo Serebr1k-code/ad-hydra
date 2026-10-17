@@ -130,3 +130,18 @@ first saves Shadow and opens this dialog, with an explicit warning that the rule
 will observe without blocking until enforcement is applied. Session choices are
 bounded (25/page, 100 retained) and messages are bounded to 100 per session.
 Existing REST handlers/contracts and the proxy data path are unchanged.
+
+### Immediate filter activation — user product amendment, 2026-10-17
+
+The user explicitly superseded the original shadow-first/test-before-enforce
+policy: adding a rule should make it work directly. SPEC now reflects this.
+Remove rehearsal prerequisites from create, update, single enable and bulk enable;
+keep validation, optimistic revisions, audit attribution and Proxy ACK unchanged.
+New UI rules default to enabled/Enforce; saving never demotes an enforced rule or
+opens a required test dialog. Shadow and saved-message evaluation remain optional.
+Existing modes are preserved; no mass promotion of existing Shadow rules. Keep
+historical rule_tests records and the optional test API without a DB migration.
+This supersedes earlier decisions making captured-traffic rehearsal mandatory.
+The from-message creation endpoint also defaults to Enforce instead of Shadow;
+this changes activation behavior while preserving request/response fields and
+status codes. Its Explorer button and confirmation text now reflect activation.
