@@ -67,7 +67,9 @@ class Operations(unittest.TestCase):
                 captured=good('POST','/flags',{'value':'FLAG{abcdefgh}','target_id':'toy'},token)['id']
                 self.assertNotIn('FLAG{abcdefgh}',json.dumps(good('GET','/flags',token=token)))
                 good('POST',f'/flags/{captured}/submit',token=token)
-                for _ in range(100):
+                # The submitter deliberately batches flags on a 30-second window.
+                # Allow one full window plus startup/CI scheduling slack.
+                for _ in range(800):
                     submissions=good('GET','/submissions',token=token)
                     if submissions and submissions[0]['state']=='accepted':break
                     time.sleep(.05)
