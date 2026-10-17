@@ -72,6 +72,10 @@ class FlagControls(unittest.TestCase):
                     self.assertEqual(db.execute("SELECT count(*) FROM flags WHERE category='own_exposed'").fetchone()[0],0)
                     self.assertEqual(db.execute("SELECT flag_id FROM flag_events WHERE event_id='old-detection'").fetchone()[0],None)
                 first=api('/flags/page?sort=service&order=asc&limit=1')
+                self.assertEqual(first['items'][0]['value'],expected[2])
+                self.assertNotIn('value',api('/flags')[0])
+                self.assertEqual([item['value'] for item in api('/flags/page?sort=value&order=asc')['items']],sorted(expected))
+                self.assertEqual(api('/flags/page?search=AbC')['items'][0]['value'],expected[0])
                 self.assertEqual(first['total'],3);self.assertEqual(first['items'][0]['service_id'],'ark')
                 self.assertEqual(api('/flags/page?sort=service&order=asc&limit=1&offset=1')['items'][0]['service_id'],'docs')
                 self.assertEqual(api('/flags/page?service_id=docs')['total'],2)
@@ -89,7 +93,22 @@ class FlagControls(unittest.TestCase):
                 with sqlite3.connect(root/'db') as db:
                     self.assertEqual(db.execute('SELECT max(flag_count) FROM flag_submitter_batches').fetchone()[0],1)
                     self.assertEqual(db.execute("SELECT count(*) FROM submissions WHERE state='accepted'").fetchone()[0],3)
-                print('Verbatim uv argv, manual count while paused, per-call limit, immediate auto dispatch, migration purge and sorted service pagination: OK')
+                config=api('/submitter')['config'];config['enabled']=False
+                api('/submitter',config,'PUT')
+                failed=api('/flags/page?search=AbC')['items'][0]
+                with sqlite3.connect(root/'db') as db:
+                    db.execute("UPDATE submissions SET state='failed',attempts=10,next_attempt=9999999999 WHERE flag_id=?",[failed['id']])
+                api('/flags/import',{'text':expected[0]})
+                with sqlite3.connect(root/'db') as db:
+                    self.assertEqual(db.execute('SELECT state,attempts FROM submissions WHERE flag_id=?',[failed['id']]).fetchone(),('failed',10))
+                api('/flags/'+failed['id']+'/submit',{},'POST')
+                with sqlite3.connect(root/'db') as db:
+                    self.assertEqual(db.execute('SELECT state,attempts FROM submissions WHERE flag_id=?',[failed['id']]).fetchone(),('queued',0))
+                config=api('/submitter')['config'];config['enabled']=True
+                api('/submitter',config,'PUT')
+                wait(lambda:api('/submitter'),lambda row:row['queued_flags']==0)
+                self.assertEqual([flag for line in recorded.read_text().splitlines() for flag in json.loads(line)],expected+[expected[0]])
+                print('Failed flag resubmission, verbatim uv argv, manual count while paused, per-call limit, immediate auto dispatch, migration purge and sorted service pagination: OK')
             finally:
                 for process in reversed(processes):
                     if process.poll() is None:process.terminate()

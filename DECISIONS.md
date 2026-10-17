@@ -181,3 +181,16 @@ Captured values and existing submitter configuration are preserved. Add optional
 batch_size with default240, paginated /flags/page alongside legacy /flags, atomic
 regex text import, and /submitter/run. Generated OpenAPI/frontend types reflect
 these compatible additions. See docs/flags.md for limits and restart behavior.
+
+### Flag text in the authenticated manager
+
+The user explicitly requested original flag text instead of Digest in the table.
+Expose optional value on the audited authenticated /flags/page response and render
+it as escaped text with preserved whitespace in Vue. Keep SHA-256 digest for
+deduplication/API compatibility, legacy /flags arrays redacted, and submission
+logs redacted. This supersedes the earlier redacted-manager UI decision.
+
+Explicit Submit on a failed captured flag requeues the same submission with
+attempts0, a due-now timestamp and the requesting user. Only explicit actions reset
+failed attempts; automatic duplicate captures do not. Accepted/inflight/queued
+entries remain idempotent; a full pending queue rejects the retry atomically.

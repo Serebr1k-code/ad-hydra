@@ -319,6 +319,7 @@ async fn pasted_flags_keep_exact_values_queue_once_and_page_by_service() {
         .await
         .unwrap();
     assert_eq!(first.total, 3);
+    assert_eq!(first.items[0].value.as_deref(), Some("FLAG003"));
     assert_eq!(first.items[0].service_id.as_deref(), Some("ark"));
     let next = f
         .browse_flags(
@@ -380,5 +381,43 @@ async fn unconfigured_extraction_leaves_farm_output_usable() {
     assert!(flags.extract(b"ordinary output\xff").unwrap().is_empty());
     assert!(flags.extract(b"").unwrap().is_empty());
     assert!(flags.extract(&vec![0; 65537]).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn explicit_submit_requeues_failed_flag_with_new_attempt_budget() {
+    let (flags, dir) = fixture().await;
+    let id = flags
+        .record_captured(
+            "FLAG765".into(),
+            "allowed".into(),
+            None,
+            Actor::user("capturer".into()),
+            "capture".into(),
+        )
+        .await
+        .unwrap();
+    flags.auth.db.run(|db| {db.execute("UPDATE submissions SET state='failed',attempts=10,next_attempt=9999999999,response='previous failure'",[])?;Ok(())}).await.unwrap();
+    flags
+        .submit(
+            id.clone(),
+            Actor::user("resubmitter".into()),
+            "resubmit".into(),
+        )
+        .await
+        .unwrap();
+    let rows = flags
+        .submissions(Actor::user("reader".into()), "read".into())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].state, "queued");
+    assert_eq!(rows[0].attempts, 0);
+    assert_eq!(rows[0].initiated_by, "resubmitter");
+    assert!(rows[0].response.is_empty());
+    let value=flags.auth.db.run(move |db|{Ok(db.query_row("SELECT f.value,s.next_attempt,(SELECT count(*) FROM audit WHERE action='submissions.requeue' AND actor_id='resubmitter') FROM flags f JOIN submissions s ON s.flag_id=f.id WHERE f.id=?1",[id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,u32>(2)?)))?)}).await.unwrap();
+    assert_eq!(value.0, "FLAG765");
+    assert!(value.1 <= crate::modules::auth::now());
+    assert_eq!(value.2, 1);
     std::fs::remove_dir_all(dir).unwrap();
 }

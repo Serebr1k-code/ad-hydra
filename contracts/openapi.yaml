@@ -2072,6 +2072,10 @@ components:
           type:
           - string
           - 'null'
+        value:
+          type:
+          - string
+          - 'null'
     FlowHistory:
       type: object
       required:

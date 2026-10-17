@@ -9,6 +9,8 @@ use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 #[derive(Serialize, ToSchema)]
 pub struct FlagView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
     pub service_id: Option<String>,
     pub state: Option<String>,
     pub id: String,
@@ -140,6 +142,16 @@ impl Flags {
             .run(move |db| {
                 let tx = db.transaction()?;
                 enqueue(&tx, &id, &actor, &request)?;
+                let failed = tx.query_row(
+                    "SELECT attempts FROM submissions WHERE flag_id=?1 AND state='failed'",
+                    [&id], |row| row.get::<_,u32>(0),
+                ).optional()?;
+                if let Some(attempts) = failed {
+                    let pending: u32 = tx.query_row("SELECT count(*) FROM submissions WHERE state IN ('queued','inflight','retry')", [], |row| row.get(0))?;
+                    anyhow::ensure!(pending < 5000, "submission queue full");
+                    tx.execute("UPDATE submissions SET state='queued',attempts=0,next_attempt=?2,response='',initiated_by=?3 WHERE flag_id=?1 AND state='failed'", params![id,now(),actor.id])?;
+                    audit::append_change(&tx,&actor,"submissions.requeue",&id,&request,true,now(),&serde_json::json!({"before":{"state":"failed","attempts":attempts},"after":{"state":"queued","attempts":0,"initiated_by":actor.id}}))?;
+                }
                 tx.commit()?;
                 Ok(())
             })
@@ -190,7 +202,7 @@ impl Browse {
         anyhow::ensure!(
             self.sort.as_deref().is_none_or(|v| matches!(
                 v,
-                "created_at" | "service" | "target" | "category" | "state" | "digest"
+                "created_at" | "service" | "target" | "category" | "state" | "digest" | "value"
             )) && self
                 .order
                 .as_deref()

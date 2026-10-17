@@ -13,12 +13,13 @@ Paste text into **Import flags from text** and optionally select its service and
 target. Import extracts matches using the saved regex and reports matched, added,
 queued and duplicate counts. A request accepts at most 64 KiB of text and 256
 matches. Existing values are deduplicated; accepted duplicates are not resubmitted.
-Invalid imports fail atomically. Raw values are absent from list responses and
-submission logs.
+Invalid imports fail atomically. The authenticated Flag Manager displays exact flag text instead of its digest.
+The paginated response includes `value`; legacy array responses and submission
+logs stay redacted. Digests are internal SHA-256 identifiers used for deduplication.
 
 The table has independent pagination, page size, search, service and state filters,
 and ascending/descending sorting by creation time, service, target, state,
-category or digest. Service sorting uses Farm catalog names when available.
+category or flag text (the API also retains digest sorting). Service sorting uses Farm catalog names when available.
 Submission history has its own pagination.
 
 ## Send automatically or manually
@@ -44,6 +45,11 @@ calls; an already claimed child may finish. A restarted Core marks an interrupte
 manual request and recovers its in-flight flags to retry. Recent manual request
 metadata is retained for up to 500 completed requests; audit records retain actor
 provenance. See [Farm runtime and gzip log retention](farm.md).
+
+Click **Resubmit** on a failed flag to requeue it with a fresh attempt budget.
+This explicit action preserves the exact value and records the requesting user;
+accepted or currently in-flight flags are not restarted. Automatic submission
+must be enabled to send queued flags, or use Run saved submitter now while paused.
 
 ## Defensive findings and migration
 
