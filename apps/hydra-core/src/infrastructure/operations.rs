@@ -1,9 +1,9 @@
-//! Operator-only execution and checker configuration; never populated from HTTP input.
+//! Validated execution and checker configuration, loaded at startup from the operator file.
 use crate::{
     infrastructure::{db::Database, sandbox},
     modules::{farm, flags},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -12,7 +12,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub flag_pattern: Option<String>,
@@ -24,21 +24,23 @@ pub struct Settings {
     pub execution_mode: ExecutionMode,
     pub host_runtime: Option<HostRuntimeSettings>,
 }
-#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
     #[default]
     Sandbox,
     Host,
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HostRuntimeSettings {
     #[serde(default = "default_uv")]
+    #[schema(value_type = String)]
     pub uv: PathBuf,
+    #[schema(value_type = String)]
     pub work_dir: PathBuf,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Checker {
     Https {
@@ -68,14 +70,19 @@ pub enum Checker {
         secret: Option<String>,
     },
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxSettings {
+    #[schema(value_type = String)]
     pub delegated_cgroup: PathBuf,
+    #[schema(value_type = String)]
     pub runtime_dir: PathBuf,
+    #[schema(value_type = String)]
     pub bwrap: PathBuf,
+    #[schema(value_type = String)]
     pub ip: PathBuf,
     #[serde(default = "default_uv")]
+    #[schema(value_type = String)]
     pub uv: PathBuf,
 }
 fn default_uv() -> PathBuf {
@@ -95,7 +102,17 @@ impl Settings {
                 && metadata.len() <= 65536,
             "operations config must be a private regular file <=64 KiB"
         );
-        let mut settings: Self = serde_json::from_slice(&std::fs::read(path)?)?;
+        use std::io::Read;
+        let file = std::fs::File::open(path)?;
+        let opened = file.metadata()?;
+        anyhow::ensure!(
+            opened.ino() == metadata.ino() && opened.dev() == metadata.dev(),
+            "operations config changed while opening"
+        );
+        let mut bytes = Vec::new();
+        file.take(65537).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() <= 65536, "operations config exceeds 64 KiB");
+        let mut settings: Self = serde_json::from_slice(&bytes)?;
         if let Some(Checker::Https {
             ca_certificate_der,
             ca_certificate_path: Some(certificate),
@@ -111,7 +128,12 @@ impl Settings {
                 metadata.is_file() && metadata.len() <= 65536,
                 "checker CA must be a regular DER file <=64KiB"
             );
-            *ca_certificate_der = std::fs::read(certificate)?;
+            let file = std::fs::File::open(certificate)?;
+            file.take(65537).read_to_end(ca_certificate_der)?;
+            anyhow::ensure!(
+                ca_certificate_der.len() <= 65536,
+                "checker CA exceeds 64 KiB"
+            );
         }
         Ok(settings)
     }

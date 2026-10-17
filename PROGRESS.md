@@ -147,3 +147,12 @@ Post-smoke 2-second sample: Core 36,524 KiB RSS/Proxy 7,240 KiB RSS, combined 42
 
 ### 2026-10-18 — Run summary columns and modal logs
 
+## Accounts, username labels and editable file-backed settings — 2026-10-18
+
+Explicit user amendment enables authenticated same-origin account creation in UI/API with equal full privileges and preserved CLI bootstrap/recovery. Shared bounded validation/hashing and actor-derived audits back the real endpoint. A reactive authenticated directory displays usernames for authors, editors, initiators and audit actors, including nested provenance; captured values and technical resource/request IDs are unchanged. Farm runs use one New / duplicate column.
+
+Verification so far: `bun run build` and `bun test` (48/48); `cargo test --locked -p hydra-core --test identity` (13/13); Settings module tests (6/6); Core library Clippy with `-D warnings`; `cargo fmt --all -- --check`; `scripts/check-contracts.sh`; `python3 scripts/generate-frontend.py --check`; `python3 scripts/check-architecture.py`; `python3 tests/e2e/browser.py` (real HTTPS account creation and persisted settings); `python3 tests/e2e/relay.py` (TCP/UDP integrity and independent restart), deployment Bash/Python syntax checks. Focused review found no outstanding material issue. Local relay smoke measured Core38,308KiB / Proxy22,148KiB RSS and1%/0% idle CPU with affinity2; this brief fixture measurement is not a production throughput benchmark.
+
+Final release `CARGO_BUILD_JOBS=2 cargo build --locked --release -p hydra-core -p hydra-proxy` passed (2m38s). `HYDRA_BUILD_PROFILE=release HYDRA_VERIFY_EMBEDDED=1 python3 tests/e2e/browser.py` passed with frontend/dist removed during runtime, including username author/editor labels. Release OpenAPI equals checked-in snapshot. Core SHA256 f932f0e8f655fefba7bd364d6b9c0c97025fc1818c2425380e230dda935cf382; Proxy42419cd3aedb98e7470578c752c7cadbed27aeeb8bf00972744a732781e237d3.
+
+Remaining behavior: saved operations changes require Core restart; fixed JWT lifetimes and worker concurrency are read-only. Account names resolve current names, and unavailable identities show Unknown user. CLI remains required for the first account/recovery; every subsequently created UI account has full equal rights.

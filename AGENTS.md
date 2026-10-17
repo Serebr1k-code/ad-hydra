@@ -18,7 +18,7 @@ You are implementing Hydra from `SPEC.md` for authorized A/D CTF use. Treat `SPE
 - All core state bounded: channels, samples, UDP mapping, parser state, connections, regex input, execution worker count, spool and upload sizes. Handle backpressure and report loss explicitly.
 - Rust-compiled WASM plugin is the hot-loaded extension format. Native Rust parsing is a compile-time extension. Unknown protocols pass through unchanged.
 - Every mutation and sensitive diagnostic read has actor provenance and audit metadata; all authenticated users have identical full rights. Never accept author from user input.
-- Access JWT 60 s; refresh JWT 10 h absolute and rotates. User creation via CLI only. Keep security secrets out of telemetry, worker environments and logs.
+- Access JWT 60 s; refresh JWT 10 h absolute and rotates. User creation via authenticated UI/API and CLI bootstrap/recovery (explicit user amendment 2026-10-18). Keep security secrets out of telemetry, worker environments and logs.
 - Domain of authorized test targets is defined by explicit allowlist; never provide open arbitrary-host execution or packet injection API.
 - Do not reintroduce Round Manager, Service Monitor, eBPF, Suricata, Redis, PostgreSQL or Docker daemon without explicit product change.
 

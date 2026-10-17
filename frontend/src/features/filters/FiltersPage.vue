@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import {username} from '@/shared/users/directory'
 import { computed, onMounted, ref } from 'vue'
 import type { FilterInput, ListResponse } from '@/generated/contracts'
 import { api, errorMessage } from '@/shared/api/client'
@@ -33,7 +34,7 @@ const rows = computed(() => [...(data.value?.items ?? [])].sort((a, b) => {
   switch (sort.value) {
     case 'priority': return b.priority - a.priority
     case 'hit_count': return b.hit_count - a.hit_count
-    case 'created_by': return a.created_by.localeCompare(b.created_by)
+    case 'created_by': return username(a.created_by).localeCompare(username(b.created_by))
     case 'name': return a.name.localeCompare(b.name)
     default: return a.created_at.localeCompare(b.created_at)
   }
@@ -131,7 +132,7 @@ onMounted(() => load(''))
       <template #cell-select="{ row }"><Checkbox :model-value="selected.includes(row.id)" :aria-label="'Select ' + row.name" @update:model-value="value => toggleSelection(row.id, value)" /></template>
       <template #cell-name="{ row }"><div>{{ row.name }}</div><p class="text-sm" :class="row.mode === 'shadow' ? 'font-medium' : ''">{{ row.mode === 'shadow' ? 'Shadow — observes only; traffic passes' : 'Enforce — applies action to matches' }}</p></template>
       <template #cell-created_at="{ row }">{{ date(row.created_at) }}</template>
-      <template #cell-author="{ row }"><div>{{ row.created_by }}</div><div class="text-muted-foreground">{{ row.updated_by }}</div></template>
+      <template #cell-author="{ row }"><div>{{ username(row.created_by) }}</div><div class="text-muted-foreground">{{ username(row.updated_by) }}</div></template>
       <template #cell-enabled="{ row }"><Button variant="outline" size="sm" :disabled="busy" @click="setState(row)">{{ row.enabled ? 'Turn off' : 'Turn on' }}</Button><p class="text-sm">Desired {{ row.desired_enabled ? 'on' : 'off' }} / applied {{ row.applied_enabled === null ? 'pending' : row.applied_enabled ? 'on' : 'off' }}</p></template>
       <template #cell-actions="{ row }"><div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" :disabled="busy" @click="edit(row)">Edit</Button><Button variant="outline" size="sm" :disabled="busy" @click="test(row)">Test saved message</Button><Button v-if="row.mode === 'shadow'" variant="outline" size="sm" :disabled="busy" @click="enforce(row)">Enforce</Button><Button variant="destructive" size="sm" :disabled="busy" @click="remove(row)">Delete</Button></div></template>
     </DataTable>

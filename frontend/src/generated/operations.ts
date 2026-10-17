@@ -32,6 +32,10 @@ export const operations = {
     "method": "POST",
     "path": "/api/v1/services"
   },
+  "create_user": {
+    "method": "POST",
+    "path": "/api/v1/users"
+  },
   "deactivate": {
     "method": "POST",
     "path": "/api/v1/users/{id}/deactivate"
@@ -283,6 +287,10 @@ export const operations = {
   "update_service": {
     "method": "PATCH",
     "path": "/api/v1/services/{id}"
+  },
+  "update_settings": {
+    "method": "PUT",
+    "path": "/api/v1/system/settings"
   },
   "update_user": {
     "method": "PATCH",

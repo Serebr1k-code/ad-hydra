@@ -1481,6 +1481,49 @@ paths:
                 $ref: '#/components/schemas/SettingsView'
         '401':
           description: ''
+    put:
+      tags:
+      - system
+      operationId: update_settings
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSettingsRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsView'
+        '400':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsError'
+        '401':
+          description: ''
+        '403':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsError'
+        '409':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsError'
+        '503':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsError'
   /api/v1/traffic/events/stream:
     get:
       tags:
@@ -1846,6 +1889,33 @@ paths:
                   $ref: '#/components/schemas/User'
         '401':
           description: ''
+    post:
+      tags:
+      - users
+      operationId: create_user
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUser'
+        required: true
+      responses:
+        '201':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: ''
+        '401':
+          description: ''
+        '409':
+          description: ''
+        '413':
+          description: ''
+        '503':
+          description: ''
   /api/v1/users/{id}:
     patch:
       tags:
@@ -1965,6 +2035,148 @@ components:
       properties:
         sample_id:
           type: string
+    CheckerConfig:
+      oneOf:
+      - type: object
+        required:
+        - address
+        - host
+        - path
+        - bearer
+        - kind
+        properties:
+          address:
+            type: string
+          bearer:
+            $ref: '#/components/schemas/SecretUpdate'
+          credential_configured:
+            type: boolean
+          host:
+            type: string
+          kind:
+            type: string
+            enum:
+            - http
+          path:
+            type: string
+      - type: object
+        required:
+        - address
+        - host
+        - path
+        - bearer
+        - kind
+        properties:
+          address:
+            type: string
+          bearer:
+            $ref: '#/components/schemas/SecretUpdate'
+          ca_certificate_der:
+            type: array
+            items:
+              type: integer
+              format: int32
+              minimum: 0
+          ca_certificate_path:
+            type:
+            - string
+            - 'null'
+          credential_configured:
+            type: boolean
+          host:
+            type: string
+          kind:
+            type: string
+            enum:
+            - https
+          path:
+            type: string
+      - type: object
+        required:
+        - address
+        - secret
+        - kind
+        properties:
+          address:
+            type: string
+          credential_configured:
+            type: boolean
+          kind:
+            type: string
+            enum:
+            - tcp
+          secret:
+            $ref: '#/components/schemas/SecretUpdate'
+      - type: object
+        required:
+        - address
+        - request_template
+        - accepted_prefix
+        - secret
+        - batch_size
+        - kind
+        properties:
+          accepted_prefix:
+            type: string
+          address:
+            type: string
+          batch_size:
+            type: integer
+            minimum: 0
+          credential_configured:
+            type: boolean
+          kind:
+            type: string
+            enum:
+            - custom_tcp
+          request_template:
+            type: string
+          secret:
+            $ref: '#/components/schemas/SecretUpdate'
+    CreateUser:
+      type: object
+      required:
+      - username
+      - password
+      properties:
+        password:
+          type: string
+          description: Password length is measured in UTF-8 bytes and must be 12..1024.
+        username:
+          type: string
+      additionalProperties: false
+    EditableConfig:
+      type: object
+      required:
+      - auto_submit_captured
+      - execution_mode
+      properties:
+        auto_submit_captured:
+          type: boolean
+        checker:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/CheckerConfig'
+        execution_mode:
+          $ref: '#/components/schemas/ExecutionMode'
+        flag_pattern:
+          type:
+          - string
+          - 'null'
+        host_runtime:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/HostRuntimeSettings'
+        sandbox:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxSettings'
+      additionalProperties: false
+    ExecutionMode:
+      type: string
+      enum:
+      - sandbox
+      - host
     Exploit:
       type: object
       required:
@@ -2321,6 +2533,16 @@ components:
         direction:
           type: integer
           format: int32
+    HostRuntimeSettings:
+      type: object
+      required:
+      - work_dir
+      properties:
+        uv:
+          type: string
+        work_dir:
+          type: string
+      additionalProperties: false
     ImportFlags:
       type: object
       required:
@@ -2635,6 +2857,47 @@ components:
           type: string
         truncated:
           type: boolean
+    SandboxSettings:
+      type: object
+      required:
+      - delegated_cgroup
+      - runtime_dir
+      - bwrap
+      - ip
+      properties:
+        bwrap:
+          type: string
+        delegated_cgroup:
+          type: string
+        ip:
+          type: string
+        runtime_dir:
+          type: string
+        uv:
+          type: string
+      additionalProperties: false
+    SecretUpdate:
+      oneOf:
+      - type: object
+        required:
+        - mode
+        properties:
+          mode:
+            type: string
+            enum:
+            - keep
+      - type: object
+        required:
+        - mode
+        properties:
+          mode:
+            type: string
+            enum:
+            - replace
+          value:
+            type:
+            - string
+            - 'null'
     ServiceInput:
       type: object
       required:
@@ -2698,9 +2961,19 @@ components:
           type: string
         revoked:
           type: boolean
+    SettingsError:
+      type: object
+      required:
+      - error
+      properties:
+        error:
+          type: string
     SettingsView:
       type: object
       required:
+      - editable_config
+      - restart_required
+      - configuration_editable
       - automatic_submission
       - checker_batch_size
       - sandbox_configured
@@ -2722,7 +2995,15 @@ components:
         checker_batch_size:
           type: integer
           minimum: 0
+        configuration_editable:
+          type: boolean
+        editable_config:
+          $ref: '#/components/schemas/EditableConfig'
         flag_pattern:
+          type:
+          - string
+          - 'null'
+        readonly_reason:
           type:
           - string
           - 'null'
@@ -2730,8 +3011,14 @@ components:
           type: integer
           format: int32
           minimum: 0
+        restart_required:
+          type: boolean
         sandbox_configured:
           type: boolean
+        saved_revision:
+          type:
+          - string
+          - 'null'
         supported_worker_networks:
           type: array
           items:
@@ -3006,6 +3293,17 @@ components:
           type:
           - string
           - 'null'
+      additionalProperties: false
+    UpdateSettingsRequest:
+      type: object
+      required:
+      - saved_revision
+      - editable_config
+      properties:
+        editable_config:
+          $ref: '#/components/schemas/EditableConfig'
+        saved_revision:
+          type: string
       additionalProperties: false
     UpdateUser:
       type: object

@@ -124,7 +124,7 @@ async fn migration_checksum_mismatch_fails() {
     std::fs::remove_dir_all(path).unwrap();
 }
 #[tokio::test]
-async fn equal_accounts_manage_each_other_and_no_registration() {
+async fn equal_accounts_manage_each_other_and_no_public_registration() {
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -196,7 +196,7 @@ async fn equal_accounts_manage_each_other_and_no_registration() {
         .oneshot(Request::post("/api/v1/users").body(Body::empty()).unwrap())
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     drop(state);
     std::fs::remove_dir_all(path).unwrap();
 }
@@ -674,6 +674,209 @@ async fn account_update_checks_revision_and_revokes_sessions_without_exposing_pa
         })
         .await
         .unwrap();
+    drop(state);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn authenticated_creation_preserves_actor_and_full_rights() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use tower::ServiceExt;
+    let (state, path) = setup().await;
+    let creator = account(&state).await;
+    let tokens = login(&state).await;
+    let app = hydra_core::modules::auth::router(state.clone());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/users")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", tokens.response.access_token),
+                )
+                .header(header::ORIGIN, "https://hydra.test")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"username":"new-member","password":"new-member-password"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(created["username"], "new-member");
+    assert_eq!(created["active"], true);
+    assert_eq!(created["revision"], 1);
+    assert!(!String::from_utf8_lossy(&body).contains("password"));
+    let created_id = created["id"].as_str().unwrap().to_owned();
+    let new_tokens = state
+        .login(
+            "new-member".into(),
+            "new-member-password".into(),
+            "new-login".into(),
+        )
+        .await
+        .unwrap();
+    let actor = state
+        .authenticate(&new_tokens.response.access_token)
+        .await
+        .unwrap();
+    assert_eq!(actor.id, created_id);
+    assert_eq!(
+        users::list(&state.db, actor, "new-list".into())
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    state.db.run(move |db| {
+        let (kind, id, metadata): (String,String,String) = db.query_row("SELECT actor_kind,actor_id,metadata FROM audit WHERE action='user.create' AND target=?1", [&created_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        assert_eq!(kind, "user"); assert_eq!(id, creator);
+        assert!(metadata.contains("http")); assert!(!metadata.contains("password"));
+        let cli_kind: String = db.query_row("SELECT actor_kind FROM audit WHERE action='user.create' AND target=?1", [&creator], |r| r.get(0))?;
+        assert_eq!(cli_kind, "local_cli");
+        Ok(())
+    }).await.unwrap();
+    // The created account can create another account using the same endpoint.
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/users")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", new_tokens.response.access_token),
+                )
+                .header(header::ORIGIN, "https://hydra.test")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"username":"third","password":"third-safe-password"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    drop(state);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn creation_requires_auth_origin_valid_fields_and_bounded_body() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use tower::ServiceExt;
+    let (state, path) = setup().await;
+    account(&state).await;
+    let tokens = login(&state).await;
+    let app = hydra_core::modules::auth::router(state.clone());
+    let valid = serde_json::json!({"username":"new", "password":"new-safe-password"});
+    let cases = [
+        (
+            false,
+            Some("https://hydra.test"),
+            valid.clone(),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (true, None, valid.clone(), StatusCode::UNAUTHORIZED),
+        (
+            true,
+            Some("https://evil.test"),
+            valid,
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            true,
+            Some("https://hydra.test"),
+            serde_json::json!({"username":"alice","password":"duplicate-safe-password"}),
+            StatusCode::CONFLICT,
+        ),
+        (
+            true,
+            Some("https://hydra.test"),
+            serde_json::json!({"username":"","password":"new-safe-password"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            true,
+            Some("https://hydra.test"),
+            serde_json::json!({"username":"bad/name","password":"new-safe-password"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            true,
+            Some("https://hydra.test"),
+            serde_json::json!({"username":"new","password":"short"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            true,
+            Some("https://hydra.test"),
+            serde_json::json!({"username":"new","password":"x".repeat(1025)}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            true,
+            Some("https://hydra.test"),
+            serde_json::json!({"username":"new","password":"new-safe-password","actor":"forged"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            true,
+            Some("https://hydra.test"),
+            serde_json::json!({"username":"new","password":"x".repeat(20000)}),
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+    ];
+    for (authenticated, origin, body, expected) in cases {
+        let mut request =
+            Request::post("/api/v1/users").header(header::CONTENT_TYPE, "application/json");
+        if authenticated {
+            request = request.header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", tokens.response.access_token),
+            );
+        }
+        if let Some(origin) = origin {
+            request = request.header(header::ORIGIN, origin);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    assert!(
+        users::create(
+            &state.db,
+            &state.crypto,
+            "too-long".into(),
+            "x".repeat(1025)
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        users::list(
+            &state.db,
+            state
+                .authenticate(&tokens.response.access_token)
+                .await
+                .unwrap(),
+            "list".into()
+        )
+        .await
+        .unwrap()
+        .len(),
+        1
+    );
+    drop(app);
     drop(state);
     std::fs::remove_dir_all(path).unwrap();
 }

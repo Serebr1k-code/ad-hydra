@@ -165,6 +165,8 @@ pub async fn run() -> anyhow::Result<()> {
             let settings =
                 crate::infrastructure::operations::Settings::load(operations.as_deref())?;
             let settings_view = crate::modules::settings::SettingsView::from_settings(&settings);
+            let settings_state =
+                crate::modules::settings::Settings::new(auth.clone(), settings_view, operations)?;
             let flags = crate::modules::flags::Flags::open(auth.clone(), settings.flags()).await?;
             let farm = crate::modules::farm::Farm::open(
                 auth.clone(),
@@ -251,10 +253,7 @@ pub async fn run() -> anyhow::Result<()> {
                     flags,
                     farm,
                     diagnostics,
-                    settings: crate::modules::settings::Settings {
-                        auth: auth.clone(),
-                        view: settings_view,
-                    },
+                    settings: settings_state,
                 },
             );
             let listener = listener.into_std()?;

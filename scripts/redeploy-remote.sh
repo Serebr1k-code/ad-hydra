@@ -13,16 +13,26 @@ if [[ -n "$operations_source" && "$operations_source" != "$stage/operations.json
 fi
 backup="/root/hydra-staging/backup-${stamp}"
 database=/var/lib/hydra-core/hydra.sqlite3
-operations=/etc/hydra/operations.json
+# Follow the effective service unit, including competition drop-ins. This keeps
+# backups and rollback on the exact config path consumed by Core.
+operations=$(python3 - <<'PYCONFIG'
+import re, subprocess
+unit = subprocess.check_output(['systemctl', 'show', 'hydra-core', '--property=ExecStart', '--value'], text=True)
+match = re.search(r'--operations[ =]+(/[^\s;"\x27]+)', unit)
+if not match:
+    raise SystemExit('Cannot determine effective Core --operations path')
+print(match.group(1))
+PYCONFIG
+)
 mkdir -m 0700 "$backup"
 printf '%s  %s\n' "$core_sha" "$stage/hydra-core" "$proxy_sha" "$stage/hydra-proxy" | sha256sum -c -
 cp -p /usr/local/bin/hydra-core "$backup/hydra-core"
 cp -p /usr/local/bin/hydra-proxy "$backup/hydra-proxy"
-cp -p "$operations" "$backup/operations.json"
 # Stop the sole SQLite writer before backing up or replacing state. Proxy keeps
 # forwarding while Core is down. No database/secret contents leave this VM.
 systemctl stop hydra-core
 trap 'systemctl start hydra-core || true' ERR
+cp -p "$operations" "$backup/operations.json"
 python3 - "$database" "$backup/hydra.sqlite3" <<'PY'
 import os, sqlite3, sys
 source = sqlite3.connect(sys.argv[1])

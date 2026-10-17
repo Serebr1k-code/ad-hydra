@@ -4,6 +4,8 @@ import type { Actor, AuditEvent, Session, User } from '@/generated/contracts'
 import { api, clear, errorMessage } from '@/shared/api/client'
 import { openEditor } from '@/shared/editor'
 import { date } from '@/shared/format'
+import {setUserDirectory,username} from '@/shared/users/directory'
+import CreateUserForm from './CreateUserForm.vue'
 import DataTable from '@/components/DataTable.vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -13,7 +15,7 @@ const actor = ref<Actor>(), passwords = ref<Record<string,string>>({})
 const loading = ref(false), busy = ref(''), auditLoading = ref(false), auditLoaded = ref(false), auditEnd = ref(false), error = ref('')
 async function load() {
   loading.value = true; error.value = ''
-  try { [users.value, actor.value, sessions.value] = await Promise.all([api<User[]>('/users'), api<Actor>('/auth/me'), api<Session[]>('/auth/sessions')]) }
+  try { [users.value, actor.value, sessions.value] = await Promise.all([api<User[]>('/users'), api<Actor>('/auth/me'), api<Session[]>('/auth/sessions')]);setUserDirectory(users.value) }
   catch (e) { error.value = errorMessage(e) }
   finally { loading.value = false }
 }
@@ -50,8 +52,9 @@ onMounted(load)
 <template>
   <section class="space-y-4">
     <h1 class="text-2xl font-semibold">Users and audit</h1>
-    <p class="text-muted-foreground">All active accounts have identical full privileges. Create or recover accounts through the local CLI. Password changes revoke every session of that account.</p>
+    <p class="text-muted-foreground">All active accounts have identical full privileges. Add accounts below; CLI account recovery remains available. Password changes revoke every session of that account.</p>
     <Alert v-if="error" variant="destructive"><AlertDescription>{{ error }}</AlertDescription></Alert>
+    <CreateUserForm @created="load" />
     <Button variant="outline" :disabled="loading" @click="load">{{ loading ? 'Loading…' : 'Refresh accounts' }}</Button>
     <DataTable :columns="[{key:'username',label:'Username'},{key:'active',label:'Active'},{key:'dates',label:'Created / updated'},{key:'actions',label:'Actions'}]" :rows="users">
       <template #cell-dates="{row}">{{ date(row.created_at) }} / {{ date(row.updated_at) }}</template>
@@ -60,7 +63,7 @@ onMounted(load)
     <p v-if="!loading && !users.length">No accounts found.</p>
     <h2 class="text-lg font-semibold">Your sessions</h2>
     <p class="text-muted-foreground">Sign out to revoke the current session. Reset your password to revoke every session.</p>
-    <DataTable :columns="[{key:'id',label:'Session'},{key:'expires_at',label:'Expires'},{key:'revoked',label:'Revoked'}]" :rows="sessions"><template #cell-expires_at="{row}">{{ date(row.expires_at) }}</template></DataTable>
+    <DataTable :columns="[{key:'user',label:'Username'},{key:'expires_at',label:'Expires'},{key:'revoked',label:'Revoked'}]" :rows="sessions"><template #cell-user>{{username(actor?.id)}}</template><template #cell-expires_at="{row}">{{ date(row.expires_at) }}</template></DataTable>
     <p v-if="!loading && !sessions.length">No sessions found.</p>
     <h2 class="text-lg font-semibold">Audit history</h2>
     <div class="flex gap-2"><Button variant="outline" :disabled="auditLoading" @click="loadAudit(true)">Load audit</Button><Button variant="outline" :disabled="auditLoading || auditEnd" @click="loadAudit()">{{ auditLoading ? 'Loading…' : 'Next audit page' }}</Button></div>

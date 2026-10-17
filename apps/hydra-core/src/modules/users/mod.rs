@@ -1,5 +1,5 @@
 use crate::{
-    infrastructure::{crypto::Crypto, db::Database},
+    infrastructure::db::Database,
     modules::audit::{self, Actor},
 };
 use rusqlite::params;
@@ -14,48 +14,9 @@ pub struct User {
     pub revision: i64,
     pub updated_at: String,
 }
-pub async fn create(
-    db: &Database,
-    crypto: &Crypto,
-    username: String,
-    password: String,
-) -> anyhow::Result<String> {
-    anyhow::ensure!(
-        !username.is_empty()
-            && username.len() <= 64
-            && username
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_- .".contains(&b)),
-        "invalid username"
-    );
-    anyhow::ensure!(password.len() >= 12, "password must have at least 12 bytes");
-    let hash = crypto.hash(password).await?;
-    let id = uuid::Uuid::new_v4().to_string();
-    let result = id.clone();
-    db.run(move |c| {
-        let tx = c.transaction()?;
-        let count: i64 = tx.query_row("SELECT count(*) FROM users", [], |r| r.get(0))?;
-        anyhow::ensure!(count < 1024, "user quota exhausted");
-        let now = super::auth::now();
-        tx.execute(
-            "INSERT INTO users(id,username,password_hash,created_at,updated_at) VALUES(?1,?2,?3,?4,?4)",
-            params![id, username, hash, now],
-        )?;
-        audit::append_change(&tx,&Actor::local_cli(),"user.create",&id,"cli",true,now,&serde_json::json!({"before":null,"after":{"username":username,"active":true},"source":"local_cli"}))?;
-        tx.commit()?;
-        Ok(result)
-    })
-    .await
-}
-pub async fn create_prompt(
-    db: &Database,
-    crypto: &Crypto,
-    username: String,
-) -> anyhow::Result<String> {
-    let password =
-        tokio::task::spawn_blocking(|| rpassword::prompt_password("Password: ")).await??;
-    create(db, crypto, username, password).await
-}
+mod creation;
+pub use creation::{CreateError, CreateUser, create, create_authenticated, create_prompt};
+
 pub async fn list(db: &Database, actor: Actor, request_id: String) -> anyhow::Result<Vec<User>> {
     db.run(move |c| {
         let tx = c.transaction()?;
@@ -126,14 +87,7 @@ pub async fn update(
 ) -> anyhow::Result<()> {
     anyhow::ensure!(input.expected_revision > 0, "invalid revision");
     if let Some(name) = &input.username {
-        anyhow::ensure!(
-            !name.is_empty()
-                && name.len() <= 64
-                && name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"_- .".contains(&b)),
-            "invalid username"
-        );
+        creation::validate_username(name)?;
     }
     let hash = if let Some(password) = input.password {
         anyhow::ensure!(

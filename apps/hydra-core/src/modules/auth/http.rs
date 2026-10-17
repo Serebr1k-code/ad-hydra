@@ -2,7 +2,7 @@ use super::{AuthState, TokenResponse, Tokens, now};
 use crate::modules::{audit::Actor, users};
 use axum::{
     Json, Router,
-    extract::{FromRequestParts, Path, Query, State},
+    extract::{DefaultBodyLimit, FromRequestParts, Path, Query, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -172,6 +172,63 @@ pub async fn list_users(
 ) -> Result<Json<Vec<users::User>>, AuthError> {
     Ok(Json(users::list(&state.db, actor, request_id()).await?))
 }
+#[utoipa::path(post,path="/api/v1/users",request_body=users::CreateUser,responses((status=201,body=users::User),(status=400),(status=401),(status=409),(status=413),(status=503)),tag="users")]
+pub async fn create_user(
+    State(state): State<AuthState>,
+    Authenticated(actor): Authenticated,
+    headers: HeaderMap,
+    input: Result<Json<users::CreateUser>, JsonRejection>,
+) -> Response {
+    if let Err(error) = origin(&state, &headers) {
+        return error.into_response();
+    }
+    let input = match input {
+        Ok(Json(input)) => input,
+        Err(error) => {
+            let status = if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return creation_error(status, "invalid_request", "Invalid account fields");
+        }
+    };
+    match users::create_authenticated(&state.db, &state.crypto, input, actor, request_id()).await {
+        Ok(user) => (StatusCode::CREATED, Json(user)).into_response(),
+        Err(error) => {
+            let (status, code, message) = match error.downcast_ref::<users::CreateError>() {
+                Some(users::CreateError::InvalidUsername) => (
+                    StatusCode::BAD_REQUEST,
+                    "invalid_username",
+                    "Username must use 1..64 ASCII letters, digits, spaces, underscores, hyphens or periods",
+                ),
+                Some(users::CreateError::InvalidPassword) => (
+                    StatusCode::BAD_REQUEST,
+                    "invalid_password",
+                    "Password must contain 12..1024 bytes",
+                ),
+                Some(users::CreateError::Duplicate) => (
+                    StatusCode::CONFLICT,
+                    "username_exists",
+                    "Username already exists",
+                ),
+                _ => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "user_creation_unavailable",
+                    "Account creation temporarily unavailable",
+                ),
+            };
+            creation_error(status, code, message)
+        }
+    }
+}
+fn creation_error(status: StatusCode, code: &str, message: &str) -> Response {
+    (
+        status,
+        Json(serde_json::json!({"error":{"code":code,"message":message}})),
+    )
+        .into_response()
+}
 #[utoipa::path(post,path="/api/v1/users/{id}/deactivate",params(("id"=String,Path)),responses((status=204),(status=401)),tag="users")]
 pub async fn deactivate(
     State(state): State<AuthState>,
@@ -234,6 +291,7 @@ pub async fn audit_events(
         me,
         sessions,
         list_users,
+        create_user,
         deactivate,
         update_user,
         audit_events
@@ -243,6 +301,7 @@ pub async fn audit_events(
         TokenResponse,
         Actor,
         users::User,
+        users::CreateUser,
         users::UpdateUser,
         Session,
         crate::modules::audit::AuditEvent
@@ -257,7 +316,12 @@ pub fn router(state: AuthState) -> Router {
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/me", get(me))
         .route("/api/v1/auth/sessions", get(sessions))
-        .route("/api/v1/users", get(list_users))
+        .route(
+            "/api/v1/users",
+            get(list_users)
+                .post(create_user)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .route("/api/v1/users/{id}/deactivate", post(deactivate))
         .route("/api/v1/users/{id}", axum::routing::patch(update_user))
         .with_state(state)

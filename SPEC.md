@@ -17,7 +17,7 @@ Target **Linux, 2 vCPU, 2 GiB RAM**; game services might run on the same host. K
 - **Persistence**: single-owner SQLite WAL in Core for users, sessions, service configs, rules, audit, indexed parsed events, farm and flags. Core serves static embedded SPA and REST/OpenAPI API. Proxy holds the last-known-good config independently and applies compiled rules locally; **no RPC per network packet**.
 - **No Round Manager, no Service Monitor**. Minimal technical health/status counters for Hydra itself are permitted and required. Scheduling for farm is interval/manual; not tied to rounds.
 - **No eBPF implementation**; preserve pluggable `NetworkFilterBackend` abstraction, with initial userspace implementation. Additional backend is future work only.
-- **All accounts have identical full rights**. No roles, no RBAC, no public HTTP registration. User creation through `hydra-core create user <username> <password>`; additionally support interactive no-password-in-argv mode and document argv leakage.
+- **All accounts have identical full rights**. No roles, no RBAC, no public HTTP registration. Authenticated users can create accounts through the console or `POST /api/v1/users` (explicit user amendment 2026-10-18), with actor-derived audit. CLI bootstrap/recovery remains available through `hydra-core create user <username> <password>`; additionally support interactive no-password-in-argv mode and document argv leakage.
 
 ## 3. Identity, auth, audit
 

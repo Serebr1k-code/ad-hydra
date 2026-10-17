@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import {identityMetadata} from '@/shared/users/directory'
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import type { Exploit, FarmService, FarmTeam } from '@/generated/contracts'
@@ -73,7 +74,7 @@ function showLogs(run: FarmRun) { logTrigger=document.activeElement instanceof H
 function closeLogs() { requestedDetail.value = ''; detail.value = null }
 function restoreLogFocus(event:Event){if(logTrigger?.isConnected){event.preventDefault();logTrigger.focus()}}
 function showVersions(e: Exploit) {
-  void action(async () => { const value = await api<unknown>(`/farm/exploits/${encodeURIComponent(e.id)}/versions`); versionDetail.value = JSON.stringify(value, null, 2) ?? ''; versionTitle.value = `Versions: ${e.name}` }, false)
+  void action(async () => { const value = await api<unknown>(`/farm/exploits/${encodeURIComponent(e.id)}/versions`); versionDetail.value = JSON.stringify(identityMetadata(value), null, 2) ?? ''; versionTitle.value = `Versions: ${e.name}` }, false)
 }
 function next(kind: 'exploits' | 'runs') {
   const page = kind === 'exploits' ? exploits.value : runs.value

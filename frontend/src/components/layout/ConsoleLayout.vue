@@ -2,6 +2,7 @@
 import { ref,onMounted,onUnmounted } from 'vue'
 import { useRoute,useRouter } from 'vue-router'
 import { Button } from '@/components/ui/button'
+import {loadUserDirectory,clearUserDirectory} from '@/shared/users/directory'
 import { api,events,errorMessage } from '@/shared/api/client'
 const emit = defineEmits<{status:[value:string]}>()
 const route = useRoute(), router = useRouter(), notice = ref('')
@@ -15,6 +16,7 @@ async function status() {
  } catch (e) { notice.value = errorMessage(e) }
 }
 onMounted(() => {
+ void loadUserDirectory().catch(e=>{notice.value=errorMessage(e)})
  void status(); interval = setInterval(() => void status(),5000)
  void events(frame => {
   if (frame.startsWith('event: loss')) notice.value = 'Live events were dropped. Refresh traffic.'
@@ -26,7 +28,7 @@ onMounted(() => {
   if (route.path === '/traffic') emit('status','Connected · new traffic available')
  },abort.signal)
 })
-onUnmounted(() => { abort.abort(); clearInterval(interval) })
+onUnmounted(() => { clearUserDirectory();abort.abort(); clearInterval(interval) })
 </script>
 <template>
  <section id="console">

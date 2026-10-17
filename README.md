@@ -74,11 +74,11 @@ target/debug/hydra-core --socket /tmp/hydra-demo/proxy.sock --database /tmp/hydr
 
 Trust the development certificate and open `https://localhost:8080`. Swagger is `/docs`, generated OpenAPI is `/openapi.yaml`. Bootstrap snapshots initialize an empty Core; subsequent changes belong to the authenticated UI/API. `hydra-core apply` is an offline maintenance tool for use while Core is stopped; pass the same `--database` path so its intent/result are audited. Direct maintenance can diverge from Core desired revisions and needs deliberate reconciliation. Proxy restores its last accepted snapshot independently when Core is unavailable.
 
-Accounts are created through CLI only. Every authenticated account has full equal privileges. Access tokens expire after 60 seconds; rotating refresh cookies retain the original absolute ten-hour session end. The console keeps access tokens in memory. Secure cookies require HTTPS. Omit the optional CLI password argument to use the hidden prompt; passwords supplied in argv may appear in process listings or shell history. Users can edit accounts, reset passwords, deactivate and reactivate through the console; account creation remains CLI-only.
+Bootstrap the first account through CLI; authenticated users can create additional accounts from Users / audit or `POST /api/v1/users`. Every authenticated account has full equal privileges. Access tokens expire after 60 seconds; rotating refresh cookies retain the original absolute ten-hour session end. The console keeps access tokens in memory. Secure cookies require HTTPS. Omit the optional CLI password argument to use the hidden prompt; passwords supplied in argv may appear in process listings or shell history. Users can edit accounts, reset passwords, deactivate and reactivate through the console; account creation is also available there.
 
 ## Operations configuration
 
-Pass `serve --operations /private/operations.json`. This file must be private (0600), regular and <=64 KiB. Defaults disable pattern matching, automatic submission and exploit execution; they do not invent competition settings.
+Pass `serve --operations /private/operations.json`. This file must be private (0600), regular and <=64 KiB. The Settings page edits validated values and atomically saves this actual file; restart Core to apply changes. For UI writes, its directory must be owned and writable by Core (0700), with systemd write access; team-1 uses `/etc/hydra/core-settings/operations.json`. Hidden checker credentials are preserved unless explicitly replaced or cleared. Concurrent changes return a conflict requiring refresh. Defaults disable pattern matching, automatic submission and exploit execution; they do not invent competition settings.
 
 ```json
 {

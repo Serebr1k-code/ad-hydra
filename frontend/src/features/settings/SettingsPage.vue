@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import type { SettingsView } from '@/generated/contracts'
+import { computed, onMounted, ref, toRaw } from 'vue'
+import type { SettingsView, EditableConfig } from '@/generated/contracts'
 import { api, errorMessage } from '@/shared/api/client'
+import ConfigurationForm from './ConfigurationForm.vue'
 import DataTable from '@/components/DataTable.vue'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 const settings = ref<SettingsView>()
+const draft = ref<EditableConfig>()
+const saving = ref(false), notice = ref('')
 const loading = ref(false), exporting = ref(false), error = ref('')
 const rows = computed(() => settings.value ? [
   { key: 'Flag format', value: settings.value.flag_pattern || 'Not configured' },
@@ -20,9 +23,19 @@ const rows = computed(() => settings.value ? [
 ] : [])
 async function load() {
   loading.value = true; error.value = ''
-  try { settings.value = await api<SettingsView>('/system/settings') }
+  try { settings.value = await api<SettingsView>('/system/settings'); draft.value = structuredClone(toRaw(settings.value.editable_config)) }
   catch (e) { error.value = errorMessage(e) }
   finally { loading.value = false }
+}
+async function save() {
+  if (!settings.value?.saved_revision || !draft.value) return
+  saving.value = true; error.value = ''; notice.value = ''
+  try {
+    settings.value = await api<SettingsView>('/system/settings', 'PUT', {saved_revision: settings.value.saved_revision, editable_config: draft.value})
+    draft.value = structuredClone(toRaw(settings.value.editable_config))
+    notice.value = 'Saved to the configuration file. Restart Core to apply changes.'
+  } catch (cause) { error.value = errorMessage(cause) }
+  finally { saving.value = false }
 }
 async function exportConfig() {
   exporting.value = true; error.value = ''
@@ -42,7 +55,14 @@ onMounted(load)
     <p class="text-muted-foreground">Current installation settings. Checker credentials and signing keys stay on the server. Operator configuration changes take effect after Core restart.</p>
     <Alert v-if="error" variant="destructive"><AlertDescription>{{ error }}</AlertDescription></Alert>
     <p v-if="loading" role="status">Loading settings…</p>
-    <DataTable v-else-if="settings" :columns="[{key:'key',label:'Setting'},{key:'value',label:'Value'}]" :rows="rows" />
+    <p v-if="notice" role="status">{{notice}}</p>
+    <p v-if="settings?.restart_required" role="status" class="font-medium">Saved configuration is pending a Core restart.</p>
+    <p v-if="settings?.readonly_reason" role="status">{{settings.readonly_reason}}</p>
+    <form v-if="settings && draft" id="settings-form" class="space-y-4" @submit.prevent="save">
+      <fieldset :disabled="saving || !settings.configuration_editable" class="space-y-4"><ConfigurationForm :key="settings.saved_revision || 'readonly'" v-model="draft" /><Button type="submit">{{saving ? 'Saving…' : 'Save settings'}}</Button></fieldset>
+    </form>
+    <h2 v-if="settings" class="text-lg font-semibold">Running configuration</h2>
+    <DataTable v-if="settings" :columns="[{key:'key',label:'Setting'},{key:'value',label:'Value'}]" :rows="rows" />
     <div class="flex flex-wrap gap-2"><Button variant="outline" :disabled="loading" @click="load">Refresh</Button><Button :disabled="exporting" @click="exportConfig">{{ exporting ? 'Exporting…' : 'Export service and filter configuration' }}</Button></div>
   </section>
 </template>

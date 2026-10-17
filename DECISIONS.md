@@ -60,7 +60,7 @@ Checker adapters now include verified HTTPS with an operator-pinned DER CA and d
 ## 014 — HTTP provenance, typed values and operator controls
 All mutating API dispatches retain a correlated durable intent/result audit, including rejected operations, in addition to transactional feature audit. Unauthenticated attempts use a service observer identity. Timeout/overload errors retain JSON error shape and request IDs. Results cannot turn multi-process operations into atomic transactions; callers must check persisted operation state after timeout. Sensitive settings/configuration export reads are audited and contain no signing/checker secrets.
 
-Users can edit/reset/deactivate/reactivate any account with optimistic revisions; creation remains CLI-only. Password changes and deactivation revoke sessions. Bulk filter changes validate the entire bounded selection and commit one snapshot revision; each selected rule retains before/after audit. Saved-field creation reads the exact typed value from Core storage, creates a shadow rule, and still requires testing before enforcement.
+Users can edit/reset/deactivate/reactivate any account with optimistic revisions; creation initially remained CLI-only (superseded by the authenticated creation amendment below). Password changes and deactivation revoke sessions. Bulk filter changes validate the entire bounded selection and commit one snapshot revision; each selected rule retains before/after audit. Saved-field creation reads the exact typed value from Core storage, creates a shadow rule, and still requires testing before enforcement.
 
 Parsed int64/uint64 REST values now serialize as decimal strings, including rule snapshots; readers accept previous numeric JSON for stored-state compatibility. Protobuf still uses native signed/unsigned64. Existing rule edits may require repeating the saved-traffic test because canonical fingerprint representation changed. No protobuf fields were removed or renumbered. Migrations10–14 are ordered and checksum-verified by Core only.
 
@@ -225,3 +225,9 @@ even if its catalog IP changes; legacy targets/catalog removals fall back to
 available names or IDs. Existing run list/detail responses gain optional display
 metadata without a migration or removed fields. The shadcn dialog keeps existing
 live paged logs/counters and restores keyboard focus to the invoking button.
+
+### User identity, account creation and persisted settings (2026-10-18)
+
+The user explicitly requested account creation in the console, superseding the original CLI-only rule. Authenticated same-origin creation shares CLI validation/hashing and quotas, audits the initiating account, and gives the new account identical full privileges. CLI bootstrap/recovery remains. Human provenance labels resolve UUIDs against the authenticated user directory; technical resource/request identifiers and captured values remain unchanged. Deleted/unavailable user references display Unknown user.
+
+The Settings form validates and atomically replaces the actual bounded private operations file, with revision conflict detection, fsync, redacted intent/result audit and write-only credential keep/replace/clear semantics. Existing runtime state stays immutable until Core restarts; saved and running settings are shown separately. A dedicated Core-owned configuration directory allows rename without granting broad `/etc/hydra` writes. API users cannot select a file path. Farm table counters now share one New / duplicate column.

@@ -253,6 +253,21 @@ class Browser(unittest.TestCase):
                     wait("!document.querySelector('#page').innerText.includes('Loading')")
                     self.assertFalse(cdp.evaluate("document.querySelector('#error').textContent"))
                     self.assertFalse(cdp.evaluate("[...document.querySelectorAll('#page [role=alert]')].some(e=>e.textContent.trim())"),cdp.evaluate("document.querySelector('#page').innerText"))
+                    if section == 'Settings':
+                        wait("Boolean(document.querySelector('#settings-form button[type=submit]'))")
+                        cdp.evaluate("const input=document.querySelector('#settings-pattern');input.value='FLAG[0-9]{6}|EXTRA[0-9]{6}';input.dispatchEvent(new Event('input',{bubbles:true}));")
+                        cdp.evaluate("document.querySelector('#settings-form').requestSubmit()")
+                        wait("document.querySelector('#page').innerText.includes('Saved to the configuration file.')")
+                        self.assertEqual(json.loads((tmp/'operations.json').read_text())['flag_pattern'],'FLAG[0-9]{6}|EXTRA[0-9]{6}')
+                        self.assertEqual((tmp/'operations.json').stat().st_mode & 0o777,0o600)
+                        self.assertIn('pending a Core restart',cdp.evaluate("document.querySelector('#page').innerText"))
+                    if section == 'Users / audit':
+                        wait("Boolean(document.querySelector('#create-user-form'))")
+                        cdp.evaluate("for(const [id,value] of [['create-user-name','helper'],['create-user-password','helper-password-1234']]){const input=document.getElementById(id);input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));}")
+                        cdp.evaluate("document.querySelector('#create-user-form').requestSubmit()")
+                        wait("document.querySelector('#create-user-form').innerText.includes('Created helper.')")
+                        wait("[...document.querySelectorAll('td')].some(e=>e.textContent==='helper')")
+                        self.assertFalse(cdp.evaluate("[...document.querySelectorAll('td')].some(e=>/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(e.textContent)&&e.cellIndex===0)"),'Actor/user references must show names')
                     if section == 'Filters':
                         cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add filter').click()")
                         wait("Boolean(document.querySelector('[role=dialog]')?.innerText.includes('Match conditions'))")
@@ -284,6 +299,7 @@ class Browser(unittest.TestCase):
                         cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='Block HTTP request')")
                         cdp.evaluate("document.querySelector('[role=dialog] form').requestSubmit()")
                         wait("!document.querySelector('[role=dialog]') && document.querySelector('#page').innerText.includes('Enforce — applies action to matches')")
+                        self.assertTrue(cdp.evaluate("[...document.querySelectorAll('#page td')].some(e=>e.textContent==='alicealice')"),'Filter author/editor must resolve to username')
                         cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Edit').click()")
                         wait("Boolean(document.querySelector('#filter-status'))")
                         cdp.evaluate("{ const e = document.querySelector('#filter-status'); e.value='402'; e.dispatchEvent(new Event('input',{bubbles:true})); }")
@@ -313,7 +329,7 @@ class Browser(unittest.TestCase):
                         wait("Boolean(document.querySelector('#traffic-sessions [data-has-flag=\"true\"]'))")
                     if section == 'Farm':
                         wait("document.querySelector('[data-farm-runs]')?.innerText.includes('Readable exploit')")
-                        self.assertEqual(cdp.evaluate("[...document.querySelectorAll('[data-farm-runs] th')].map(e=>e.textContent)"),['Run time','Team','Exploit','Service','Duplicate flags','New flags','State','Actions'])
+                        self.assertEqual(cdp.evaluate("[...document.querySelectorAll('[data-farm-runs] th')].map(e=>e.textContent)"),['Run time','Team','Exploit','Service','New / duplicate','State','Actions'])
                         for text in ['Readable team','127.0.0.9','Readable service','23s']:
                             self.assertIn(text,cdp.evaluate("document.querySelector('[data-farm-runs]').innerText"))
                         cdp.click("[...document.querySelectorAll('[data-farm-runs] button')].find(b=>b.textContent==='Logs')")

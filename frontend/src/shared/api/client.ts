@@ -22,6 +22,7 @@ async function error(response: Response): Promise<never> {
   let message = `Request failed (${response.status})`, requestId = response.headers.get('x-request-id') || undefined
   if (body && typeof body === 'object') {
     if ('request_id' in body && typeof body.request_id === 'string') requestId = body.request_id
+    if ('error' in body && typeof body.error === 'string') message = body.error
     if ('error' in body && body.error && typeof body.error === 'object' && 'message' in body.error && typeof body.error.message === 'string') message = body.error.message
   }
   throw new ApiError(message, response.status, requestId)
