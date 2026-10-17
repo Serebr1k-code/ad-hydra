@@ -80,6 +80,18 @@ impl Flags {
                 include_str!("../../../../../migrations/0018_flag_submission_controls.sql"),
             )
             .await?;
+        auth.db
+            .migrate(
+                19,
+                include_str!("../../../../../migrations/0019_submitter_io.sql"),
+            )
+            .await?;
+        auth.db
+            .migrate(
+                21,
+                include_str!("../../../../../migrations/0021_farm_flag_counts.sql"),
+            )
+            .await?;
         auth.db.run(|db| {
             if repository::has_column(db,"farm_runs","service_id")? {
                 db.execute("UPDATE flags SET service_id=(SELECT service_id FROM farm_runs WHERE id=flags.run_id) WHERE service_id IS NULL AND run_id IS NOT NULL",[])?;
@@ -129,6 +141,46 @@ impl Flags {
         );
         Ok(())
     }
+    pub(crate) fn extract_spans(
+        &self,
+        input: &[u8],
+    ) -> anyhow::Result<Vec<(usize, usize, String)>> {
+        self.extract_spans_from(input, 0)
+    }
+    pub(crate) fn extract_spans_from(
+        &self,
+        input: &[u8],
+        start: usize,
+    ) -> anyhow::Result<Vec<(usize, usize, String)>> {
+        anyhow::ensure!(
+            input.len() <= 65536 && start <= input.len(),
+            "invalid scan window"
+        );
+        let regex = self.farm_regex.read().unwrap_or_else(|e| e.into_inner());
+        let Some(regex) = regex.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let regex = regex::bytes::RegexBuilder::new(regex.as_str())
+            .size_limit(1024 * 1024)
+            .dfa_size_limit(1024 * 1024)
+            .build()?;
+        let mut result = Vec::new();
+        let mut cursor = start;
+        while cursor <= input.len() {
+            let Some(m) = regex.find_at(input, cursor) else {
+                break;
+            };
+            if !m.is_empty()
+                && m.len() <= 256
+                && let Ok(value) = std::str::from_utf8(m.as_bytes())
+            {
+                result.push((m.start(), m.end(), value.to_owned()));
+            }
+            cursor = if m.is_empty() { m.end() + 1 } else { m.end() };
+        }
+        Ok(result)
+    }
+
     pub fn extract(&self, input: &[u8]) -> anyhow::Result<Vec<String>> {
         anyhow::ensure!(input.len() <= 65536, "scan input too large");
         let regex = self.farm_regex.read().unwrap_or_else(|e| e.into_inner());

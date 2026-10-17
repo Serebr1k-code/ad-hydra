@@ -142,7 +142,9 @@ async fn import(
         triage,
         super::script_http::view,
         super::script_http::configure,
-        super::script_http::run
+        super::script_http::run,
+        super::script_http::batches,
+        super::script_http::batch_detail
     ),
     components(schemas(
         super::browse::FlagPage,
@@ -157,7 +159,9 @@ async fn import(
         Triage,
         super::script_config::SubmitterConfig,
         super::script_config::SubmitterView,
-        super::script_config::SubmitterBatch
+        super::script_config::SubmitterBatch,
+        super::script_config::SubmitterBatchSummary,
+        super::script_config::SubmitterBatchPage
     ))
 )]
 pub struct FlagsApi;

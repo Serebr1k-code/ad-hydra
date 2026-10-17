@@ -65,6 +65,7 @@ jobs:
           version: "0.10.9"
           enable-cache: false
       - run: python3 tests/e2e/flags_controls.py
+      - run: python3 tests/e2e/python_submitter.py
       - run: python3 tests/e2e/operations.py
       - run: python3 tests/e2e/diagnostics.py
       - name: Embedded Vue browser smoke

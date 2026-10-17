@@ -116,6 +116,8 @@ pub(crate) async fn run(
             "\n[target id={} name={:?} host={} port={}]\n",
             target.id, target.name, target.host, target.port
         );
+        farm::runtimes::chunks::append(&db, &job.run_id, "stdout", label.as_bytes()).await?;
+        farm::runtimes::chunks::append(&db, &job.run_id, "stderr", label.as_bytes()).await?;
         append_bounded(&mut output.stdout, label.as_bytes());
         append_bounded(&mut output.stderr, label.as_bytes());
         let mut command = match job.manifest.runtime.as_str() {
@@ -166,8 +168,10 @@ pub(crate) async fn run(
         );
         let mut stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
-        let mut out = Vec::new();
-        let mut err = Vec::new();
+        let mut stdout_log = DiskLog::default();
+        let mut stderr_log = DiskLog::default();
+        let mut out = Scanner::default();
+        let mut err = Scanner::default();
         let mut out_open = true;
         let mut err_open = true;
         let mut out_chunk = [0u8; 8192];
@@ -188,15 +192,21 @@ pub(crate) async fn run(
                 }
                 value = stdout.read(&mut out_chunk), if out_open => {
                     let n = value?; out_open = n > 0;
-                    append_bounded(&mut out, &out_chunk[..n]);
+                    stdout_log.feed(&db, &job.run_id, "stdout", &out_chunk[..n], false).await?;
+                    out.feed(&flags, &job, &target.id, &out_chunk[..n], false).await?;
                     append_bounded(&mut output.stdout, &out_chunk[..n]);
                 }
                 value = stderr.read(&mut err_chunk), if err_open => {
                     let n = value?; err_open = n > 0;
-                    append_bounded(&mut err, &err_chunk[..n]);
+                    stderr_log.feed(&db, &job.run_id, "stderr", &err_chunk[..n], false).await?;
+                    err.feed(&flags, &job, &target.id, &err_chunk[..n], false).await?;
                     append_bounded(&mut output.stderr, &err_chunk[..n]);
                 }
-                _ = interval.tick() => farm::runtimes::persist_logs(&db, &job.run_id, &output.stdout, &output.stderr).await?,
+                _ = interval.tick() => {
+                    stdout_log.feed(&db,&job.run_id,"stdout",&[],true).await?;
+                    stderr_log.feed(&db,&job.run_id,"stderr",&[],true).await?;
+                    farm::runtimes::persist_logs(&db, &job.run_id, &output.stdout, &output.stderr).await?;
+                },
             }
         };
         // A script may leave background children holding its pipes after it exits.
@@ -206,46 +216,34 @@ pub(crate) async fn run(
                 tokio::select! {
                     value = stdout.read(&mut out_chunk), if out_open => {
                         let n = value?; out_open = n > 0;
-                        append_bounded(&mut out, &out_chunk[..n]);
+                        stdout_log.feed(&db, &job.run_id, "stdout", &out_chunk[..n], false).await?;
+                    out.feed(&flags, &job, &target.id, &out_chunk[..n], false).await?;
                         append_bounded(&mut output.stdout, &out_chunk[..n]);
                     }
                     value = stderr.read(&mut err_chunk), if err_open => {
                         let n = value?; err_open = n > 0;
-                        append_bounded(&mut err, &err_chunk[..n]);
+                        stderr_log.feed(&db, &job.run_id, "stderr", &err_chunk[..n], false).await?;
+                    err.feed(&flags, &job, &target.id, &err_chunk[..n], false).await?;
                         append_bounded(&mut output.stderr, &err_chunk[..n]);
                     }
                 }
             }
-            Ok::<_, std::io::Error>(())
+            Ok::<_, anyhow::Error>(())
         };
         match tokio::time::timeout(Duration::from_millis(500), drain).await {
             Ok(result) => result?,
             Err(_) => append_bounded(&mut output.stderr, b"\n[output drain timed out]\n"),
         }
         farm::runtimes::persist_logs(&db, &job.run_id, &output.stdout, &output.stderr).await?;
+        stdout_log
+            .feed(&db, &job.run_id, "stdout", &[], true)
+            .await?;
+        stderr_log
+            .feed(&db, &job.run_id, "stderr", &[], true)
+            .await?;
         output.exit_code = status.code();
-        let captures = if job.manifest.mode == "batch" {
-            batch_captures(&flags, &out, &job.targets)?
-                .into_iter()
-                .chain(batch_captures(&flags, &err, &job.targets)?)
-                .collect::<Vec<_>>()
-        } else {
-            extract_output(&flags, &out)?
-                .into_iter()
-                .chain(extract_output(&flags, &err)?)
-                .map(|value| (target.id.clone(), value))
-                .collect()
-        };
-        for (target_id, value) in captures {
-            flags
-                .record_farm_captured(
-                    value,
-                    target_id,
-                    job.run_id.clone(),
-                    job.initiated_by.clone(),
-                )
-                .await?;
-        }
+        out.feed(&flags, &job, &target.id, &[], true).await?;
+        err.feed(&flags, &job, &target.id, &[], true).await?;
         if ["timeout", "cancelled"].contains(&output.status.as_str()) {
             break;
         }
@@ -257,8 +255,103 @@ pub(crate) async fn run(
     Ok(output)
 }
 
+#[derive(Default)]
+struct DiskLog {
+    pending: Vec<u8>,
+}
+impl DiskLog {
+    async fn feed(
+        &mut self,
+        db: &Database,
+        id: &str,
+        stream: &'static str,
+        bytes: &[u8],
+        flush: bool,
+    ) -> anyhow::Result<()> {
+        self.pending.extend_from_slice(bytes);
+        while self.pending.len() >= 32768 {
+            farm::runtimes::chunks::append(db, id, stream, &self.pending[..32768]).await?;
+            self.pending.drain(..32768);
+        }
+        if flush && !self.pending.is_empty() {
+            farm::runtimes::chunks::append(db, id, stream, &self.pending).await?;
+            self.pending.clear();
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct Scanner {
+    pending: Vec<u8>,
+    discard_line: bool,
+    search_from: usize,
+}
+impl Scanner {
+    async fn feed(
+        &mut self,
+        flags: &flags::Flags,
+        job: &farm::Job,
+        target: &str,
+        bytes: &[u8],
+        eof: bool,
+    ) -> anyhow::Result<()> {
+        self.pending.extend_from_slice(bytes);
+        let captures = if job.manifest.mode == "batch" {
+            let mut collected = Vec::new();
+            while let Some(end) = self.pending.iter().position(|b| *b == b'\n') {
+                if !self.discard_line {
+                    collected.extend(batch_captures(flags, &self.pending[..end], &job.targets)?);
+                }
+                self.pending.drain(..=end);
+                self.discard_line = false;
+            }
+            if eof && !self.discard_line {
+                collected.extend(batch_captures(flags, &self.pending, &job.targets)?);
+                self.pending.clear();
+            }
+            if self.pending.len() > 65536 {
+                self.pending.clear();
+                self.discard_line = true;
+            }
+            collected
+        } else {
+            let cutoff = if eof {
+                self.pending.len()
+            } else {
+                self.pending.len().saturating_sub(256)
+            };
+            let mut consumed = cutoff;
+            let mut collected = Vec::new();
+            let matches = if self.search_from == 0 {
+                flags.extract_spans(&self.pending)?
+            } else {
+                flags.extract_spans_from(&self.pending, self.search_from)?
+            };
+            for (start, end, value) in matches {
+                if end <= cutoff {
+                    collected.push((target.to_owned(), value));
+                } else if start < cutoff {
+                    consumed = consumed.min(start);
+                }
+            }
+            let discard = consumed.saturating_sub(4);
+            self.pending.drain(..discard);
+            self.search_from = consumed - discard;
+            collected
+        };
+        for (target, value) in captures {
+            flags
+                .record_farm_captured(value, target, job.run_id.clone(), job.initiated_by.clone())
+                .await?;
+        }
+        Ok(())
+    }
+}
+
 // Flags are <=256 bytes; overlap keeps matches crossing the scanner's 64 KiB
 // input boundary while respecting that API's bound.
+#[cfg(test)]
 fn extract_output(flags: &flags::Flags, bytes: &[u8]) -> anyhow::Result<Vec<String>> {
     let mut captures = std::collections::BTreeSet::new();
     let mut offset = 0;
@@ -294,6 +387,12 @@ mod tests {
         db.migrate(
             16,
             include_str!("../../../../migrations/0016_farm_catalog_logs.sql"),
+        )
+        .await
+        .unwrap();
+        db.migrate(
+            20,
+            include_str!("../../../../migrations/0020_farm_stream_logs.sql"),
         )
         .await
         .unwrap();
@@ -349,6 +448,141 @@ mod tests {
             work_dir: directory.join("runtime"),
         };
         (Directory(directory), settings, job, flags, db)
+    }
+
+    #[tokio::test]
+    async fn streams_beyond_one_megabyte_with_bounded_preview_and_late_flag() {
+        let (_directory,settings,job,flags,db)=fixture(b"head -c 2200000 /dev/zero | tr '\\0' x; printf '\\nFLAG_LATE\\n'; printf 'FLAG_ERR\\n' >&2\n").await;
+        let output = run(settings, job, CancellationToken::new(), flags, db.clone())
+            .await
+            .unwrap();
+        assert_eq!(output.status, "succeeded");
+        assert_eq!(output.stdout.len(), farm::runtimes::chunks::PREVIEW_BYTES);
+        let actor = crate::modules::audit::Actor {
+            kind: "user".into(),
+            id: "actor".into(),
+        };
+        let mut offset = 0;
+        let mut length = 0;
+        let mut tail = String::new();
+        loop {
+            let page = farm::runtimes::chunks::page(
+                &db,
+                actor.clone(),
+                "run".into(),
+                "stdout".into(),
+                offset,
+                65536,
+            )
+            .await
+            .unwrap();
+            let next = page["next_offset"].as_u64().unwrap();
+            assert!(!page["history_lost"].as_bool().unwrap());
+            length += page["text"].as_str().unwrap().len();
+            tail.push_str(page["text"].as_str().unwrap());
+            if tail.len() > 128 {
+                tail = tail[tail.len() - 128..].to_owned();
+            }
+            if next == offset || next == page["end_offset"].as_u64().unwrap() {
+                break;
+            }
+            offset = next;
+        }
+        assert!(length > 2200000);
+        assert!(tail.ends_with("\nFLAG_LATE\n"));
+        let values = db
+            .run(|db| {
+                Ok(db
+                    .prepare("SELECT value FROM flags ORDER BY value")?
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(values, vec!["FLAG_ERR", "FLAG_LATE"]);
+    }
+
+    #[tokio::test]
+    async fn streaming_scanner_defers_greedy_matches_and_handles_dense_output() {
+        let (_directory, _settings, job, flags, db) = fixture(b"true").await;
+        let mut scanner = Scanner::default();
+        scanner
+            .feed(&flags, &job, "team", b"FLAG_CAP", false)
+            .await
+            .unwrap();
+        scanner
+            .feed(&flags, &job, "team", b"TURED ", false)
+            .await
+            .unwrap();
+        let mut dense = Vec::new();
+        for n in 0..300 {
+            dense.extend_from_slice(
+                format!(
+                    "FLAG_X{}{} ",
+                    (b'A' + (n / 26) as u8) as char,
+                    (b'A' + (n % 26) as u8) as char
+                )
+                .as_bytes(),
+            );
+        }
+        scanner
+            .feed(&flags, &job, "team", &dense, false)
+            .await
+            .unwrap();
+        scanner.feed(&flags, &job, "team", &[], true).await.unwrap();
+        let (count, partial): (i64, bool) = db
+            .run(|db| {
+                Ok((
+                    db.query_row("SELECT COUNT(*) FROM flags", [], |r| r.get(0))?,
+                    db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM flags WHERE value='FLAG_CAP')",
+                        [],
+                        |r| r.get(0),
+                    )?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 301);
+        assert!(!partial);
+    }
+
+    #[tokio::test]
+    async fn streaming_scanner_preserves_anchor_and_unicode_word_context() {
+        for pattern in ["^FLAG_[A-Z]+", r"\bFLAG_[A-Z]+"] {
+            let (directory, _settings, job, _flags, db) = fixture(b"true").await;
+            let flags = flags::Flags::open(
+                AuthState::new(
+                    db.clone(),
+                    Crypto::load(&directory.0.join("key")).unwrap(),
+                    "https://localhost".into(),
+                ),
+                flags::Settings {
+                    pattern: Some(pattern.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let mut scanner = Scanner::default();
+            let mut input = vec![b'x'; 7936];
+            input.extend_from_slice(b"FLAG_GOOD");
+            input.extend_from_slice(&vec![b' '; 247]);
+            scanner
+                .feed(&flags, &job, "team", &input, false)
+                .await
+                .unwrap();
+            scanner
+                .feed(&flags, &job, "team", b"        ", false)
+                .await
+                .unwrap();
+            scanner.feed(&flags, &job, "team", &[], true).await.unwrap();
+            let count: i64 = db
+                .run(|db| Ok(db.query_row("SELECT COUNT(*) FROM flags", [], |r| r.get(0))?))
+                .await
+                .unwrap();
+            assert_eq!(count, 0, "{pattern}");
+        }
     }
 
     #[tokio::test]

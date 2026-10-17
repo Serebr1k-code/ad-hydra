@@ -1,5 +1,7 @@
 """Headless Chromium smoke over Core's native HTTPS; standard library only."""
 import base64
+import gzip
+import sqlite3
 import http.client
 import json
 import os
@@ -229,6 +231,15 @@ class Browser(unittest.TestCase):
                 wait("document.querySelectorAll('[role=option]').length===3")
                 cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==={json.dumps(service_id)})")
                 wait("document.querySelector('#traffic-stream').innerText.includes('/browser-stream')")
+                # Seed synthetic diagnostic history only; no worker/checker execution.
+                output=b'A'*70000+b'OUTPUT_AFTER_64K FLAG002000'
+                with sqlite3.connect(tmp/'db') as database:
+                    database.execute("INSERT INTO farm_runs(id,exploit_id,version,manifest,target_ids,initiated_by,status,created_at,logs_complete,stdout_bytes) VALUES('browser-run','browser-fixture','v1','{}','[\"local\"]','alice','succeeded',?,1,?)",[int(time.time()),len(output)])
+                    for position in range(0,len(output),32768):
+                        chunk=output[position:position+32768]
+                        database.execute("INSERT INTO farm_log_chunks(run_id,stream,offset,raw_bytes,gzip) VALUES('browser-run','stdout',?,?,?)",[position,len(chunk),gzip.compress(chunk)])
+                    for digest,is_new in [('new',1),('known',0)]:database.execute("INSERT INTO farm_flag_observations VALUES('browser-run','local',?,?)",[digest,is_new])
+                    database.execute("INSERT INTO flag_submitter_batches(id,revision,flag_count,status,started_at,input_gzip,stdout_gzip,stderr_gzip) VALUES('11111111-1111-4111-8111-111111111111',0,1,'accepted',?,?,?,?)",[int(time.time()),gzip.compress(b'["FLAG002000"]'),gzip.compress(b'submission stdout FLAG002000'),gzip.compress(b'submission stderr FLAG002000')])
                 for section in ['Filters','Traffic','Protocols','Farm','Flags','Settings','Users / audit']:
                     cdp.evaluate(f"[...document.querySelectorAll('nav button')].find(b=>b.textContent==={json.dumps(section)}).click()")
                     expected = {'Users / audit':'Users and audit','Farm':'Exploit farm','Flags':'Flag Manager'}.get(section,section)
@@ -294,8 +305,19 @@ class Browser(unittest.TestCase):
                         cdp.click("document.querySelector('#traffic-show-blocked')")
                         wait("!document.querySelector('#traffic-sessions [data-blocked=\"true\"]')")
                         wait("Boolean(document.querySelector('#traffic-sessions [data-has-flag=\"true\"]'))")
+                    if section == 'Farm':
+                        wait("document.querySelector('#page').innerText.includes('browser-run')")
+                        cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Logs').click()")
+                        wait("document.querySelector('[data-log-stream=stdout]')?.innerText.includes('OUTPUT_AFTER_64K FLAG002000')")
+                        self.assertIn('1 new · 1 existing',cdp.evaluate("document.querySelector('#page').innerText"))
+                        cdp.evaluate("[...document.querySelectorAll('[data-log-stream=stdout] button')].find(b=>b.textContent==='First retained').click()")
+                        wait("!document.querySelector('[data-log-stream=stdout] pre').innerText.includes('OUTPUT_AFTER_64K')")
+                        cdp.evaluate("[...document.querySelectorAll('[data-log-stream=stdout] button')].find(b=>b.textContent==='Next output').click()")
+                        wait("document.querySelector('[data-log-stream=stdout] pre').innerText.includes('OUTPUT_AFTER_64K')")
                     if section == 'Flags':
                         wait("Boolean(document.querySelector('#flag-paste') && document.querySelector('#submitter-manual-count'))")
+                        wait("document.querySelector('#page').innerText.includes('submission stdout FLAG002000') && document.querySelector('#page').innerText.includes('submission stderr FLAG002000')")
+                        self.assertIn('Input flags (exact arguments)',cdp.evaluate("document.querySelector('#page').innerText"))
                         pasted=' '.join('FLAG%06d' % n for n in range(1000,1027))
                         cdp.evaluate(f"{{const e=document.querySelector('#flag-paste');e.value={json.dumps(pasted)};e.dispatchEvent(new Event('input',{{bubbles:true}}));}}")
                         cdp.evaluate("document.querySelector('#flag-paste').closest('form').requestSubmit()")
@@ -305,10 +327,10 @@ class Browser(unittest.TestCase):
                         cdp.click("document.querySelector('[aria-label=\"Flags per page\"]')")
                         wait("document.querySelectorAll('[role=option]').length===4")
                         cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='25')")
-                        wait("document.querySelector('#page table tbody')?.querySelectorAll('tr').length===25")
+                        wait("[...document.querySelectorAll('#page table')].find(t=>[...t.querySelectorAll('th')].some(h=>h.textContent==='Flag'))?.querySelectorAll('tbody tr').length===25")
                         wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent==='Next'&&!b.disabled)")
                         cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Next').click()")
-                        wait("document.querySelector('#page').innerText.includes('Page 2') && document.querySelector('#page table tbody')?.querySelectorAll('tr').length===2")
+                        wait("document.querySelector('#page').innerText.includes('Page 2') && [...document.querySelectorAll('#page table')].find(t=>[...t.querySelectorAll('th')].some(h=>h.textContent==='Flag'))?.querySelectorAll('tbody tr').length===2")
                 self.assertIn('alice',cdp.evaluate("document.querySelector('#page').innerText"))
                 cdp.evaluate("document.querySelector('#logout').click()")
                 wait("document.querySelector('#login') && !document.querySelector('#login').hidden")

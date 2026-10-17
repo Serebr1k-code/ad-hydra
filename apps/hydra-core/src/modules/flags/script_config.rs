@@ -6,6 +6,7 @@ use crate::modules::{
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
 use utoipa::ToSchema;
 
 #[derive(Clone, Serialize, Deserialize, ToSchema)]
@@ -71,8 +72,26 @@ pub struct SubmitterBatch {
     pub started_at: i64,
     pub finished_at: Option<i64>,
     pub exit_code: Option<i32>,
+    pub input_flags: Option<Vec<String>>,
     pub stdout: String,
     pub stderr: String,
+}
+#[derive(Serialize, ToSchema)]
+pub struct SubmitterBatchSummary {
+    pub id: String,
+    pub revision: i64,
+    pub flag_count: u32,
+    pub status: String,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    pub exit_code: Option<i32>,
+}
+#[derive(Serialize, ToSchema)]
+pub struct SubmitterBatchPage {
+    pub items: Vec<SubmitterBatchSummary>,
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
 }
 #[derive(Serialize, ToSchema)]
 pub struct SubmitterView {
@@ -146,15 +165,40 @@ impl Flags {
                 source: String::new(),
                 timeout_seconds: 20,
             });
-        let (queued_flags,next_batch_at,last_batch)=self.auth.db.run(move|db|{
-            let tx=db.transaction()?;
-            let queued=tx.query_row("SELECT count(*) FROM submissions WHERE state IN ('queued','retry','inflight')",[],|r|r.get::<_,u32>(0))?;
-            let next=tx.query_row("SELECT next_batch_at FROM flag_submitter_clock WHERE id=1",[],|r|r.get::<_,i64>(0))?;
-            let batch=tx.query_row("SELECT id,revision,flag_count,status,started_at,finished_at,exit_code,stdout_gzip,stderr_gzip FROM flag_submitter_batches ORDER BY rowid DESC LIMIT 1",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,u32>(2)?,r.get::<_,String>(3)?,r.get::<_,i64>(4)?,r.get::<_,Option<i64>>(5)?,r.get::<_,Option<i32>>(6)?,r.get::<_,Option<Vec<u8>>>(7)?,r.get::<_,Option<Vec<u8>>>(8)?))).optional()?;
-            let batch=batch.map(|(id,revision,flag_count,status,started_at,finished_at,exit_code,out,err)|->anyhow::Result<SubmitterBatch>{Ok(SubmitterBatch{id,revision,flag_count,status,started_at,finished_at,exit_code,stdout:decode(out)?,stderr:decode(err)?})}).transpose()?;
-            audit::append(&tx,&actor,"submitter.read","python-submitter",&uuid::Uuid::new_v4().to_string(),true,now())?;
-            tx.commit()?;Ok((queued,next,batch))
-        }).await?;
+        let (queued_flags, next_batch_at, last_batch) = self
+            .auth
+            .db
+            .run(move |db| {
+                let tx = db.transaction()?;
+                let queued = tx.query_row(
+                    "SELECT count(*) FROM submissions WHERE state IN ('queued','retry','inflight')",
+                    [],
+                    |r| r.get::<_, u32>(0),
+                )?;
+                let next = tx.query_row(
+                    "SELECT next_batch_at FROM flag_submitter_clock WHERE id=1",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?;
+                let batch = tx
+                    .prepare(&format!("{BATCH_SELECT} ORDER BY rowid DESC LIMIT 1"))?
+                    .query_row([], batch_row)
+                    .optional()?
+                    .map(decode_batch)
+                    .transpose()?;
+                audit::append(
+                    &tx,
+                    &actor,
+                    "submitter.read",
+                    "python-submitter",
+                    &uuid::Uuid::new_v4().to_string(),
+                    true,
+                    now(),
+                )?;
+                tx.commit()?;
+                Ok((queued, next, batch))
+            })
+            .await?;
         Ok(SubmitterView {
             manual_request: self.latest_manual().await?,
             config,
@@ -166,10 +210,133 @@ impl Flags {
         })
     }
 }
-fn decode(blob: Option<Vec<u8>>) -> anyhow::Result<String> {
-    Ok(if let Some(blob) = blob {
-        String::from_utf8_lossy(&crate::modules::farm::runtimes::decode_log(&blob)?).into_owned()
-    } else {
-        String::new()
+// Keep submitter codecs independent of Farm's output retention policy.
+const MAX_INPUT_BYTES: usize = 240 * (256 * 6 + 3) + 2;
+const MAX_OUTPUT_BYTES: usize = 65536;
+const BATCH_SELECT: &str = "SELECT id,revision,flag_count,status,started_at,finished_at,exit_code,stdout_gzip,stderr_gzip,input_gzip FROM flag_submitter_batches";
+type BatchRow = (
+    String,
+    i64,
+    u32,
+    String,
+    i64,
+    Option<i64>,
+    Option<i32>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+);
+fn batch_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BatchRow> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+        r.get(7)?,
+        r.get(8)?,
+        r.get(9)?,
+    ))
+}
+fn decode_batch(row: BatchRow) -> anyhow::Result<SubmitterBatch> {
+    let (id, revision, flag_count, status, started_at, finished_at, exit_code, out, err, input) =
+        row;
+    let input_flags = input
+        .map(|blob| -> anyhow::Result<Vec<String>> {
+            let values: Vec<String> =
+                serde_json::from_slice(&decode_gzip(&blob, MAX_INPUT_BYTES)?)?;
+            anyhow::ensure!(
+                values.len() <= 240 && values.iter().all(|v| v.len() <= 256),
+                "invalid submitter input bounds"
+            );
+            Ok(values)
+        })
+        .transpose()?;
+    Ok(SubmitterBatch {
+        id,
+        revision,
+        flag_count,
+        status,
+        started_at,
+        finished_at,
+        exit_code,
+        input_flags,
+        stdout: decode_output(out)?,
+        stderr: decode_output(err)?,
     })
+}
+fn decode_gzip(blob: &[u8], limit: usize) -> anyhow::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    flate2::read::GzDecoder::new(blob)
+        .take((limit + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() <= limit,
+        "submitter diagnostic exceeds decoded size limit"
+    );
+    Ok(bytes)
+}
+fn decode_output(blob: Option<Vec<u8>>) -> anyhow::Result<String> {
+    Ok(match blob {
+        Some(blob) => String::from_utf8_lossy(&decode_gzip(&blob, MAX_OUTPUT_BYTES)?).into_owned(),
+        None => String::new(),
+    })
+}
+pub(super) fn encode_gzip(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(bytes)?;
+    Ok(encoder.finish()?)
+}
+impl Flags {
+    pub async fn submitter_batches(
+        &self,
+        actor: Actor,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<SubmitterBatchPage> {
+        anyhow::ensure!((1..=100).contains(&limit), "limit must be 1..100");
+        self.auth.db.run(move |db| {
+            let tx = db.transaction()?;
+            let total = tx.query_row("SELECT count(*) FROM flag_submitter_batches", [], |r| r.get::<_,u32>(0))? as u64;
+            let items = tx.prepare("SELECT id,revision,flag_count,status,started_at,finished_at,exit_code FROM flag_submitter_batches ORDER BY rowid DESC LIMIT ?1 OFFSET ?2")?
+                .query_map(params![limit,offset], |r| Ok(SubmitterBatchSummary {
+                    id:r.get(0)?,revision:r.get(1)?,flag_count:r.get(2)?,status:r.get(3)?,started_at:r.get(4)?,finished_at:r.get(5)?,exit_code:r.get(6)?
+                }))?.collect::<Result<Vec<_>,_>>()?;
+            audit::append_change(&tx,&actor,"submitter.batches.read","submitter-batches",&uuid::Uuid::new_v4().to_string(),true,now(),&serde_json::json!({"limit":limit,"offset":offset}))?;
+            tx.commit()?;
+            Ok(SubmitterBatchPage {items,total,limit,offset})
+        }).await
+    }
+    pub async fn submitter_batch(
+        &self,
+        actor: Actor,
+        id: String,
+    ) -> anyhow::Result<Option<SubmitterBatch>> {
+        anyhow::ensure!(uuid::Uuid::parse_str(&id).is_ok(), "invalid batch id");
+        self.auth
+            .db
+            .run(move |db| {
+                let tx = db.transaction()?;
+                let batch = tx
+                    .prepare(&format!("{BATCH_SELECT} WHERE id=?1"))?
+                    .query_row([&id], batch_row)
+                    .optional()?
+                    .map(decode_batch)
+                    .transpose()?;
+                audit::append(
+                    &tx,
+                    &actor,
+                    "submitter.batch.read",
+                    &id,
+                    &uuid::Uuid::new_v4().to_string(),
+                    batch.is_some(),
+                    now(),
+                )?;
+                tx.commit()?;
+                Ok(batch)
+            })
+            .await
+    }
 }

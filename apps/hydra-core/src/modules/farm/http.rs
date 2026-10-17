@@ -59,7 +59,7 @@ async fn listing(
     if after.len() > 128 {
         return Err(Error(StatusCode::BAD_REQUEST, "invalid cursor".into()));
     }
-    Ok(Json(s.auth.db.run(move|db|{let tx=db.transaction()?;let sql=match kind {"targets"=>"SELECT id,json_object('id',id,'name',name,'host',host,'port',port,'transport',transport,'enabled',json(CASE enabled WHEN 1 THEN 'true' ELSE 'false' END),'revision',revision,'created_at',created_at,'updated_at',updated_at,'author_id',author_id) FROM farm_targets WHERE id>?1 ORDER BY id LIMIT 100","exploits"=>"SELECT id,json_object('service_id',service_id,'team_ids',json(team_ids),'id',id,'name',name,'enabled',json(CASE enabled WHEN 1 THEN 'true' ELSE 'false' END),'revision',revision,'version',version,'manifest',json(manifest),'target_ids',json(target_ids),'interval_seconds',interval_seconds,'initiated_by',initiated_by,'created_at',created_at,'updated_at',updated_at) FROM farm_exploits WHERE id>?1 ORDER BY id LIMIT 100",_=>"SELECT CAST(rowid AS TEXT),json_object('service_id',service_id,'team_ids',json(team_ids),'target_ids',json(target_ids),'id',id,'exploit_id',exploit_id,'version',version,'initiated_by',initiated_by,'origin_run_id',origin_run_id,'status',status,'created_at',created_at,'started_at',started_at,'finished_at',finished_at,'exit_code',exit_code) FROM farm_runs WHERE (?1='' OR rowid<CAST(?1 AS INTEGER)) ORDER BY rowid DESC LIMIT 100"};let rows=tx.prepare(sql)?.query_map([after],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?;audit::append(&tx,&a,"farm.list",kind,"farm",true,crate::modules::auth::now())?;tx.commit()?;let cursor=rows.last().map(|r|r.0.clone());let items=rows.into_iter().map(|(_,s)|serde_json::from_str::<Value>(&s)).collect::<Result<Vec<_>,_>>()?;Ok(json!({"items":items,"next_cursor":cursor}))}).await?))
+    Ok(Json(s.auth.db.run(move|db|{let tx=db.transaction()?;let sql=match kind {"targets"=>"SELECT id,json_object('id',id,'name',name,'host',host,'port',port,'transport',transport,'enabled',json(CASE enabled WHEN 1 THEN 'true' ELSE 'false' END),'revision',revision,'created_at',created_at,'updated_at',updated_at,'author_id',author_id) FROM farm_targets WHERE id>?1 ORDER BY id LIMIT 100","exploits"=>"SELECT id,json_object('service_id',service_id,'team_ids',json(team_ids),'id',id,'name',name,'enabled',json(CASE enabled WHEN 1 THEN 'true' ELSE 'false' END),'revision',revision,'version',version,'manifest',json(manifest),'target_ids',json(target_ids),'interval_seconds',interval_seconds,'initiated_by',initiated_by,'created_at',created_at,'updated_at',updated_at) FROM farm_exploits WHERE id>?1 ORDER BY id LIMIT 100",_=>"SELECT CAST(rowid AS TEXT),json_object('service_id',service_id,'team_ids',json(team_ids),'target_ids',json(target_ids),'id',id,'exploit_id',exploit_id,'version',version,'initiated_by',initiated_by,'origin_run_id',origin_run_id,'status',status,'created_at',created_at,'started_at',started_at,'finished_at',finished_at,'exit_code',exit_code) FROM farm_runs WHERE (?1='' OR rowid<CAST(?1 AS INTEGER)) ORDER BY rowid DESC LIMIT 100"};let rows=tx.prepare(sql)?.query_map([after],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?;audit::append(&tx,&a,"farm.list",kind,"farm",true,crate::modules::auth::now())?;let cursor=rows.last().map(|r|r.0.clone());let mut items=rows.into_iter().map(|(_,s)|serde_json::from_str::<Value>(&s)).collect::<Result<Vec<_>,_>>()?;if kind=="runs" {for item in &mut items {super::flag_counts::attach(&tx,item,false)?;}}tx.commit()?;Ok(json!({"items":items,"next_cursor":cursor}))}).await?))
 }
 #[utoipa::path(get,path="/api/v1/farm/targets",responses((status=200,body=Object)),tag="farm")]
 async fn targets(
@@ -167,14 +167,42 @@ async fn details(
     let a = actor(&s, &h).await?;
     Ok(Json(s.auth.db.run(move|db|{
         let tx=db.transaction()?;
-        let (mut result,out,err):(String,Option<Vec<u8>>,Option<Vec<u8>>)=tx.query_row("SELECT json_object('id',id,'exploit_id',exploit_id,'version',version,'origin_run_id',origin_run_id,'status',status,'stdout',stdout,'stderr',stderr,'exit_code',exit_code,'initiated_by',initiated_by,'created_at',created_at,'started_at',started_at,'finished_at',finished_at,'service_id',service_id,'team_ids',json(team_ids),'target_ids',json(target_ids)),stdout_gzip,stderr_gzip FROM farm_runs WHERE id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        let (mut result,out,err):(String,Option<Vec<u8>>,Option<Vec<u8>>)=tx.query_row("SELECT json_object('id',id,'exploit_id',exploit_id,'version',version,'origin_run_id',origin_run_id,'status',status,'stdout',stdout,'stderr',stderr,'exit_code',exit_code,'initiated_by',initiated_by,'created_at',created_at,'started_at',started_at,'finished_at',finished_at,'service_id',service_id,'team_ids',json(team_ids),'target_ids',json(target_ids),'stdout_bytes',stdout_bytes,'stderr_bytes',stderr_bytes,'logs_are_previews',json('true')),stdout_gzip,stderr_gzip FROM farm_runs WHERE id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
         let mut value:Value=serde_json::from_str(&result)?;
         for (key,bytes) in [("stdout",out),("stderr",err)] { if let Some(bytes)=bytes {value[key]=String::from_utf8_lossy(&super::runtimes::decode_log(&bytes)?).into_owned().into();}}
-        value["stdout_truncated"]=value["stdout"].as_str().is_some_and(|s|s.contains("output truncated]")).into();
-        value["stderr_truncated"]=value["stderr"].as_str().is_some_and(|s|s.contains("output truncated]")).into();
+        value["stdout_truncated"]=(value["stdout_bytes"].as_u64().unwrap_or(0)>super::runtimes::chunks::PREVIEW_BYTES as u64 || value["stdout"].as_str().is_some_and(|s|s.contains("output truncated]"))).into();
+        value["stderr_truncated"]=(value["stderr_bytes"].as_u64().unwrap_or(0)>super::runtimes::chunks::PREVIEW_BYTES as u64 || value["stderr"].as_str().is_some_and(|s|s.contains("output truncated]"))).into();
+        super::flag_counts::attach(&tx,&mut value,true)?;
         result.clear();
         audit::append(&tx,&a,"farm.run.read",&id,"farm",true,crate::modules::auth::now())?;tx.commit()?;Ok(value)
     }).await?))
+}
+#[derive(Deserialize)]
+struct LogQuery {
+    stream: String,
+    #[serde(default)]
+    offset: u64,
+    limit: Option<usize>,
+}
+#[utoipa::path(get,path="/api/v1/farm/runs/{id}/logs",params(("id"=String,Path),("stream"=String,Query),("offset"=Option<u64>,Query),("limit"=Option<usize>,Query)),responses((status=200,body=Object)),tag="farm")]
+async fn logs(
+    State(s): State<Farm>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<LogQuery>,
+) -> Result<Json<Value>, Error> {
+    let actor = actor(&s, &h).await?;
+    Ok(Json(
+        super::runtimes::chunks::page(
+            &s.auth.db,
+            actor,
+            id,
+            q.stream,
+            q.offset,
+            q.limit.unwrap_or(65536),
+        )
+        .await?,
+    ))
 }
 #[derive(Deserialize)]
 struct Revision {
@@ -239,6 +267,7 @@ async fn rotate(
         cancel,
         retry,
         details,
+        logs,
         delete_target,
         delete_exploit,
         versions,
@@ -272,6 +301,7 @@ pub fn router(s: Farm) -> Router {
         )
         .route("/api/v1/farm/runs", get(runs).post(run).delete(rotate))
         .route("/api/v1/farm/runs/{id}", get(details))
+        .route("/api/v1/farm/runs/{id}/logs", get(logs))
         .route("/api/v1/farm/runs/{id}/cancel", post(cancel))
         .route("/api/v1/farm/runs/{id}/retry", post(retry))
         .with_state(s.clone())

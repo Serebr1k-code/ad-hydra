@@ -50,9 +50,9 @@ The previous sandbox runner remains available with `execution_mode: "sandbox"` (
 
 Open Logs beside any run. Stdout and stderr are separate readable streams with target labels, state, timestamps, and exit code. The open view refreshes while execution runs. Host output is persisted approximately every300ms. Log payloads are stored as **gzip BLOBs** in Core's private SQLite database; the API decompresses bounded output for display. New logs clear the old plaintext columns. Completed legacy plaintext logs are converted in batches of up to64 records at startup and during periodic retention maintenance. Existing active plaintext records are not modified by that conversion.
 
-Each stdout/stderr stream retains up to1 MiB and marks omitted output. The worker continues draining excess output so a noisy script cannot block on a full pipe. Gzip decompression is bounded independently of compressed size.
+Host stdout/stderr now stream into gzip chunks of at most32 KiB, with no1 MiB per-process capture cutoff. Flags are scanned throughout the stream, including after the old cutoff. The compatibility detail response contains only64 KiB previews; the console uses paged full-history reads and can follow the live tail or navigate earlier output. Original bytes are retained in chunks; API text uses UTF-8 replacement for invalid bytes and can split a multibyte character at a page boundary. The optional sandbox runner retains its existing per-worker output bounds; all available captured output from its targets is archived into the same chunks. Worker omissions remain explicitly marked.
 
-Automatic retention keeps completed runs for at most7 days, at most1,000 completed records, and at most64 MiB of total stored compressed output, evicting the oldest when a limit is exceeded. Queued/running runs and the active child are excluded. Retention checks run periodically and after a run finishes. Cleanup is audited; deleted SQLite pages become reusable rather than requiring a database VACUUM during execution.
+Automatic retention keeps completed runs for at most7 days, at most1,000 completed records, and at most64 MiB of total stored compressed output, evicting the oldest when a limit is exceeded. Run deletion excludes queued/running runs and the active child. Chunk retention applies to active output too: the shared64 MiB compressed budget includes chunks and compatibility/legacy logs; a separate512 MiB raw chunk budget bounds highly compressible history. Oldest chunks rotate first, with absolute offsets and explicit dropped-byte metadata. Retention checks run periodically and after a run finishes. Cleanup is audited; deleted SQLite pages become reusable rather than requiring a database VACUUM during execution.
 
 The UI can clean old runs immediately. The authenticated API also supports:
 
@@ -93,9 +93,9 @@ Use `sys.argv[1:]` to read flags. Hydra adds no host/port arguments. Set flags p
 
 The script implements the actual competition checker protocol and interprets its reply. **Exit 0 means every flag in that call was accepted.** A nonzero exit, timeout, unavailable runtime, or interrupted attempt leaves flags queued for retry after at least 30 seconds; ten failed attempts mark them failed. Pausing or editing prevents subsequent chunks from starting with the old revision; a child already claimed may finish. On restart or persistence failure, interrupted claims recover to retry. An external checker may have accepted a flag before a script fails or Core stops, so the checker/script should handle duplicate submissions. Partial acceptance is not inferred from printed output.
 
-The queue, next dispatch time and last batch state/stdout/stderr are visible in Flags. Diagnostic output redacts known flag values and is stored as gzip, with at most 64 KiB per stream. Completed batch logs rotate after 7 days or 500 records; audit records remain. Limits and retries are enforced by Core, independently of the Vue polling interval. Host uv package caches persist between runs and require normal operator disk maintenance.
+The queue and paginated submission attempts are visible in Flags. Open Input / output on any retained attempt to see the exact input argument array and original stdout/stderr, including flag text. Hydra no longer replaces flags with [redacted flag] in new Python submission logs. Inputs and output are gzip compressed; output remains capped at64 KiB per stream. Completed attempts rotate after7 days,1,000 records, or64 MiB combined compressed inputs/outputs; audit records remain. Old redacted output cannot be reconstructed, and old attempts without saved inputs are labeled unavailable. Limits and retries are enforced by Core, independently of the Vue polling interval. Host uv package caches persist between runs and require normal operator disk maintenance.
 
-The generated OpenAPI describes authenticated `GET /api/v1/submitter`, revision-checked `PUT /api/v1/submitter`, and `POST /api/v1/submitter/run`. No internal gRPC or raw traffic contract changed. Existing private checker adapters remain supported until a Python submitter configuration is saved; a saved paused Python configuration keeps automatic sending paused.
+Submission history uses authenticated `GET /api/v1/submitter/batches?offset=0&limit=20` (metadata summaries) and `GET /api/v1/submitter/batches/{id}` (full input/output); sensitive reads are audited. The generated OpenAPI describes authenticated `GET /api/v1/submitter`, revision-checked `PUT /api/v1/submitter`, and `POST /api/v1/submitter/run`. No internal gRPC or raw traffic contract changed. Existing private checker adapters remain supported until a Python submitter configuration is saved; a saved paused Python configuration keeps automatic sending paused.
 
 For harmless end-to-end verification with real uv and a pinned dependency:
 
@@ -104,4 +104,29 @@ cargo build --locked -p hydra-core -p hydra-proxy
 python3 tests/e2e/python_submitter.py
 ```
 
-The fixture starts its own Core/Proxy with temporary databases and loopback-only configuration. It prints synthetic flags, tests collection/acceptance/retry/restart and gzip redaction, and never contacts a competition service or checker. It advances only its own retry timestamps to avoid waiting through retry backoff.
+The fixture starts its own Core/Proxy with temporary databases and loopback-only configuration. It prints synthetic flags, tests collection/acceptance/retry/restart and original gzip input/output, and never contacts a competition service or checker. It advances only its own retry timestamps to avoid waiting through retry backoff.
+
+## Process flag counts
+
+Run rows show **New flags** and **Existing flags**, with per-target counts under
+Logs. Counts represent distinct flag values per run/target: a new value was first
+inserted by this process; an existing value was already captured elsewhere.
+Repeated scans or repeated occurrences of the same flag in one process do not
+inflate counts. Two processes printing the same new flag count it as new for the
+first committed capture and existing for the other. Gzip output retains all
+occurrences. Counts update as stream capture commits and survive restart.
+
+Pre-update runs can recover known new flags from retained capture provenance,
+but their duplicate history is unavailable: an asterisk/partial notice identifies
+them. Observation metadata holds no extra plaintext flag values, is capped at
+one million distinct run/target/digest records, and cascades away with run
+retention. The quota fails explicitly rather than inventing counts.
+
+Full output API: `GET /api/v1/farm/runs/{id}/logs?stream=stdout&offset=0&limit=65536`.
+The response includes `text`, `start_offset`, `next_offset`, `end_offset`, `done`,
+`dropped_bytes` and `history_lost`. Offsets count original bytes; request pages
+until done, using next_offset. A rotated requested offset clamps to retained
+history and sets history_lost. Completion waits for pipe drain/finalization even
+when a cancellation status has already been committed. Reads are authenticated
+and audited. Legacy truncated logs remain readable; their lost bytes cannot be
+recovered.

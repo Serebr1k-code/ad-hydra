@@ -1,5 +1,8 @@
 //! Durable immediate/manual dispatch; one bounded Python child at a time.
-use super::{Flags, script_config::SubmitterConfig};
+use super::{
+    Flags,
+    script_config::{SubmitterConfig, encode_gzip},
+};
 use crate::{
     infrastructure::submitter_process,
     modules::{
@@ -133,7 +136,8 @@ impl Flags {
                 }
             }
             if !items.is_empty() {
-                tx.execute("INSERT INTO flag_submitter_batches(id,revision,flag_count,status,started_at) VALUES(?1,?2,?3,'running',?4)",params![batch,revision,items.len() as u32,now()])?;
+                let input = serde_json::to_vec(&items.iter().map(|item| &item.value).collect::<Vec<_>>())?;
+                tx.execute("INSERT INTO flag_submitter_batches(id,revision,flag_count,status,started_at,input_gzip) VALUES(?1,?2,?3,'running',?4,?5)",params![batch,revision,items.len() as u32,now(),encode_gzip(&input)?])?;
                 audit::append(&tx,&audit_actor,"submitter.batch.start",&batch,&batch,true,now())?;
             }
             tx.commit()?;Ok(items)
@@ -183,10 +187,8 @@ impl Flags {
                     .to_vec(),
             ),
         };
-        let out = self.redact_script_log(&out).await?;
-        let err = self.redact_script_log(&err).await?;
-        let out = crate::modules::farm::runtimes::encode_log(out.as_bytes())?;
-        let err = crate::modules::farm::runtimes::encode_log(err.as_bytes())?;
+        let out = encode_gzip(&out)?;
+        let err = encode_gzip(&err)?;
         let audit_actor = initiator;
         self.auth.db.run(move|db| {
             let tx=db.transaction()?;
@@ -212,44 +214,11 @@ impl Flags {
             })
             .await
     }
-    async fn redact_script_log(&self, bytes: &[u8]) -> anyhow::Result<String> {
-        let mut text = String::from_utf8_lossy(bytes).into_owned();
-        let regex = self
-            .farm_regex
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if let Some(regex) = regex {
-            text = regex.replace_all(&text, "[redacted flag]").into_owned();
-        }
-        let values = self
-            .auth
-            .db
-            .run(|db| {
-                Ok(db
-                    .prepare("SELECT value FROM flags LIMIT 100000")?
-                    .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?)
-            })
-            .await?;
-        for value in values {
-            text = text.replace(&value, "[redacted flag]");
-        }
-        if text.len() > 65536 {
-            let mut n = 65500;
-            while !text.is_char_boundary(n) {
-                n -= 1
-            }
-            text.truncate(n);
-            text.push_str("\n[submitter output truncated]\n");
-        }
-        Ok(text)
-    }
 }
 
-//64KiB per stream and500 rows bound storage to ~64MiB before gzip.
+// All retained gzip blobs share a 64 MiB, 1000 batch, seven day budget.
 fn rotate_logs(tx: &rusqlite::Transaction<'_>, request: &str) -> anyhow::Result<()> {
-    let removed=tx.execute("DELETE FROM flag_submitter_batches WHERE status!='running' AND (started_at<?1 OR id NOT IN (SELECT id FROM flag_submitter_batches ORDER BY rowid DESC LIMIT 500))",[now()-7*86400])?;
+    let removed=tx.execute("DELETE FROM flag_submitter_batches WHERE status!='running' AND (started_at<?1 OR id IN (SELECT id FROM (SELECT id,row_number() OVER (ORDER BY rowid DESC) AS position,sum(coalesce(length(input_gzip),0)+coalesce(length(stdout_gzip),0)+coalesce(length(stderr_gzip),0)) OVER (ORDER BY rowid DESC ROWS UNBOUNDED PRECEDING) AS bytes FROM flag_submitter_batches) WHERE position>1000 OR bytes>67108864))",[now()-7*86400])?;
     if removed > 0 {
         audit::append_change(
             tx,

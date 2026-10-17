@@ -14,8 +14,8 @@ target. Import extracts matches using the saved regex and reports matched, added
 queued and duplicate counts. A request accepts at most 64 KiB of text and 256
 matches. Existing values are deduplicated; accepted duplicates are not resubmitted.
 Invalid imports fail atomically. The authenticated Flag Manager displays exact flag text instead of its digest.
-The paginated response includes `value`; legacy array responses and submission
-logs stay redacted. Digests are internal SHA-256 identifiers used for deduplication.
+The paginated response includes `value`; the legacy array stays redacted.
+Python submission logs show original flag text. Digests are internal SHA-256 identifiers used for deduplication.
 
 The table has independent pagination, page size, search, service and state filters,
 and ascending/descending sorting by creation time, service, target, state,
@@ -90,3 +90,14 @@ The acceptance test requires real `uv` (CI pins 0.10.9). It starts an isolated l
 Core/Proxy, migrates synthetic legacy data, and verifies exact Python argv,
 manual counts, automatic dispatch, paste import, pagination and sorting. It never
 contacts a competition checker or service.
+
+## Submission input and output
+
+Open **Submission attempts**, then **Input / output**. Each new attempt retains
+its exact input flag array and original stdout/stderr, including echoed flags.
+Hydra no longer substitutes [redacted flag] in these Python logs. Inputs/output
+remain gzip compressed and are accessible only through authenticated, audited
+reads. The paginated list returns metadata; detail loads only the selected
+attempt. Retention is7 days/1,000 attempts/64 MiB of combined compressed input and
+output; each output stream remains bounded to64 KiB. Historical redacted output
+cannot be restored and pre-update inputs display as unavailable.

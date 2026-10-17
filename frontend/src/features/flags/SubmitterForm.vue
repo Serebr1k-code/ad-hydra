@@ -2,7 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import type { SubmitterConfig, SubmitterView } from '@/generated/contracts'
 import { api, errorMessage } from '@/shared/api/client'
-import { date } from '@/shared/format'
+import SubmissionBatches from './SubmissionBatches.vue'
 import { pythonPackages, submitterDto } from './submitterDto'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -105,13 +105,6 @@ onUnmounted(() => { mounted = false; if (timer) clearInterval(timer) })
       <p v-if="overview?.manual_request" role="status" class="w-full text-sm">Manual run: {{overview.manual_request.status}} · requested {{overview.manual_request.count}} · attempted {{overview.manual_request.flag_count}}</p>
     </form>
     <p v-if="error" role="alert" class="text-destructive">{{ error }}</p><p v-if="notice" role="status">{{ notice }}</p>
-    <section v-if="overview?.last_batch" class="space-y-3 border-t pt-4">
-      <h3 class="font-medium">Last submission batch</h3>
-      <dl class="grid gap-2 text-sm sm:grid-cols-2"><div><dt class="text-muted-foreground">Batch / configuration revision</dt><dd>{{ overview.last_batch.id }} / {{ overview.last_batch.revision }}</dd></div><div><dt class="text-muted-foreground">State / flag count</dt><dd>{{ overview.last_batch.status }} / {{ overview.last_batch.flag_count }}</dd></div><div><dt class="text-muted-foreground">Started / finished</dt><dd>{{ date(overview.last_batch.started_at) }} / {{ overview.last_batch.finished_at ? date(overview.last_batch.finished_at) : 'In progress' }}</dd></div><div><dt class="text-muted-foreground">Exit code</dt><dd>{{ overview.last_batch.exit_code ?? 'Pending' }}</dd></div></dl>
-      <p class="text-sm text-muted-foreground">Known flag values are redacted from output. Logs are gzip compressed in storage.</p>
-      <div><h4 class="text-sm font-medium">Standard output</h4><pre class="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded border p-3 text-sm">{{ overview.last_batch.stdout || '(No standard output)' }}</pre></div>
-      <div><h4 class="text-sm font-medium">Standard error</h4><pre class="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded border p-3 text-sm">{{ overview.last_batch.stderr || '(No standard error)' }}</pre></div>
-    </section>
-    <p v-else-if="overview" class="text-sm text-muted-foreground">No submission batches have run yet.</p>
+    <SubmissionBatches />
   </section>
 </template>

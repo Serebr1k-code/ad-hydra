@@ -171,15 +171,28 @@ impl Farm {
             )
             .await?;
         auth.db
+            .migrate(
+                20,
+                include_str!("../../../../../migrations/0020_farm_stream_logs.sql"),
+            )
+            .await?;
+        auth.db
+            .migrate(
+                21,
+                include_str!("../../../../../migrations/0021_farm_flag_counts.sql"),
+            )
+            .await?;
+        auth.db
             .run(|db| {
                 let tx = db.transaction()?;
+                tx.execute("UPDATE farm_runs SET logs_complete=1 WHERE status NOT IN ('queued','running')",[])?;
                 let rows = tx
                     .prepare("SELECT id,initiated_by FROM farm_runs WHERE status='running'")?
                     .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
                     .collect::<Result<Vec<_>, _>>()?;
                 for (id, user) in rows {
                     tx.execute(
-                        "UPDATE farm_runs SET status='interrupted',finished_at=?2 WHERE id=?1",
+                        "UPDATE farm_runs SET logs_complete=1,status='interrupted',finished_at=?2 WHERE id=?1",
                         params![id, now()],
                     )?;
                     audit::append_change(

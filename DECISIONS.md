@@ -194,3 +194,21 @@ Explicit Submit on a failed captured flag requeues the same submission with
 attempts0, a due-now timestamp and the requesting user. Only explicit actions reset
 failed attempts; automatic duplicate captures do not. Accepted/inflight/queued
 entries remain idempotent; a full pending queue rejects the retry atomically.
+
+### Original submission diagnostics and streaming Farm logs
+
+The user requested removal of [redacted flag] from Python submission diagnostics,
+exact per-attempt input/output, Farm output beyond1 MiB, and new/existing flag
+counts. New attempts persist the exact argv array and original stdout/stderr as
+gzip; historical redaction cannot be reversed. Authenticated batch list returns
+metadata summaries, detail returns bounded diagnostics; audit never copies raw
+flags/output. Retention counts inputs as well as outputs (1,000/7days/64MiB).
+
+Host Farm logs use32KiB gzip chunks and absolute byte offsets,64KiB compatibility
+previews, and64KiB UI pages. Shared64MiB compressed/512MiB raw chunk quotas rotate
+oldest history explicitly, avoiding a per-process1MiB cutoff or unbounded RAM.
+Sandbox worker bounds remain, with all captured target output archived. Distinct
+run/target/digest observations classify first-committed new flags versus already
+captured values; repeats in one process do not inflate counts. Legacy counts are
+partial and labeled. Observations contain no extra plaintext, cap at1million,
+and cascade with run deletion. Migrations19–21 preserve existing configuration.

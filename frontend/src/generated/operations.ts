@@ -160,6 +160,10 @@ export const operations = {
     "method": "POST",
     "path": "/api/v1/auth/logout"
   },
+  "logs": {
+    "method": "GET",
+    "path": "/api/v1/farm/runs/{id}/logs"
+  },
   "me": {
     "method": "GET",
     "path": "/api/v1/auth/me"
@@ -231,6 +235,14 @@ export const operations = {
   "submit": {
     "method": "POST",
     "path": "/api/v1/flags/{id}/submit"
+  },
+  "submitter_batch": {
+    "method": "GET",
+    "path": "/api/v1/submitter/batches/{id}"
+  },
+  "submitter_batches": {
+    "method": "GET",
+    "path": "/api/v1/submitter/batches"
   },
   "submitter_config": {
     "method": "GET",

@@ -12,19 +12,22 @@ pub(crate) async fn persist_logs(
     let out = encode_log(stdout)?;
     let err = encode_log(stderr)?;
     db.run(move |connection| {
-        connection.execute(
+        let tx=connection.transaction()?;
+        tx.execute(
             "UPDATE farm_runs SET stdout='',stderr='',stdout_gzip=?2,stderr_gzip=?3 WHERE id=?1 AND status IN ('running','cancelled')",
             rusqlite::params![id, out, err],
         )?;
+        super::chunks::enforce_quota(&tx)?;
+        tx.commit()?;
         Ok(())
     }).await
 }
 
-/// Each stream is capped before compression; gzip is a storage encoding, not a quota.
+/// Gzip encoding for bounded previews, legacy blobs, and individual stream chunks.
 pub(crate) fn encode_log(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
     use std::io::Write;
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-    encoder.write_all(&bytes[..bytes.len().min(1024 * 1024)])?;
+    encoder.write_all(bytes)?;
     Ok(encoder.finish()?)
 }
 
@@ -45,12 +48,13 @@ pub(crate) fn decode_log(blob: &[u8]) -> anyhow::Result<Vec<u8>> {
 mod tests {
     use super::*;
     #[test]
-    fn gzip_roundtrip_caps_stream_and_rejects_decompression_overflow() {
+    fn gzip_roundtrip_and_rejects_legacy_decompression_overflow() {
         use std::io::Write;
-        let bytes = vec![b'x'; 2 * 1024 * 1024];
+        let bytes = vec![b'x'; 32768];
         let compressed = encode_log(&bytes).unwrap();
         assert!(compressed.len() < 8192);
-        assert_eq!(decode_log(&compressed).unwrap(), bytes[..1024 * 1024]);
+        assert_eq!(decode_log(&compressed).unwrap(), bytes);
+        let bytes = vec![b'x'; 2 * 1024 * 1024];
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         encoder.write_all(&bytes).unwrap();
         assert!(decode_log(&encoder.finish().unwrap()).is_err());

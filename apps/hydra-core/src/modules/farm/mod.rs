@@ -1,6 +1,7 @@
 mod catalog;
 mod catalog_http;
 mod completion;
+mod flag_counts;
 mod packages;
 pub(crate) use packages::validate as validate_python_packages;
 mod retention;

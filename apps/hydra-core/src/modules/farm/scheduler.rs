@@ -264,8 +264,8 @@ fn enqueue_tx(
 
 pub(super) fn bounded_text(bytes: &[u8]) -> String {
     let mut value = String::from_utf8_lossy(bytes).into_owned();
-    if value.len() > 1048576 {
-        let mut end = 1048540;
+    if value.len() > super::runtimes::chunks::PREVIEW_BYTES {
+        let mut end = super::runtimes::chunks::PREVIEW_BYTES - 36;
         while !value.is_char_boundary(end) {
             end -= 1;
         }

@@ -421,3 +421,41 @@ async fn explicit_submit_requeues_failed_flag_with_new_attempt_budget() {
     assert_eq!(value.2, 1);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn farm_counts_distinguish_new_existing_and_deduplicate_observation_replays() {
+    let (flags, dir) = fixture().await;
+    flags.auth.db.run(|db|{for id in ["process1","process2"] {db.execute("INSERT INTO farm_runs(id,exploit_id,version,manifest,target_ids,initiated_by,status,created_at) VALUES(?1,'e','v','{}','[\"allowed\"]','actor','running',0)",[id])?;}Ok(())}).await.unwrap();
+    for (run, value) in [
+        ("process1", "FLAG800"),
+        ("process1", "FLAG800"),
+        ("process2", "FLAG800"),
+        ("process2", "FLAG801"),
+    ] {
+        flags
+            .record_farm_captured(value.into(), "allowed".into(), run.into(), "actor".into())
+            .await
+            .unwrap();
+    }
+    let counts=flags.auth.db.run(|db|{Ok(db.prepare("SELECT run_id,SUM(is_new),COUNT(*)-SUM(is_new) FROM farm_flag_observations GROUP BY run_id ORDER BY run_id")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,u32>(1)?,r.get::<_,u32>(2)?)))?.collect::<Result<Vec<_>,_>>()?)}).await.unwrap();
+    assert_eq!(
+        counts,
+        vec![("process1".into(), 1, 0), ("process2".into(), 1, 1)]
+    );
+    flags
+        .auth
+        .db
+        .run(|db| {
+            db.execute("DELETE FROM farm_runs WHERE id='process1'", [])?;
+            let count: u32 = db.query_row(
+                "SELECT entries FROM farm_flag_counter_budget WHERE id=1",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(count, 2);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}

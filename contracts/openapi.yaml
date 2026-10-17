@@ -334,6 +334,42 @@ paths:
       responses:
         '200':
           description: ''
+  /api/v1/farm/runs/{id}/logs:
+    get:
+      tags:
+      - farm
+      operationId: logs
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: stream
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
   /api/v1/farm/runs/{id}/retry:
     post:
       tags:
@@ -1341,6 +1377,62 @@ paths:
         '400':
           description: ''
         '401':
+          description: ''
+  /api/v1/submitter/batches:
+    get:
+      tags:
+      - flags
+      operationId: submitter_batches
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmitterBatchPage'
+        '400':
+          description: ''
+        '401':
+          description: ''
+  /api/v1/submitter/batches/{id}:
+    get:
+      tags:
+      - flags
+      operationId: submitter_batch
+      parameters:
+      - name: id
+        in: path
+        description: Batch UUID
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmitterBatch'
+        '400':
+          description: ''
+        '401':
+          description: ''
+        '404':
           description: ''
   /api/v1/submitter/run:
     post:
@@ -2714,6 +2806,12 @@ components:
           minimum: 0
         id:
           type: string
+        input_flags:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
         revision:
           type: integer
           format: int64
@@ -2725,6 +2823,63 @@ components:
         stderr:
           type: string
         stdout:
+          type: string
+    SubmitterBatchPage:
+      type: object
+      required:
+      - items
+      - total
+      - limit
+      - offset
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SubmitterBatchSummary'
+        limit:
+          type: integer
+          format: int32
+          minimum: 0
+        offset:
+          type: integer
+          format: int32
+          minimum: 0
+        total:
+          type: integer
+          format: int64
+          minimum: 0
+    SubmitterBatchSummary:
+      type: object
+      required:
+      - id
+      - revision
+      - flag_count
+      - status
+      - started_at
+      properties:
+        exit_code:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        finished_at:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        flag_count:
+          type: integer
+          format: int32
+          minimum: 0
+        id:
+          type: string
+        revision:
+          type: integer
+          format: int64
+        started_at:
+          type: integer
+          format: int64
+        status:
           type: string
     SubmitterConfig:
       type: object

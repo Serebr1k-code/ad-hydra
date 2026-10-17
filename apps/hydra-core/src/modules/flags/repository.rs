@@ -124,11 +124,14 @@ impl Flags {
             if let Some(target)=&target {anyhow::ensure!(farm_target_enabled(&tx,target,run.as_deref())?,"target not enabled");}
             let existing=tx.query_row("SELECT id FROM flags WHERE digest=?1 AND category=?2",params![digest,category],|r|r.get::<_,String>(0)).optional()?;
             let id=existing.clone().unwrap_or_else(||uuid::Uuid::new_v4().to_string());
-            let count:i64=tx.query_row("SELECT count(*) FROM flags",[],|r|r.get(0))?;anyhow::ensure!(count<100000,"flag vault full");
+            let count:i64=tx.query_row("SELECT count(*) FROM flags",[],|r|r.get(0))?;anyhow::ensure!(existing.is_some() || count<100000,"flag vault full");
             let service=if let Some(run)=run.as_ref() {
                 if has_column(&tx,"farm_runs","service_id")? {tx.query_row("SELECT service_id FROM farm_runs WHERE id=?1",[run],|r|r.get::<_,Option<String>>(0)).optional()?.flatten()}else{None}
             }else{None};
             tx.execute("INSERT OR IGNORE INTO flags(id,digest,category,value,target_id,run_id,initiated_by,created_at,service_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![id,digest,category,value,target,run,actor.id,now(),service])?;
+            if category=="captured" && let (Some(run),Some(target))=(&run,&target) && tx.query_row("SELECT EXISTS(SELECT 1 FROM farm_runs WHERE id=?1)",[run],|r|r.get::<_,bool>(0))? {
+                tx.execute("INSERT OR IGNORE INTO farm_flag_observations(run_id,target_id,digest,is_new) VALUES(?1,?2,?3,?4)",params![run,target,digest,existing.is_none()])?;
+            }
             if let Some(event)=event {let n:i64=tx.query_row("SELECT count(*) FROM flag_events",[],|r|r.get(0))?;anyhow::ensure!(n<1000000,"flag event quota exhausted");tx.execute("INSERT INTO flag_events(event_id,flag_id) VALUES(?1,?2)",params![event,id])?;}
             audit::append_change(&tx,&audit_actor,"flags.record",&id,&request,true,now(),&serde_json::json!({"initiated_by":actor.id,"before":{"existed":existing.is_some()},"after":{"category":category,"target_id":target,"run_id":run}}))?;
             if category=="own_exposed" {quarantine_defensive(&tx,&digest,&audit_actor,&request)?;}

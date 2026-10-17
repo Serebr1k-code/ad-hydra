@@ -194,6 +194,7 @@ impl farm::Runner for Runner {
                 crate::infrastructure::host_process::run(settings, job, cancel, flags, db).await
             });
         }
+        let db = self.db.clone();
         Box::pin(async move {
             let settings = settings
                 .ok_or_else(|| anyhow::anyhow!("sandbox not configured; execution refused"))?;
@@ -267,6 +268,32 @@ impl farm::Runner for Runner {
                     output.status = "cancelled".into();
                     break;
                 }
+                let label = if job.manifest.mode == "batch" {
+                    format!(
+                        "\n[batch targets={}]\n",
+                        endpoints
+                            .iter()
+                            .map(|e| e.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                } else {
+                    let target = job
+                        .targets
+                        .iter()
+                        .find(|t| t.id == target_id)
+                        .ok_or_else(|| anyhow::anyhow!("target missing"))?;
+                    format!(
+                        "\n[target id={} name={:?} host={} port={}]\n",
+                        target.id, target.name, target.host, target.port
+                    )
+                };
+                for stream in ["stdout", "stderr"] {
+                    farm::runtimes::chunks::append(&db, &job.run_id, stream, label.as_bytes())
+                        .await?;
+                }
+                append_bounded(&mut output.stdout, label.as_bytes());
+                append_bounded(&mut output.stderr, label.as_bytes());
                 let result = sandbox
                     .run(
                         sandbox::Job {
@@ -289,6 +316,15 @@ impl farm::Runner for Runner {
                         cancel.clone(),
                     )
                     .await?;
+                persist_worker_output(
+                    &db,
+                    &job.run_id,
+                    &result.stdout,
+                    &result.stderr,
+                    result.stdout_lost_bytes,
+                    result.stderr_lost_bytes,
+                )
+                .await?;
                 let captures = if job.manifest.mode == "batch" {
                     batch_captures(&flags, &result.stdout, &job.targets)?
                         .into_iter()
@@ -336,14 +372,32 @@ impl farm::Runner for Runner {
         })
     }
 }
-pub(crate) fn append_bounded(to: &mut Vec<u8>, bytes: &[u8]) {
-    let n = ((1024 * 1024usize).saturating_sub(to.len())).min(bytes.len());
-    to.extend_from_slice(&bytes[..n]);
-    if n < bytes.len() {
-        let marker = b"\n[aggregate output truncated]\n";
-        to.truncate(1024 * 1024 - marker.len());
-        to.extend_from_slice(marker);
+async fn persist_worker_output(
+    db: &Database,
+    id: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+    stdout_lost: u64,
+    stderr_lost: u64,
+) -> anyhow::Result<()> {
+    for (stream, bytes) in [("stdout", stdout), ("stderr", stderr)] {
+        for chunk in bytes.chunks(32768) {
+            farm::runtimes::chunks::append(db, id, stream, chunk).await?;
+        }
     }
+    if stdout_lost > 0 || stderr_lost > 0 {
+        let marker = format!(
+            "\n[worker output lost: stdout_bytes={stdout_lost} stderr_bytes={stderr_lost}]\n"
+        );
+        farm::runtimes::chunks::append(db, id, "stderr", marker.as_bytes()).await?;
+    }
+    Ok(())
+}
+
+pub(crate) fn append_bounded(to: &mut Vec<u8>, bytes: &[u8]) {
+    let limit = farm::runtimes::chunks::PREVIEW_BYTES;
+    let n = limit.saturating_sub(to.len()).min(bytes.len());
+    to.extend_from_slice(&bytes[..n]);
 }
 pub fn runner(
     settings: Option<SandboxSettings>,
@@ -444,12 +498,66 @@ FLAG_UNATTRIBUTED
         drop(flags);
         std::fs::remove_dir_all(directory).unwrap();
     }
+    #[tokio::test]
+    async fn sandbox_result_persistence_preserves_multiple_large_targets_and_loss_markers() {
+        use std::os::unix::fs::DirBuilderExt;
+        let path = std::env::temp_dir().join(format!("hydra-worker-log-{}", uuid::Uuid::new_v4()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .unwrap();
+        let db = Database::open(path.join("db")).await.unwrap();
+        db.migrate(
+            16,
+            include_str!("../../../../migrations/0016_farm_catalog_logs.sql"),
+        )
+        .await
+        .unwrap();
+        db.migrate(
+            20,
+            include_str!("../../../../migrations/0020_farm_stream_logs.sql"),
+        )
+        .await
+        .unwrap();
+        db.run(|db|{db.execute("INSERT INTO farm_runs(id,exploit_id,version,manifest,target_ids,initiated_by,status,created_at) VALUES('r','e','v','{}','[]','a','running',0)",[])?;Ok(())}).await.unwrap();
+        persist_worker_output(&db, "r", &vec![b'A'; 70000], b"first", 0, 0)
+            .await
+            .unwrap();
+        persist_worker_output(&db, "r", &vec![b'B'; 70000], b"second", 12, 34)
+            .await
+            .unwrap();
+        let actor = crate::modules::audit::Actor::user("a".into());
+        let page = farm::runtimes::chunks::page(
+            &db,
+            actor.clone(),
+            "r".into(),
+            "stdout".into(),
+            69995,
+            16,
+        )
+        .await
+        .unwrap();
+        assert_eq!(page["text"], "AAAAABBBBBBBBBBB");
+        assert_eq!(page["end_offset"], 140000);
+        let page = farm::runtimes::chunks::page(&db, actor, "r".into(), "stderr".into(), 0, 65536)
+            .await
+            .unwrap();
+        assert!(
+            page["text"]
+                .as_str()
+                .unwrap()
+                .contains("firstsecond\n[worker output lost: stdout_bytes=12 stderr_bytes=34]")
+        );
+        drop(db);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
     #[test]
     fn aggregate_output_loss_is_explicit_and_bounded() {
         let mut output = Vec::new();
         append_bounded(&mut output, &vec![b'x'; 1024 * 1024]);
         append_bounded(&mut output, b"extra");
-        assert_eq!(output.len(), 1024 * 1024);
-        assert!(output.ends_with(b"[aggregate output truncated]\n"));
+        assert_eq!(output.len(), farm::runtimes::chunks::PREVIEW_BYTES);
+        assert!(output.iter().all(|b| *b == b'x'));
     }
 }

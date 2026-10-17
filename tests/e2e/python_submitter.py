@@ -137,6 +137,7 @@ class PythonSubmitter(unittest.TestCase):
                 run = wait_for('Farm print fixture', lambda: api('GET', '/farm/runs/' + run_id),
                                lambda row: row['status'] not in ('queued', 'running'))
                 self.assertEqual(run['status'], 'succeeded', run)
+                return run
 
             good_source = ('import idna, sys\n'
                            'print("IDNA", idna.__version__, "ARGC", len(sys.argv[1:]))\n'
@@ -153,7 +154,17 @@ class PythonSubmitter(unittest.TestCase):
                 self.assertFalse(view['config']['enabled'])
                 api('PUT', '/farm/services', {'id': 'local-service', 'name': 'Local fixture', 'port': 12345})
                 api('PUT', '/farm/teams', {'id': 'local-team', 'name': 'Owned loopback', 'host': '127.0.0.1'})
-                capture('first', b'printf "TESTFLAG_ALPHA TESTFLAG_BETA TESTFLAG_ALPHA\\n"; printf "TESTFLAG_GAMMA\\n" >&2')
+                first_run = capture('first', b"yes x | head -c 2200000; " + b'printf "TESTFLAG_ALPHA TESTFLAG_BETA TESTFLAG_ALPHA\\n"; printf "TESTFLAG_GAMMA\\n" >&2')
+                self.assertEqual((first_run['new_flags'],first_run['existing_flags']),(3,0))
+                self.assertTrue(first_run['flag_counts_complete'])
+                self.assertLessEqual(len(first_run['stdout'].encode()),65536)
+                collected=[];offset=0
+                while True:
+                    page=api('GET',f"/farm/runs/{first_run['id']}/logs?stream=stdout&offset={offset}&limit=65536")
+                    collected.append(page['text']);offset=page['next_offset']
+                    if page['done']:break
+                self.assertGreater(len(''.join(collected)),2200000)
+                self.assertIn('TESTFLAG_ALPHA TESTFLAG_BETA', ''.join(collected))
                 view = wait_for('automatic queue capture', lambda: api('GET', '/submitter'),
                                 lambda row: row['queued_flags'] == 3)
                 self.assertIsNone(view['last_batch'])
@@ -168,22 +179,27 @@ class PythonSubmitter(unittest.TestCase):
                 view = wait_for('real uv successful whole-batch submission', lambda: api('GET', '/submitter'),
                                 lambda row: row['last_batch'] is not None and row['last_batch']['status'] == 'accepted', seconds=70)
                 batch = view['last_batch']
+                self.assertEqual(set(batch['input_flags']),{'TESTFLAG_ALPHA','TESTFLAG_BETA','TESTFLAG_GAMMA'})
+                summary=api('GET','/submitter/batches?limit=1')['items'][0]
+                self.assertNotIn('stdout',summary)
+                self.assertEqual(api('GET','/submitter/batches/'+batch['id'])['input_flags'],batch['input_flags'])
                 self.assertEqual(batch['flag_count'], 3)
                 self.assertEqual(batch['exit_code'], 0)
                 self.assertEqual(view['queued_flags'], 0)
                 self.assertIn('IDNA 3.10 ARGC 3', batch['stdout'])
                 self.assertEqual(db_query("SELECT state,attempts FROM submissions"), [('accepted', 1)] * 3)
                 for stream in ('stdout', 'stderr'):
-                    self.assertIn('[redacted flag]', batch[stream])
+                    self.assertNotIn('[redacted flag]', batch[stream])
                     for flag in ('TESTFLAG_ALPHA', 'TESTFLAG_BETA', 'TESTFLAG_GAMMA'):
-                        self.assertNotIn(flag, batch[stream])
+                        self.assertIn(flag, batch[stream])
                 out, err = db_query('SELECT stdout_gzip,stderr_gzip FROM flag_submitter_batches WHERE id=?', (batch['id'],))[0]
                 for compressed in (out, err):
                     self.assertEqual(compressed[:2], b'\x1f\x8b')
-                    self.assertIn(b'[redacted flag]', gzip.decompress(compressed))
-                    self.assertNotIn(b'TESTFLAG_', gzip.decompress(compressed))
+                    self.assertNotIn(b'[redacted flag]', gzip.decompress(compressed))
+                    self.assertIn(b'TESTFLAG_', gzip.decompress(compressed))
                 configure(False, good_source)
-                capture('second', b'printf "TESTFLAG_DELTA\\n"')
+                second_run=capture('second', b'printf "TESTFLAG_ALPHA TESTFLAG_DELTA\\n"')
+                self.assertEqual((second_run['new_flags'],second_run['existing_flags']),(1,1))
                 self.assertEqual(api('GET', '/submitter')['queued_flags'], 1)
                 core.terminate(); core.wait(timeout=10)
                 core = start_core(); ready(core)
@@ -208,7 +224,7 @@ class PythonSubmitter(unittest.TestCase):
                 self.assertEqual(final['queued_flags'], 0)
                 self.assertEqual(db_query("SELECT count(*) FROM submissions WHERE state='accepted'")[0][0], 4)
                 self.assertEqual(db_query('SELECT max(attempts) FROM submissions')[0][0], 2)
-                print('PASS: real uv+idna, Farm stdout/stderr regex, durable automatic queue, immediate dispatch, whole-batch acceptance, redacted gzip logs, restart, pause, failure and retry')
+                print('PASS: real uv+idna, Farm stdout/stderr regex, durable automatic queue, immediate dispatch, whole-batch acceptance, original gzip input/output logs, restart, pause, failure and retry')
             finally:
                 for process in reversed(processes):
                     if process.poll() is not None:

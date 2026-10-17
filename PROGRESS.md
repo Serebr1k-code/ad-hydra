@@ -143,3 +143,5 @@ Post-smoke 2-second sample: Core 36,524 KiB RSS/Proxy 7,240 KiB RSS, combined 42
 
 ### 2026-10-17 — Readable flags and explicit failed resubmission
 
+### 2026-10-17 — Submission I/O, streamed Farm logs and process flag counts
+
