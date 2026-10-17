@@ -41,6 +41,11 @@ impl Flags {
         let rows=tx.prepare("SELECT id,attempts,initiated_by FROM submissions WHERE state='inflight' LIMIT 5000")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,u32>(1)?,r.get::<_,String>(2)?)))?.collect::<Result<Vec<_>,_>>()?;
         for (id,attempts,initiated) in rows {let state=if attempts>=10 {"failed"}else{"retry"};tx.execute("UPDATE submissions SET state=?2,next_attempt=?3 WHERE id=?1",params![id,state,now()+30])?;
         audit::append_change(&tx,&Actor{kind:"system".into(),id:"submitter".into()},"submissions.recover",&id,&uuid::Uuid::new_v4().to_string(),true,now(),&serde_json::json!({"initiated_by":initiated,"before":{"state":"inflight","attempts":attempts},"after":{"state":state,"attempts":attempts}}))?;}
+        let manual=tx.prepare("SELECT id,actor_id FROM flag_submitter_requests WHERE status='running'")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?;
+        for (id,owner) in manual {
+            tx.execute("UPDATE flag_submitter_requests SET status='interrupted',finished_at=?2 WHERE id=?1",params![id,now()])?;
+            audit::append(&tx,&Actor::user(owner),"submitter.run.recover",&id,&id,true,now())?;
+        }
         let running=tx.prepare("SELECT id FROM flag_submitter_batches WHERE status='running'")?.query_map([],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
         for id in running {tx.execute("UPDATE flag_submitter_batches SET status='interrupted',finished_at=?2 WHERE id=?1",params![id,now()])?;audit::append(&tx,&Actor{kind:"system".into(),id:"submitter".into()},"submitter.batch.recover",&id,&id,true,now())?;}
         tx.commit()?;Ok(())}).await

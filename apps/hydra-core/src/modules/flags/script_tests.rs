@@ -65,6 +65,7 @@ async fn fixture(body: &[u8]) -> Fixture {
 }
 fn config(enabled: bool) -> SubmitterConfig {
     SubmitterConfig {
+        batch_size: 240,
         revision: 0,
         enabled,
         flag_pattern: "FLAG[0-9]+".into(),
@@ -150,8 +151,8 @@ async fn configure_checks_revisions_validation_and_attribution() {
     let view = f.submitter_view(actor()).await.unwrap();
     assert_eq!(view.config.revision, 1);
     assert!(view.config.enabled && view.runtime_available);
-    assert_eq!(view.interval_seconds, 30);
-    assert!(view.next_batch_at >= crate::modules::auth::now() + 29);
+    assert_eq!(view.interval_seconds, 1);
+    assert!(view.next_batch_at <= crate::modules::auth::now() + 1);
     let count = f.auth.db.run(|db| Ok(db.query_row("SELECT count(*) FROM audit WHERE action='submitter.configure' AND actor_id='initiator'", [], |r| r.get::<_,i64>(0))?)).await.unwrap();
     assert_eq!(count, 1);
 }
@@ -199,7 +200,8 @@ async fn captured_farm_flags_use_bounded_batches_per_window_and_gzip_redacts_out
         capture(f, n).await;
     }
     assert_eq!(counts(f).await, (0, 260, 0));
-    assert!(!f.dispatch_cycle(CancellationToken::new()).await.unwrap());
+    assert!(f.dispatch_cycle(CancellationToken::new()).await.unwrap());
+    assert_eq!(counts(f).await, (240, 20, 1));
     due(f).await;
     assert!(f.dispatch_cycle(CancellationToken::new()).await.unwrap());
     assert_eq!(counts(f).await, (260, 0, 2));
@@ -288,7 +290,7 @@ async fn paused_submitter_retains_queue_without_starting_a_child() {
 }
 
 #[tokio::test]
-async fn own_exposed_quarantine_is_preserved_by_script_dispatch() {
+async fn defensive_observation_does_not_store_values_or_transform_captures() {
     let fixture = fixture(b"exit 0\n").await;
     let f = &fixture.flags;
     configure(f, true).await;
@@ -323,9 +325,8 @@ async fn own_exposed_quarantine_is_preserved_by_script_dispatch() {
         })
         .await
         .unwrap();
-    assert_eq!(state, "quarantined");
-    assert_eq!(counts(f).await, (0, 0, 0));
-    assert!(!fixture.runtime.work_dir.exists());
+    assert_eq!(state, "accepted");
+    assert_eq!(counts(f).await, (1, 0, 1));
 }
 
 #[tokio::test]
@@ -417,4 +418,26 @@ async fn interrupted_claims_recover_and_expired_batch_logs_rotate() {
     assert_eq!(status, "interrupted");
     f.rotate_submitter_logs().await.unwrap();
     assert_eq!(counts(f).await, (0, 1, 0));
+}
+
+#[tokio::test]
+async fn manual_run_works_paused_and_limits_total_and_batch_sizes() {
+    let fixture = fixture(b"exit 0\n").await;
+    let f = &fixture.flags;
+    let mut chosen = config(false);
+    chosen.batch_size = 1;
+    f.configure_submitter(actor(), chosen).await.unwrap();
+    for i in 1..=5 {
+        capture(f, i).await;
+    }
+    assert!(!f.dispatch_cycle(CancellationToken::new()).await.unwrap());
+    let request = f.request_manual_run(actor(), 2).await.unwrap();
+    assert!(f.request_manual_run(actor(), 2).await.is_err());
+    assert!(f.dispatch_cycle(CancellationToken::new()).await.unwrap());
+    assert_eq!(counts(f).await, (2, 3, 2));
+    let done = f.latest_manual().await.unwrap().unwrap();
+    assert_eq!(done.id, request.id);
+    assert_eq!(done.flag_count, 2);
+    assert_eq!(done.status, "finished");
+    assert!(!f.submitter_view(actor()).await.unwrap().config.enabled);
 }

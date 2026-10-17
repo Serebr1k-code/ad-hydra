@@ -719,6 +719,34 @@ paths:
       - flags
       operationId: flags_list
       parameters:
+      - name: service_id
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: state
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: sort
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: order
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
       - name: offset
         in: query
         required: false
@@ -772,6 +800,94 @@ paths:
                 $ref: '#/components/schemas/FlagCreated'
         '400':
           description: ''
+        '401':
+          description: ''
+  /api/v1/flags/import:
+    post:
+      tags:
+      - flags
+      operationId: flags_import
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImportFlags'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportResult'
+        '400':
+          description: ''
+        '401':
+          description: ''
+  /api/v1/flags/page:
+    get:
+      tags:
+      - flags
+      operationId: flags_page
+      parameters:
+      - name: service_id
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: state
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: sort
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: order
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+      - name: search
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlagPage'
         '401':
           description: ''
   /api/v1/flags/{id}/submit:
@@ -1129,6 +1245,34 @@ paths:
       - flags
       operationId: submissions
       parameters:
+      - name: service_id
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: state
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: sort
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: order
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
       - name: offset
         in: query
         required: false
@@ -1194,6 +1338,28 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SubmitterView'
+        '400':
+          description: ''
+        '401':
+          description: ''
+  /api/v1/submitter/run:
+    post:
+      tags:
+      - flags
+      operationId: submitter_run
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunInput'
+        required: true
+      responses:
+        '202':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunRequest'
         '400':
           description: ''
         '401':
@@ -1843,6 +2009,30 @@ components:
       properties:
         id:
           type: string
+    FlagPage:
+      type: object
+      required:
+      - items
+      - total
+      - offset
+      - limit
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlagView'
+        limit:
+          type: integer
+          format: int32
+          minimum: 0
+        offset:
+          type: integer
+          format: int32
+          minimum: 0
+        total:
+          type: integer
+          format: int32
+          minimum: 0
     FlagView:
       type: object
       required:
@@ -1863,6 +2053,14 @@ components:
         initiated_by:
           type: string
         run_id:
+          type:
+          - string
+          - 'null'
+        service_id:
+          type:
+          - string
+          - 'null'
+        state:
           type:
           - string
           - 'null'
@@ -2027,6 +2225,46 @@ components:
         direction:
           type: integer
           format: int32
+    ImportFlags:
+      type: object
+      required:
+      - text
+      properties:
+        service_id:
+          type:
+          - string
+          - 'null'
+        target_id:
+          type:
+          - string
+          - 'null'
+        text:
+          type: string
+      additionalProperties: false
+    ImportResult:
+      type: object
+      required:
+      - matched
+      - added
+      - queued
+      - duplicates
+      properties:
+        added:
+          type: integer
+          format: int32
+          minimum: 0
+        duplicates:
+          type: integer
+          format: int32
+          minimum: 0
+        matched:
+          type: integer
+          format: int32
+          minimum: 0
+        queued:
+          type: integer
+          format: int32
+          minimum: 0
     ListResponse:
       type: object
       required:
@@ -2242,22 +2480,48 @@ components:
           type: integer
           format: int64
           minimum: 0
+    RunInput:
+      type: object
+      required:
+      - count
+      properties:
+        count:
+          type: integer
+          format: int32
+          minimum: 0
+      additionalProperties: false
     RunRequest:
       type: object
       required:
-      - exploit_id
-      - revision
+      - id
+      - count
+      - actor_id
+      - status
+      - created_at
+      - flag_count
       properties:
-        exploit_id:
+        actor_id:
           type: string
-        revision:
+        count:
+          type: integer
+          format: int32
+          minimum: 0
+        created_at:
           type: integer
           format: int64
-        team_id:
+        finished_at:
           type:
-          - string
+          - integer
           - 'null'
-      additionalProperties: false
+          format: int64
+        flag_count:
+          type: integer
+          format: int32
+          minimum: 0
+        id:
+          type: string
+        status:
+          type: string
     Sample:
       type: object
       required:
@@ -2466,6 +2730,10 @@ components:
       - flag_pattern
       - source
       properties:
+        batch_size:
+          type: integer
+          format: int32
+          minimum: 0
         enabled:
           type: boolean
         flag_pattern:
@@ -2503,6 +2771,10 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/SubmitterBatch'
+        manual_request:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/RunRequest'
         next_batch_at:
           type: integer
           format: int64

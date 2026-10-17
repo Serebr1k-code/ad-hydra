@@ -1,4 +1,4 @@
-//! Durable 30-second dispatch windows; one bounded Python child at a time.
+//! Durable immediate/manual dispatch; one bounded Python child at a time.
 use super::{Flags, script_config::SubmitterConfig};
 use crate::{
     infrastructure::submitter_process,
@@ -33,16 +33,23 @@ impl Flags {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        if config.as_ref().is_some_and(|c| !c.enabled)
-            || (config.is_none() && self.settings.checker.is_none())
-            || cancel.is_cancelled()
+        let manual = self.next_manual().await?;
+        if cancel.is_cancelled()
+            || (manual.is_none()
+                && (config.as_ref().is_some_and(|c| !c.enabled)
+                    || (config.is_none() && self.settings.checker.is_none())))
         {
             return Ok(false);
         }
-        let claimed = self.auth.db.run(|db| {
+        let request = manual.clone();
+        let claimed = self.auth.db.run(move|db| {
             let tx = db.transaction()?;
-            let updated = tx.execute("UPDATE flag_submitter_clock SET next_batch_at=?1 WHERE id=1 AND next_batch_at<=?2",params![now()+30,now()])?;
-            if updated > 0 { audit::append(&tx,&actor(),"submitter.window","python-submitter",&uuid::Uuid::new_v4().to_string(),true,now())?; }
+            let updated=if let Some(request)=request {
+                tx.execute("UPDATE flag_submitter_requests SET status='running' WHERE id=?1 AND status='pending'",[&request.id])?
+            }else{
+                tx.execute("UPDATE flag_submitter_clock SET next_batch_at=?1 WHERE id=1 AND next_batch_at<=?2 AND EXISTS(SELECT 1 FROM submissions WHERE state IN ('queued','retry') AND next_attempt<=?2 AND attempts<10)",params![now()+1,now()])?
+            };
+            if updated>0 {audit::append(&tx,&actor(),"submitter.dispatch","python-submitter",&uuid::Uuid::new_v4().to_string(),true,now())?;}
             tx.commit()?; Ok(updated>0)
         }).await?;
         drop(config_guard);
@@ -50,17 +57,29 @@ impl Flags {
             return Ok(false);
         }
         if let Some(config) = config {
-            // Snapshot IDs once. New captures and retries wait for the next window.
-            let ids = self.auth.db.run(|db| {
-                Ok(db.prepare("SELECT s.id FROM submissions s JOIN flags f ON f.id=s.flag_id WHERE s.state IN ('queued','retry') AND s.next_attempt<=?1 AND s.attempts<10 AND f.category='captured' AND NOT EXISTS(SELECT 1 FROM flags own WHERE own.digest=f.digest AND own.category='own_exposed') ORDER BY s.created_at,s.id LIMIT 5000")?.query_map([now()],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?)
+            let limit = manual
+                .as_ref()
+                .map_or(config.batch_size, |request| request.count);
+            let forced = manual.is_some();
+            let ids = self.auth.db.run(move|db| {
+                Ok(db.prepare("SELECT s.id FROM submissions s JOIN flags f ON f.id=s.flag_id WHERE s.state IN ('queued','retry') AND (?2 OR s.next_attempt<=?1) AND s.attempts<10 AND f.category='captured' ORDER BY s.created_at,s.rowid LIMIT ?3")?.query_map(params![now(),forced,limit],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?)
             }).await?;
-            for chunk in ids.chunks(240) {
-                // At most60KiB of flag payload; each flag is at most256 bytes.
+            let mut attempted = 0;
+            for chunk in ids.chunks(config.batch_size as usize) {
                 if cancel.is_cancelled() {
                     break;
                 }
-                self.script_batch(config.clone(), chunk.to_vec(), cancel.clone())
+                attempted += self
+                    .script_batch(
+                        config.clone(),
+                        chunk.to_vec(),
+                        cancel.clone(),
+                        manual.clone(),
+                    )
                     .await?;
+            }
+            if let Some(request) = manual {
+                self.finish_manual(request, attempted).await?;
             }
         } else {
             // Retain operator-configured legacy adapters, collected in the same window.
@@ -77,7 +96,8 @@ impl Flags {
         config: SubmitterConfig,
         ids: Vec<String>,
         cancel: CancellationToken,
-    ) -> anyhow::Result<()> {
+        manual: Option<super::manual::RunRequest>,
+    ) -> anyhow::Result<u32> {
         // Serialize each claim with configuration changes. A running child finishes,
         // but disabling or editing prevents the next chunk using the old revision.
         let configuration_guard = self.configuration.lock().await;
@@ -86,10 +106,17 @@ impl Flags {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-            .is_some_and(|current| current.enabled && current.revision == config.revision)
+            .is_some_and(|current| {
+                (current.enabled || manual.is_some()) && current.revision == config.revision
+            })
         {
-            return Ok(());
+            return Ok(0);
         }
+        let initiator = manual
+            .as_ref()
+            .map(|request| Actor::user(request.actor_id.clone()))
+            .unwrap_or_else(actor);
+        let audit_actor = initiator.clone();
         let batch_id = uuid::Uuid::new_v4().to_string();
         let batch = batch_id.clone();
         let revision = config.revision;
@@ -101,20 +128,21 @@ impl Flags {
                 let item=tx.query_row("SELECT s.id,f.value,s.attempts,s.initiated_by FROM submissions s JOIN flags f ON f.id=s.flag_id WHERE s.id=?1 AND s.state IN ('queued','retry') AND s.attempts<10 AND f.category='captured' AND NOT EXISTS(SELECT 1 FROM flags own WHERE own.digest=f.digest AND own.category='own_exposed')",[id],|r|Ok(Item{id:r.get(0)?,value:r.get(1)?,attempts:r.get(2)?,initiated:r.get(3)?})).optional()?;
                 if let Some(item)=item {
                     tx.execute("UPDATE submissions SET state='inflight',attempts=attempts+1 WHERE id=?1",[&item.id])?;
-                    audit::append_change(&tx,&actor(),"submissions.attempt",&item.id,&batch,true,now(),&serde_json::json!({"batch_id":batch,"initiated_by":item.initiated,"attempts":item.attempts+1}))?;
+                    audit::append_change(&tx,&audit_actor,"submissions.attempt",&item.id,&batch,true,now(),&serde_json::json!({"batch_id":batch,"initiated_by":item.initiated,"attempts":item.attempts+1}))?;
                     items.push(item);
                 }
             }
             if !items.is_empty() {
                 tx.execute("INSERT INTO flag_submitter_batches(id,revision,flag_count,status,started_at) VALUES(?1,?2,?3,'running',?4)",params![batch,revision,items.len() as u32,now()])?;
-                audit::append(&tx,&actor(),"submitter.batch.start",&batch,&batch,true,now())?;
+                audit::append(&tx,&audit_actor,"submitter.batch.start",&batch,&batch,true,now())?;
             }
             tx.commit()?;Ok(items)
         }).await?;
         drop(configuration_guard);
         if items.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
+        let flag_count = items.len() as u32;
         let result = if let Some(runtime) = self.settings.script_runtime.clone() {
             submitter_process::run(
                 runtime,
@@ -159,17 +187,18 @@ impl Flags {
         let err = self.redact_script_log(&err).await?;
         let out = crate::modules::farm::runtimes::encode_log(out.as_bytes())?;
         let err = crate::modules::farm::runtimes::encode_log(err.as_bytes())?;
+        let audit_actor = initiator;
         self.auth.db.run(move|db| {
             let tx=db.transaction()?;
             for item in items {
                 let state=if success {"accepted"} else if item.attempts+1>=10 {"failed"} else {"retry"};
                 let changed=tx.execute("UPDATE submissions SET state=?2,response=?3,next_attempt=?4 WHERE id=?1 AND state='inflight'",params![item.id,state,serde_json::json!({"adapter":"python","batch_id":batch_id,"accepted":success,"exit_code":code}).to_string(),now()+30])?;
-                if changed>0 { audit::append_change(&tx,&actor(),"submissions.result",&item.id,&batch_id,success,now(),&serde_json::json!({"initiated_by":item.initiated,"state":state,"attempts":item.attempts+1,"batch_id":batch_id}))?; }
+                if changed>0 { audit::append_change(&tx,&audit_actor,"submissions.result",&item.id,&batch_id,success,now(),&serde_json::json!({"initiated_by":item.initiated,"state":state,"attempts":item.attempts+1,"batch_id":batch_id}))?; }
             }
             tx.execute("UPDATE flag_submitter_batches SET status=?2,finished_at=?3,exit_code=?4,stdout_gzip=?5,stderr_gzip=?6 WHERE id=?1",params![batch_id,status,now(),code,out,err])?;
-            audit::append(&tx,&actor(),"submitter.batch.finish",&batch_id,&batch_id,success,now())?;
+            audit::append(&tx,&audit_actor,"submitter.batch.finish",&batch_id,&batch_id,success,now())?;
             rotate_logs(&tx,&batch_id)?;
-            tx.commit()?;Ok(())
+            tx.commit()?;Ok(flag_count)
         }).await
     }
     pub(super) async fn rotate_submitter_logs(&self) -> anyhow::Result<()> {

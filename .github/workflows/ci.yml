@@ -59,6 +59,12 @@ jobs:
       - run: python3 tests/e2e/http_filters.py
         env:
           HYDRA_WASM_SAMPLE: ${{ github.workspace }}/plugins/examples/length-prefixed/target/wasm32-unknown-unknown/release/hydra_length_prefixed_example.wasm
+      - name: Install pinned uv for submitter acceptance
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.10.9"
+          enable-cache: false
+      - run: python3 tests/e2e/flags_controls.py
       - run: python3 tests/e2e/operations.py
       - run: python3 tests/e2e/diagnostics.py
       - name: Embedded Vue browser smoke

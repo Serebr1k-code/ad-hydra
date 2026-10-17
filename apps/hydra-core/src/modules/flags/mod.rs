@@ -1,5 +1,8 @@
 mod adapters;
+mod browse;
 mod http;
+mod imports;
+mod manual;
 mod repository;
 mod script_config;
 mod script_dispatch;
@@ -65,6 +68,30 @@ impl Flags {
                 include_str!("../../../../../migrations/0017_python_submitter.sql"),
             )
             .await?;
+        auth.db
+            .run(|db| {
+                db.pragma_update(None, "secure_delete", true)?;
+                Ok(())
+            })
+            .await?;
+        auth.db
+            .migrate(
+                18,
+                include_str!("../../../../../migrations/0018_flag_submission_controls.sql"),
+            )
+            .await?;
+        auth.db.run(|db| {
+            if repository::has_column(db,"farm_runs","service_id")? {
+                db.execute("UPDATE flags SET service_id=(SELECT service_id FROM farm_runs WHERE id=flags.run_id) WHERE service_id IS NULL AND run_id IS NOT NULL",[])?;
+            }
+            Ok(())
+        }).await?;
+        auth.db
+            .run(|db| {
+                db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+                Ok(())
+            })
+            .await?;
         let script = auth.db.run(|db| script_config::load(db)).await?;
         let farm_regex = script
             .as_ref()
@@ -104,19 +131,23 @@ impl Flags {
     }
     pub fn extract(&self, input: &[u8]) -> anyhow::Result<Vec<String>> {
         anyhow::ensure!(input.len() <= 65536, "scan input too large");
-        let text = String::from_utf8_lossy(input);
         let regex = self.farm_regex.read().unwrap_or_else(|e| e.into_inner());
+        let Some(regex) = regex.as_ref() else {
+            return Ok(Vec::new());
+        };
+        // Byte matching avoids replacement/normalization of malformed surrounding output.
+        let regex = regex::bytes::RegexBuilder::new(regex.as_str())
+            .size_limit(1024 * 1024)
+            .dfa_size_limit(1024 * 1024)
+            .build()?;
         Ok(regex
-            .as_ref()
-            .map(|r| {
-                r.find_iter(&text)
-                    .filter(|m| m.len() <= 256 && !m.is_empty())
-                    .take(256)
-                    .map(|m| m.as_str().to_owned())
-                    .collect()
-            })
-            .unwrap_or_default())
+            .find_iter(input)
+            .filter(|m| !m.is_empty() && m.len() <= 256)
+            .take(256)
+            .filter_map(|m| std::str::from_utf8(m.as_bytes()).ok().map(str::to_owned))
+            .collect())
     }
+
     pub async fn record_captured(
         &self,
         value: String,
@@ -126,7 +157,7 @@ impl Flags {
         request_id: String,
     ) -> anyhow::Result<String> {
         self.validate(&value)?;
-        let auto = run_id.is_some() || self.settings.auto_submit_captured;
+        let auto = true;
         self.insert(
             value,
             "captured".into(),
@@ -144,6 +175,22 @@ impl Flags {
         // Each committed event is replay safe; caller ACKs only after all writes succeed.
         for event in &batch.events {
             if let Some(hydra_wire::v1::event::Payload::Flag(f)) = &event.payload {
+                if f.source_kind == "own_exposed" {
+                    let key = format!("{}:{}", batch.proxy_epoch_id, event.event_id);
+                    anyhow::ensure!(
+                        key.len() <= 512 && !event.event_id.is_empty(),
+                        "invalid event identity"
+                    );
+                    let flow = event.flow_id.clone();
+                    let service = event.service_id.clone();
+                    self.auth.db.run(move|db| { let tx=db.transaction()?;
+                        if tx.query_row("SELECT count(*) FROM flag_events",[],|r|r.get::<_,i64>(0))? >= 1000000 {
+                            tx.execute("DELETE FROM flag_events WHERE rowid IN (SELECT rowid FROM flag_events ORDER BY rowid LIMIT 1000)",[])?;
+                        }
+                        tx.execute("INSERT OR IGNORE INTO flag_events(event_id,flag_id,flow_id,service_id) VALUES(?1,NULL,?2,?3)",rusqlite::params![key,flow,service])?;
+                        tx.commit()?;Ok(()) }).await?;
+                    continue;
+                }
                 Self::validate_with(self.regex.as_ref(), &f.flag_value)?;
                 let category = if f.source_kind == "own_exposed" {
                     "own_exposed"

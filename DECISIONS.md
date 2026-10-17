@@ -161,3 +161,23 @@ After durable critical commit, publish only redacted flag_detected SSE metadata,
 never flag values. Lifecycle events hydrate indexes to cover cross-stream ordering.
 Service stripes use a stable hashed HSL color, with text labels for service, Flag
 and Blocked so color is supplementary. See docs/traffic-view.md for limits.
+
+### Exact captured flags, operator batches and defensive vault removal
+
+The user's flag workflow amendment supersedes the former mandatory 30-second
+collection window and own_exposed vault retention. Preserve full UTF-8 regex
+matches byte for byte and queue captured values while paused. Dispatch due
+captures within about one second when enabled and idle, with configurable
+1–240 flags per Python call. Manual durable requests select 1–5,000 queued/retry
+flags while paused; the existing single worker splits them into bounded calls.
+Retain retry backoff, redacted gzip logs, revision checks and actor auditing.
+
+Migration 18 purges legacy defensive vault/triage/submission records, preserves
+value-free detection metadata for Traffic highlights, and prevents reinsertion of
+own_exposed vault rows. Move metadata incrementally to avoid duplicating its whole
+SQLite table. Proxy omits defensive flag values in new critical spool records;
+traffic bytes/history and rollback backups remain governed by their own retention.
+Captured values and existing submitter configuration are preserved. Add optional
+batch_size with default240, paginated /flags/page alongside legacy /flags, atomic
+regex text import, and /submitter/run. Generated OpenAPI/frontend types reflect
+these compatible additions. See docs/flags.md for limits and restart behavior.

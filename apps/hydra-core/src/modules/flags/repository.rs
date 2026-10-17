@@ -9,6 +9,8 @@ use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 #[derive(Serialize, ToSchema)]
 pub struct FlagView {
+    pub service_id: Option<String>,
+    pub state: Option<String>,
     pub id: String,
     pub digest: String,
     pub category: String,
@@ -28,7 +30,12 @@ pub struct SubmissionView {
     pub created_at: String,
     pub response: String,
 }
-fn enqueue(tx: &Transaction<'_>, id: &str, actor: &Actor, request: &str) -> anyhow::Result<()> {
+pub(super) fn enqueue(
+    tx: &Transaction<'_>,
+    id: &str,
+    actor: &Actor,
+    request: &str,
+) -> anyhow::Result<()> {
     let category: String =
         tx.query_row("SELECT category FROM flags WHERE id=?1", [id], |r| r.get(0))?;
     anyhow::ensure!(
@@ -104,6 +111,10 @@ impl Flags {
         } else {
             actor.clone()
         };
+        anyhow::ensure!(
+            category != "own_exposed",
+            "defensive flag values are not retained"
+        );
         let digest = format!("{:x}", Sha256::digest(value.as_bytes()));
         self.auth.db.run(move|db|{let tx=db.transaction()?;
             if let Some(event)=&event && let Some(id)=tx.query_row("SELECT flag_id FROM flag_events WHERE event_id=?1",[event],|r|r.get::<_,String>(0)).optional()? {return Ok(id)}
@@ -112,7 +123,10 @@ impl Flags {
             let existing=tx.query_row("SELECT id FROM flags WHERE digest=?1 AND category=?2",params![digest,category],|r|r.get::<_,String>(0)).optional()?;
             let id=existing.clone().unwrap_or_else(||uuid::Uuid::new_v4().to_string());
             let count:i64=tx.query_row("SELECT count(*) FROM flags",[],|r|r.get(0))?;anyhow::ensure!(count<100000,"flag vault full");
-            tx.execute("INSERT OR IGNORE INTO flags VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![id,digest,category,value,target,run,actor.id,now()])?;
+            let service=if let Some(run)=run.as_ref() {
+                if has_column(&tx,"farm_runs","service_id")? {tx.query_row("SELECT service_id FROM farm_runs WHERE id=?1",[run],|r|r.get::<_,Option<String>>(0)).optional()?.flatten()}else{None}
+            }else{None};
+            tx.execute("INSERT OR IGNORE INTO flags(id,digest,category,value,target_id,run_id,initiated_by,created_at,service_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![id,digest,category,value,target,run,actor.id,now(),service])?;
             if let Some(event)=event {let n:i64=tx.query_row("SELECT count(*) FROM flag_events",[],|r|r.get(0))?;anyhow::ensure!(n<1000000,"flag event quota exhausted");tx.execute("INSERT INTO flag_events(event_id,flag_id) VALUES(?1,?2)",params![event,id])?;}
             audit::append_change(&tx,&audit_actor,"flags.record",&id,&request,true,now(),&serde_json::json!({"initiated_by":actor.id,"before":{"existed":existing.is_some()},"after":{"category":category,"target_id":target,"run_id":run}}))?;
             if category=="own_exposed" {quarantine_defensive(&tx,&digest,&audit_actor,&request)?;}
@@ -133,15 +147,6 @@ impl Flags {
     }
     pub async fn list(&self, actor: Actor, request: String) -> anyhow::Result<Vec<FlagView>> {
         self.list_page(actor, request, Browse::default()).await
-    }
-    pub async fn list_page(
-        &self,
-        actor: Actor,
-        request: String,
-        browse: Browse,
-    ) -> anyhow::Result<Vec<FlagView>> {
-        browse.validate()?;
-        self.auth.db.run(move|db|{let tx=db.transaction()?;let rows=tx.prepare("SELECT id,digest,category,target_id,run_id,initiated_by,strftime('%Y-%m-%dT%H:%M:%SZ',created_at,'unixepoch')  ,(SELECT resolution FROM flag_triage WHERE flag_id=flags.id) FROM flags WHERE (?1='' OR id LIKE ?1 OR digest LIKE ?1 OR category LIKE ?1 OR target_id LIKE ?1) ORDER BY created_at DESC,id LIMIT ?2 OFFSET ?3")?.query_map(params![browse.pattern(),browse.limit(),browse.offset],|r|Ok(FlagView{id:r.get(0)?,digest:r.get(1)?,category:r.get(2)?,target_id:r.get(3)?,run_id:r.get(4)?,initiated_by:r.get(5)?,created_at:r.get(6)?,triage:r.get(7)?}))?.collect::<Result<Vec<_>,_>>()?;audit::append(&tx,&actor,"flags.list","flags",&request,true,now())?;tx.commit()?;Ok(rows)}).await
     }
     pub async fn submissions(
         &self,
@@ -165,12 +170,16 @@ impl Flags {
 #[derive(Default, Deserialize, utoipa::IntoParams)]
 #[serde(default, deny_unknown_fields)]
 pub struct Browse {
+    pub service_id: Option<String>,
+    pub state: Option<String>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
     pub offset: u32,
     pub limit: Option<u32>,
     pub search: Option<String>,
 }
 impl Browse {
-    fn validate(&self) -> anyhow::Result<()> {
+    pub(super) fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.offset <= 1000000
                 && self.limit.unwrap_or(100) > 0
@@ -178,12 +187,24 @@ impl Browse {
                 && self.search.as_ref().is_none_or(|s| s.len() <= 128),
             "invalid pagination"
         );
+        anyhow::ensure!(
+            self.sort.as_deref().is_none_or(|v| matches!(
+                v,
+                "created_at" | "service" | "target" | "category" | "state" | "digest"
+            )) && self
+                .order
+                .as_deref()
+                .is_none_or(|v| matches!(v, "asc" | "desc"))
+                && self.service_id.as_ref().is_none_or(|v| v.len() <= 128)
+                && self.state.as_ref().is_none_or(|v| v.len() <= 32),
+            "invalid sort or filter"
+        );
         Ok(())
     }
-    fn limit(&self) -> u32 {
+    pub(super) fn limit(&self) -> u32 {
         self.limit.unwrap_or(100)
     }
-    fn pattern(&self) -> String {
+    pub(super) fn pattern(&self) -> String {
         self.search
             .as_ref()
             .filter(|s| !s.is_empty())
@@ -218,6 +239,14 @@ impl Flags {
  anyhow::ensure!(category=="unknown","only unknown findings may be triaged");
  let before:Option<String>=tx.query_row("SELECT resolution FROM flag_triage WHERE flag_id=?1",[&id],|r|r.get(0)).optional()?;
  anyhow::ensure!(before.is_none(),"finding already triaged");
+ if body.resolution=="own_exposed" {
+ tx.execute("UPDATE flag_events SET flag_id=NULL WHERE flag_id=?1",[&id])?;
+ tx.execute("DELETE FROM submissions WHERE flag_id=?1",[&id])?;
+ tx.execute("DELETE FROM flag_triage WHERE flag_id=?1",[&id])?;
+ tx.execute("DELETE FROM flags WHERE id=?1",[&id])?;
+ audit::append(&tx,&actor,"flags.forget_defensive",&id,&request,true,now())?;
+ tx.commit()?;return Ok(())
+ }
  if body.resolution=="captured" {let target=body.target_id.as_ref().ok_or_else(||anyhow::anyhow!("authorized target required"))?;
  anyhow::ensure!(tx.query_row("SELECT EXISTS(SELECT 1 FROM farm_targets WHERE id=?1 AND enabled=1)",[target],|r|r.get::<_,bool>(0))?,"target not enabled");
  anyhow::ensure!(!tx.query_row("SELECT EXISTS(SELECT 1 FROM flags WHERE value=?1 AND category='own_exposed')",[&value],|r|r.get::<_,bool>(0))?,"defensive finding cannot be captured");
@@ -251,4 +280,18 @@ fn farm_target_enabled(
         return Ok(false);
     }
     Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM farm_teams t JOIN farm_runs r ON r.id=?2 JOIN farm_services s ON s.id=r.service_id WHERE t.id=?1 AND t.enabled=1 AND s.enabled=1 AND EXISTS(SELECT 1 FROM json_each(r.team_ids) WHERE value=t.id))",params![target,run],|r|r.get(0))?)
+}
+
+pub(super) fn has_column(
+    db: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+) -> anyhow::Result<bool> {
+    // Table names are constants supplied by this feature, never request input.
+    Ok(db
+        .prepare(&format!("PRAGMA table_info({table})"))?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|name| name == column))
 }

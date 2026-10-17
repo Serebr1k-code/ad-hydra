@@ -232,13 +232,13 @@ impl Telemetry {
         if values.len() == 256 {
             self.decoder_error(service, flow, "flag_findings_limit");
         }
-        for value in values {
+        for _value in values {
             self.emit(
                 service,
                 flow,
                 Payload::Flag(v1::FlagFinding {
                     finding_id: uuid::Uuid::new_v4().to_string(),
-                    flag_value: value,
+                    flag_value: String::new(),
                     source_kind: "own_exposed".into(),
                     message_id: message.into(),
                     direction: if direction == hydra_protocol_sdk::Direction::ClientToServer {

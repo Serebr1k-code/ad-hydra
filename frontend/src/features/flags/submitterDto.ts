@@ -9,7 +9,7 @@ export function pythonPackages(text: string): string[] {
 }
 export function submitterDto(value: SubmitterConfig): SubmitterConfig {
   return {
-    revision: value.revision, enabled: value.enabled, flag_pattern: value.flag_pattern,
+    batch_size: value.batch_size ?? 240, revision: value.revision, enabled: value.enabled, flag_pattern: value.flag_pattern,
     python_packages: [...(value.python_packages ?? [])], source: value.source, timeout_seconds: value.timeout_seconds,
   }
 }

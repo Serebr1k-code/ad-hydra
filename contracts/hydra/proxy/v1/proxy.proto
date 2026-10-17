@@ -301,7 +301,7 @@ message RuleHit {
 }
 message FlagFinding {
   string finding_id = 1;
-  string flag_value = 2;      // critical stream ONLY, redacted in REST/UI
+  string flag_value = 2;      // empty for own_exposed: retain detection metadata only
   string source_kind = 3;     // own_exposed / unknown, never auto-submit own flag
   string message_id = 4;
   Direction direction = 5;

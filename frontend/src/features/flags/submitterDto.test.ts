@@ -4,7 +4,7 @@ import { pythonPackages, submitterDto } from './submitterDto'
 test('submitter updates omit read-only counters and preserve source verbatim', () => {
   const config = { revision: 4, enabled: false, flag_pattern: 'FLAG\\{[^}]+\\}', python_packages: ['requests'], source: 'import sys\nprint(len(sys.argv[1:]))\n', timeout_seconds: 20, author_id: 'server-user', updated_at: 123, queued_flags: 12 }
   const result = submitterDto(config)
-  expect(result).toEqual({ revision: 4, enabled: false, flag_pattern: 'FLAG\\{[^}]+\\}', python_packages: ['requests'], source: config.source, timeout_seconds: 20 })
+  expect(result).toEqual({ batch_size: 240, revision: 4, enabled: false, flag_pattern: 'FLAG\\{[^}]+\\}', python_packages: ['requests'], source: config.source, timeout_seconds: 20 })
   expect(result.python_packages).not.toBe(config.python_packages)
 })
 test('submitter accepts optional unpinned and pinned Python dependencies', () => {

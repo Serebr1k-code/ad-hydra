@@ -13,6 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 const emit = defineEmits<{ saved: [] }>()
 const overview = ref<SubmitterView | null>(null), draft = ref<SubmitterConfig | null>(null)
 const packages = ref(''), sourceMode = ref('paste'), fileName = ref(''), fileKey = ref(0)
+const manualCount=ref(100), manualBusy=ref(false)
 const busy = ref(false), loading = ref(true), error = ref(''), notice = ref('')
 let mounted = true, polling = false, timer: ReturnType<typeof setInterval> | undefined
 const example = 'import sys\n\nflags = sys.argv[1:]\n# Submit every flag to your competition checker here.\n# Exit 0 only when the whole batch has been accepted.\n'
@@ -63,26 +64,45 @@ async function save() {
   } catch (e) { if (mounted) error.value = errorMessage(e) }
   finally { busy.value = false }
 }
+async function runNow() {
+  if(manualBusy.value)return
+  manualBusy.value=true;error.value='';notice.value=''
+  try {
+    const count=Number(manualCount.value)
+    if(!Number.isInteger(count)||count<1||count>5000)throw new Error('Choose 1 to 5000 flags.')
+    await api('/submitter/run','POST',{count})
+    notice.value=`Manual run requested for up to ${count} queued flags using the saved configuration.`
+    await load();emit('saved')
+  }catch(cause){error.value=errorMessage(cause)}
+  finally{manualBusy.value=false}
+}
 onMounted(() => { void load(true); timer = setInterval(() => { if (!busy.value) void load() }, 3000) })
 onUnmounted(() => { mounted = false; if (timer) clearInterval(timer) })
 </script>
 <template>
   <section class="space-y-4 rounded border p-4">
     <h2 class="text-lg font-semibold">Automatic flag submitter</h2>
-    <p class="text-sm text-muted-foreground">Extract flags from Farm stdout and stderr with a regular expression into the persistent queue. Every 30 seconds, the Python script receives queued flags as arguments in sys.argv[1:].</p>
+    <p class="text-sm text-muted-foreground">Extract flags from Farm stdout and stderr with a regular expression into the persistent queue. Automatic submission sends new queued flags as they arrive. The Python script receives the exact captured values in sys.argv[1:], without trimming, encoding or other transformations.</p>
     <p v-if="loading" role="status">Loading submitter…</p><Button v-if="!loading && !draft" variant="outline" @click="load(true)">Retry loading submitter</Button>
-    <div v-if="overview" class="flex flex-wrap gap-x-6 gap-y-2 text-sm" aria-live="polite"><p>State: <strong>{{ overview.config.enabled ? 'Enabled' : 'Paused' }}</strong></p><p>Queued: <strong>{{ overview.queued_flags }}</strong></p><p>Cycle: every {{ overview.interval_seconds }} seconds</p><p>Next cycle: {{ overview.config.enabled ? date(overview.next_batch_at) : 'Paused' }}</p></div>
+    <div v-if="overview" class="flex flex-wrap gap-x-6 gap-y-2 text-sm" aria-live="polite"><p>State: <strong>{{ overview.config.enabled ? 'Enabled' : 'Paused' }}</strong></p><p>Queued: <strong>{{ overview.queued_flags }}</strong></p><p>Dispatch: {{ overview.config.enabled ? 'as flags arrive' : 'manual only' }}</p></div>
     <p v-if="overview?.runtime_available === false" role="status" class="text-sm text-muted-foreground">Python execution is unavailable. Configure the host Python runtime and uv before enabling submission.</p>
     <form v-if="draft" class="space-y-3" @submit.prevent="save">
       <div class="flex items-center gap-2"><Checkbox id="submitter-enabled" v-model="draft.enabled" :disabled="busy" /><Label for="submitter-enabled">Enable automatic submission</Label></div>
-      <div><Label for="submitter-pattern">Farm output flag regex</Label><Input id="submitter-pattern" v-model="draft.flag_pattern" required :disabled="busy" placeholder="FLAG\{[A-Za-z0-9_]+\}" /><p class="text-sm text-muted-foreground">Matches are queued for submission. Use the exact flag format defined by your competition.</p></div>
+      <div><Label for="submitter-pattern">Flag extraction regex (Farm and pasted text)</Label><Input id="submitter-pattern" v-model="draft.flag_pattern" required :disabled="busy" placeholder="FLAG\{[A-Za-z0-9_]+\}" /><p class="text-sm text-muted-foreground">Matches are queued for submission. Use the exact flag format defined by your competition.</p></div>
       <div><Label for="submitter-source-mode">Python source</Label><Select id="submitter-source-mode" v-model="sourceMode" :disabled="busy"><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="paste">Paste or edit code</SelectItem><SelectItem value="file">Upload Python file</SelectItem></SelectContent></Select></div>
       <div v-if="sourceMode === 'file'"><Label for="submitter-file">UTF-8 Python file (maximum 2 MiB)</Label><Input :key="fileKey" id="submitter-file" type="file" accept=".py,text/x-python,text/plain" :disabled="busy" @change="chooseFile" /><p v-if="fileName" class="text-sm text-muted-foreground">Loaded {{ fileName }}. Review the source below, then Save.</p></div>
       <div><Label for="submitter-code">Python code</Label><Textarea id="submitter-code" v-model="draft.source" class="min-h-48 font-mono" :disabled="busy" spellcheck="false" :placeholder="example" /></div>
       <div><Label for="submitter-packages">Python dependencies (optional)</Label><Textarea id="submitter-packages" v-model="packages" :disabled="busy" placeholder="requests&#10;httpx==0.28.1" /><p class="text-sm text-muted-foreground">One package name or name==version per line, or comma separated. Compatible wheels and dependencies are prepared before execution.</p></div>
+      <div class="max-w-xs"><Label for="submitter-batch-size">Flags per Python call</Label><Input id="submitter-batch-size" v-model.number="draft.batch_size" type="number" min="1" max="240" required :disabled="busy" /></div>
       <div class="max-w-xs"><Label for="submitter-timeout">Script timeout (seconds)</Label><Input id="submitter-timeout" :model-value="draft.timeout_seconds" @update:model-value="draft.timeout_seconds = Number($event)" type="number" min="1" max="120" required :disabled="busy" /></div>
-      <p class="text-sm text-muted-foreground">Exit 0 accepts the whole batch. A failure keeps flags queued for retry, up to 10 attempts. Each call receives up to 240 flags and 60 KiB of arguments; larger cycles use multiple batches. Use checker idempotency when available to handle partial submissions safely.</p>
+      <p class="text-sm text-muted-foreground">Exit 0 accepts the whole batch. A failure keeps flags queued for retry, up to 10 attempts. Each call uses the configured count, up to 240 flags and 60 KiB; larger manual requests use multiple calls. Use checker idempotency when available to handle partial submissions safely.</p>
       <Button type="submit" :disabled="busy">{{ busy ? 'Saving…' : 'Save submitter' }}</Button>
+    </form>
+    <form class="flex flex-wrap items-end gap-3 border-t pt-4" @submit.prevent="runNow">
+      <div><Label for="submitter-manual-count">Flags to submit now (maximum)</Label><Input id="submitter-manual-count" v-model.number="manualCount" type="number" min="1" max="5000" required :disabled="manualBusy" /></div>
+      <Button type="submit" :disabled="manualBusy||!overview?.runtime_available||!overview?.config.source||['pending','running'].includes(overview?.manual_request?.status??'')">{{manualBusy?'Requesting…':'Run saved submitter now'}}</Button>
+      <p class="w-full text-sm text-muted-foreground">Works while automatic submission is paused. Uses the saved code and up to this many queued flags; fewer are sent if the queue is smaller.</p>
+      <p v-if="overview?.manual_request" role="status" class="w-full text-sm">Manual run: {{overview.manual_request.status}} · requested {{overview.manual_request.count}} · attempted {{overview.manual_request.flag_count}}</p>
     </form>
     <p v-if="error" role="alert" class="text-destructive">{{ error }}</p><p v-if="notice" role="status">{{ notice }}</p>
     <section v-if="overview?.last_batch" class="space-y-3 border-t pt-4">

@@ -18,7 +18,7 @@ Connections with a retained flag finding have an amber highlight and **Flag**
 label; their conversation header shows **Flag detected**. Findings follow the
 configured Proxy flag regex. This classification does not imply submission or
 expose flag values in the new notification. Blocked streams can also contain
-findings: check Show blocked to inspect them.
+findings: check Show blocked to inspect them. Defensive findings retain value-free flow/service metadata only; own_exposed flag values and digests are removed from the flag vault. Captured conversation bytes, traffic history and pre-migration backups can still contain observed traffic bytes.
 
 ## API and compatibility
 

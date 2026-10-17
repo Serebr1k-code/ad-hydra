@@ -3,7 +3,7 @@
 Run after building binaries: python3 tests/e2e/python_submitter.py
 Only synthetic flags are printed; no checker or target connections are made.
 uv downloads idna==3.10 into the temporary runtime cache. SQL updates advance
-only the fixture's durable dispatch clock so the test need not sleep 30 seconds.
+only the fixture's durable dispatch clock to exercise retry backoff without sleeping.
 """
 import gzip
 import json
@@ -163,10 +163,8 @@ class PythonSubmitter(unittest.TestCase):
                 time.sleep(1.2)
                 self.assertEqual(db_query('SELECT count(*) FROM flag_submitter_batches')[0][0], 0)
                 view = configure(True, good_source)
-                self.assertGreaterEqual(view['next_batch_at'], int(time.time()) + 28)
-                time.sleep(1.2)
-                self.assertIsNone(api('GET', '/submitter')['last_batch'], 'enabling must collect for 30 seconds, not dispatch immediately')
-                due()
+                self.assertEqual(view['interval_seconds'], 1)
+                self.assertLessEqual(view['next_batch_at'], int(time.time()) + 1)
                 view = wait_for('real uv successful whole-batch submission', lambda: api('GET', '/submitter'),
                                 lambda row: row['last_batch'] is not None and row['last_batch']['status'] == 'accepted', seconds=70)
                 batch = view['last_batch']
@@ -210,7 +208,7 @@ class PythonSubmitter(unittest.TestCase):
                 self.assertEqual(final['queued_flags'], 0)
                 self.assertEqual(db_query("SELECT count(*) FROM submissions WHERE state='accepted'")[0][0], 4)
                 self.assertEqual(db_query('SELECT max(attempts) FROM submissions')[0][0], 2)
-                print('PASS: real uv+idna, Farm stdout/stderr regex, durable automatic queue, 30s collection window, whole-batch acceptance, redacted gzip logs, restart, pause, failure and retry')
+                print('PASS: real uv+idna, Farm stdout/stderr regex, durable automatic queue, immediate dispatch, whole-batch acceptance, redacted gzip logs, restart, pause, failure and retry')
             finally:
                 for process in reversed(processes):
                     if process.poll() is not None:

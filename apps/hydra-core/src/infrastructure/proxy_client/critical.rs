@@ -186,7 +186,7 @@ mod tests {
         assert!(!serde_json::to_string(&finding).unwrap().contains("FLAG123"));
         assert!(live.try_recv().is_err());
         flags.auth.db.run(|db|{
-            assert_eq!(db.query_row("SELECT count(*) FROM flags",[],|r|r.get::<_,i64>(0))?,1);
+            assert_eq!(db.query_row("SELECT count(*) FROM flags",[],|r|r.get::<_,i64>(0))?,0);
             assert_eq!(db.query_row("SELECT count(*) FROM traffic_events WHERE kind='event_loss'",[],|r|r.get::<_,i64>(0))?,1);
             assert_eq!(db.query_row("SELECT through_sequence FROM critical_receipts WHERE proxy_epoch_id='epoch'",[],|r|r.get::<_,i64>(0))?,2);
             assert_eq!(db.query_row("SELECT last_event_id FROM critical_receipts",[],|r|r.get::<_,String>(0))?,"loss-id");Ok(())

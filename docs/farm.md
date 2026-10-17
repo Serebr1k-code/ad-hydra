@@ -83,19 +83,19 @@ Open **Flags → Automatic flag submitter** (also linked from Farm). Enter the c
 
 Every eligible Farm match is deduplicated into the durable flag vault and submission queue, even while submission is paused and even if the legacy `auto_submit_captured` setting is false. Farm target/run provenance is preserved. The queue holds at most 5,000 pending flags; the vault at most 100,000. Existing defensive/own-exposed findings cannot enter this queue. Unknown proxy findings still require explicit triage; this feature does not automatically submit them. Changing the regex does not rescan old run logs.
 
-Enabling or editing starts a 30-second collection window. Every due window snapshots pending eligible flags. A transient child runs the saved Python script through the configured host uv runtime:
+Enabled submission picks up due queued captures within approximately one second while idle. Each automatic cycle takes up to the saved flags-per-call setting. Manual runs take a chosen snapshot of up to 5,000 flags, even while automatic submission is paused. See [Flags and submission](flags.md). A transient child runs the saved Python script through the configured host uv runtime:
 
 ```text
 uv run --no-project [--with PACKAGE ...] python -u submit.py FLAG1 FLAG2 ...
 ```
 
-Use `sys.argv[1:]` to read flags. Hydra adds no host/port arguments. Up to 240 flags (at most 60 KiB of flag payload) are passed per call; larger queues use multiple bounded calls in the same cycle. One submitter child runs at a time, independently of the single Farm worker. The script can read `HYDRA_SUBMISSION_BATCH_ID` for the current attempt. Dependency preparation is included in the configured timeout (1–120 seconds, default 20). The runtime uses Core's OS user and the explicit host runtime setting described above; inherited Core secrets are removed from the environment.
+Use `sys.argv[1:]` to read flags. Hydra adds no host/port arguments. Set flags per call from 1 to 240 (at most 60 KiB of flag payload). Manual runs split their chosen count into calls using this setting. Full regex matches are passed unchanged, including whitespace, case and Unicode; the entire match, not an individual capture group, is the flag. One submitter child runs at a time, independently of the single Farm worker. The script can read `HYDRA_SUBMISSION_BATCH_ID` for the current attempt. Dependency preparation is included in the configured timeout (1–120 seconds, default 20). The runtime uses Core's OS user and the explicit host runtime setting described above; inherited Core secrets are removed from the environment.
 
 The script implements the actual competition checker protocol and interprets its reply. **Exit 0 means every flag in that call was accepted.** A nonzero exit, timeout, unavailable runtime, or interrupted attempt leaves flags queued for retry after at least 30 seconds; ten failed attempts mark them failed. Pausing or editing prevents subsequent chunks from starting with the old revision; a child already claimed may finish. On restart or persistence failure, interrupted claims recover to retry. An external checker may have accepted a flag before a script fails or Core stops, so the checker/script should handle duplicate submissions. Partial acceptance is not inferred from printed output.
 
 The queue, next dispatch time and last batch state/stdout/stderr are visible in Flags. Diagnostic output redacts known flag values and is stored as gzip, with at most 64 KiB per stream. Completed batch logs rotate after 7 days or 500 records; audit records remain. Limits and retries are enforced by Core, independently of the Vue polling interval. Host uv package caches persist between runs and require normal operator disk maintenance.
 
-The generated OpenAPI describes authenticated `GET /api/v1/submitter` and revision-checked `PUT /api/v1/submitter`. No internal gRPC or raw traffic contract changed. Existing private checker adapters remain supported until a Python submitter configuration is saved; a saved paused Python configuration keeps automatic sending paused.
+The generated OpenAPI describes authenticated `GET /api/v1/submitter`, revision-checked `PUT /api/v1/submitter`, and `POST /api/v1/submitter/run`. No internal gRPC or raw traffic contract changed. Existing private checker adapters remain supported until a Python submitter configuration is saved; a saved paused Python configuration keeps automatic sending paused.
 
 For harmless end-to-end verification with real uv and a pinned dependency:
 
@@ -104,4 +104,4 @@ cargo build --locked -p hydra-core -p hydra-proxy
 python3 tests/e2e/python_submitter.py
 ```
 
-The fixture starts its own Core/Proxy with temporary databases and loopback-only configuration. It prints synthetic flags, tests collection/acceptance/retry/restart and gzip redaction, and never contacts a competition service or checker. It advances only its own dispatch-clock rows to avoid waiting through each 30-second window.
+The fixture starts its own Core/Proxy with temporary databases and loopback-only configuration. It prints synthetic flags, tests collection/acceptance/retry/restart and gzip redaction, and never contacts a competition service or checker. It advances only its own retry timestamps to avoid waiting through retry backoff.

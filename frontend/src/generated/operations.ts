@@ -112,9 +112,17 @@ export const operations = {
     "method": "GET",
     "path": "/api/v1/filters"
   },
+  "flags_import": {
+    "method": "POST",
+    "path": "/api/v1/flags/import"
+  },
   "flags_list": {
     "method": "GET",
     "path": "/api/v1/flags"
+  },
+  "flags_page": {
+    "method": "GET",
+    "path": "/api/v1/flags/page"
   },
   "flow": {
     "method": "GET",
@@ -231,6 +239,10 @@ export const operations = {
   "submitter_configure": {
     "method": "PUT",
     "path": "/api/v1/submitter"
+  },
+  "submitter_run": {
+    "method": "POST",
+    "path": "/api/v1/submitter/run"
   },
   "target": {
     "method": "PUT",
