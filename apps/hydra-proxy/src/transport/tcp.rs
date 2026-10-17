@@ -262,6 +262,10 @@ fn inspect_message(
         "server_to_client"
     };
     let mut fields = network_fields(c.config, c.client, direction);
+    fields.insert(
+        "packet.size".into(),
+        hydra_domain::FieldValue::Uint(size as u64),
+    );
     fields.extend(
         message
             .fields
@@ -289,19 +293,22 @@ fn inspect_raw(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
                             }),
                     )
                 } else if d.is_stream_decoder() {
-                    Some(
-                        d.feed(direction, bytes).map(|messages| {
-                            messages.into_iter().map(|m| (m, 0)).collect::<Vec<_>>()
-                        }),
-                    )
+                    Some(d.feed(direction, bytes).map(|messages| {
+                        messages
+                            .into_iter()
+                            .map(|m| (m, bytes.len()))
+                            .collect::<Vec<_>>()
+                    }))
                 } else {
                     None
                 }
             } else if d.is_stream_decoder() {
-                Some(
-                    d.feed(direction, bytes)
-                        .map(|messages| messages.into_iter().map(|m| (m, 0)).collect::<Vec<_>>()),
-                )
+                Some(d.feed(direction, bytes).map(|messages| {
+                    messages
+                        .into_iter()
+                        .map(|m| (m, bytes.len()))
+                        .collect::<Vec<_>>()
+                }))
             } else {
                 None
             }
@@ -344,22 +351,19 @@ fn inspect_raw(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
             }
         }
     }
+    let direction = if direction == Direction::ClientToServer {
+        "client_to_server"
+    } else {
+        "server_to_client"
+    };
+    let mut fields = network_fields(c.config, c.client, direction);
+    fields.insert(
+        "packet.size".into(),
+        hydra_domain::FieldValue::Uint(bytes.len() as u64),
+    );
     matches!(
-        c.telemetry.evaluate(
-            c.config,
-            &c.flow.id,
-            &network_fields(
-                c.config,
-                c.client,
-                if direction == Direction::ClientToServer {
-                    "client_to_server"
-                } else {
-                    "server_to_client"
-                }
-            ),
-            false,
-            ""
-        ),
+        c.telemetry
+            .evaluate(c.config, &c.flow.id, &fields, false, ""),
         Some(Action::DropConnection)
     )
 }

@@ -4,17 +4,20 @@ import type { FilterInput, ListResponse } from '@/generated/contracts'
 import { api, errorMessage } from '@/shared/api/client'
 import { openEditor } from '@/shared/editor'
 import { date } from '@/shared/format'
+import FilterEditorDialog, { type FilterRecord } from './FilterEditorDialog.vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import DataTable from '@/components/DataTable.vue'
 
-type Filter = Omit<FilterInput, 'expected_revision'> & { id: string; created_at: string; updated_at: string; created_by: string; updated_by: string; hit_count: number; desired_revision: number; applied_revision: number; desired_enabled: boolean; applied_enabled: boolean | null }
+type Filter = FilterRecord & { updated_at: string; updated_by: string; desired_revision: number; applied_revision: number; desired_enabled: boolean; applied_enabled: boolean | null }
 type Filters = Omit<ListResponse, 'items'> & { items: Filter[] }
 const data = ref<Filters | null>(null)
-const serviceId = ref('')
+const services = ref<Array<{ id: string; name: string }>>([])
 const busy = ref(false)
+const editorOpen = ref(false)
+const editing = ref<Filter | undefined>()
 const error = ref('')
 const notice = ref('')
 const query = ref('')
@@ -36,21 +39,28 @@ async function load(cursor = after.value) {
   busy.value = true
   error.value = ''
   try {
-    const [filters, services] = await Promise.all([api<Filters>(`/filters?q=${encodeURIComponent(query.value)}&after=${encodeURIComponent(cursor)}`), api<ListResponse>('/services')])
+    const [filters, serviceResponse] = await Promise.all([api<Filters>(`/filters?q=${encodeURIComponent(query.value)}&after=${encodeURIComponent(cursor)}`), api<ListResponse>('/services')])
     data.value = filters
-    serviceId.value = typeof services.items[0]?.id === 'string' ? services.items[0].id : ''
+    services.value = serviceResponse.items.flatMap(item => typeof item.id === 'string' ? [{ id: item.id, name: typeof item.name === 'string' ? item.name : item.id }] : [])
     after.value = cursor
     selected.value = []
   } catch (cause) { error.value = errorMessage(cause) }
   finally { busy.value = false }
 }
 function edit(filter?: Filter) {
-  const initial = filter ? { service_id: filter.service_id, name: filter.name, description: filter.description, enabled: filter.enabled, mode: filter.mode, priority: filter.priority, expression: filter.expression, action: filter.action, backend: filter.backend, expires_at_ms: filter.expires_at_ms } : { service_id: serviceId.value, name: 'New filter', description: '', enabled: true, mode: 'shadow', priority: 10, expression: { field: 'http.path', op: 'prefix', value: { type: 'string', value: '/blocked' } }, action: { type: 'block', http_status: 403 }, backend: 'userspace', expires_at_ms: null }
-  openEditor(filter ? 'Edit filter' : 'Create shadow filter', initial, async value => {
+  editing.value = filter
+  editorOpen.value = true
+}
+async function saveFilter(value: Omit<FilterInput, 'expected_revision'>) {
+  busy.value = true
+  error.value = ''
+  try {
     const current = await api<ListResponse>('/filters')
-    await api(`/filters${filter ? '/' + encodeURIComponent(filter.id) : ''}`, filter ? 'PATCH' : 'POST', { ...value, expected_revision: current.revision })
+    await api(`/filters${editing.value ? '/' + encodeURIComponent(editing.value.id) : ''}`, editing.value ? 'PATCH' : 'POST', { ...value, expected_revision: current.revision })
+    editorOpen.value = false
     await load('')
-  })
+  } catch (cause) { error.value = errorMessage(cause) }
+  finally { busy.value = false }
 }
 async function mutate(action: () => Promise<unknown>) {
   busy.value = true
@@ -91,6 +101,7 @@ onMounted(() => load(''))
 
 <template>
   <section class="space-y-4">
+    <FilterEditorDialog v-model:open="editorOpen" :busy="busy" :error="error" :services="services" :filter="editing" @save="saveFilter" />
     <h1 class="text-2xl font-semibold">Filters</h1>
     <div class="flex flex-wrap items-center gap-3">
       <Input v-model="query" class="max-w-xs" placeholder="Search filters" aria-label="Search filters" @change="load('')" />

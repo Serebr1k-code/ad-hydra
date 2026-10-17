@@ -107,6 +107,35 @@ fn regex_input_is_not_truncated_into_match() {
             .is_empty()
     );
 }
+
+#[test]
+fn http_body_and_packet_size_fields_are_available_to_visual_rules() {
+    let mut body = rule("body", Action::Alert);
+    body.expression = Expression::Not {
+        not: Box::new(Expression::Predicate {
+            field: "http.body_text".into(),
+            op: Comparison::Regex,
+            value: FieldValue::String("^Z(?:I[^U]|[^I]).*$".into()),
+        }),
+    };
+    let mut size = rule("size", Action::Log);
+    size.expression = Expression::Predicate {
+        field: "packet.size".into(),
+        op: Comparison::Gt,
+        value: FieldValue::Uint(512_000),
+    };
+    let fields = BTreeMap::from([
+        (
+            "http.body_text".into(),
+            FieldValue::String("ordinary body".into()),
+        ),
+        ("packet.size".into(), FieldValue::Uint(600_000)),
+    ]);
+    let result = compile(vec![body, size])
+        .unwrap()
+        .evaluate(&context(&fields));
+    assert_eq!(result.hits.len(), 2);
+}
 #[test]
 fn typed_comparisons_and_membership() {
     for (op, expected) in [

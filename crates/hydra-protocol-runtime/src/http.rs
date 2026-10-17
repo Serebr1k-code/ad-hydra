@@ -165,6 +165,12 @@ impl HttpDecoder {
                 break;
             }
             fields.insert("http.body_length".into(), Value::Unsigned(length as u64));
+            let body = &self.buffer[end..end + length];
+            if body.len() <= 16_000
+                && let Ok(text) = std::str::from_utf8(body)
+            {
+                fields.insert("http.body_text".into(), Value::String(text.to_owned()));
+            }
             self.responses.request(parts[0]);
             let bytes = self.buffer.drain(..end + length).collect();
             requests.push(HttpRequest {

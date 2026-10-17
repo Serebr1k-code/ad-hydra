@@ -69,15 +69,19 @@ impl Context {
                         "server_to_client"
                     },
                 );
+                fields.insert(
+                    "packet.size".into(),
+                    hydra_domain::FieldValue::Uint(bytes.len() as u64),
+                );
                 fields.extend(
                     message
                         .fields
                         .iter()
                         .map(|(k, v)| (k.clone(), domain_value(v))),
                 );
-                let message_id = self
-                    .telemetry
-                    .message(&self.config.id, &self.flow.id, message, 0);
+                let message_id =
+                    self.telemetry
+                        .message(&self.config.id, &self.flow.id, message, bytes.len());
                 let action = self.telemetry.evaluate(
                     &self.config,
                     &self.flow.id,
@@ -96,15 +100,22 @@ impl Context {
                 self.telemetry.evaluate(
                     &self.config,
                     &self.flow.id,
-                    &network_fields(
-                        &self.config,
-                        self.client,
-                        if direction == Direction::ClientToServer {
-                            "client_to_server"
-                        } else {
-                            "server_to_client"
-                        }
-                    ),
+                    &{
+                        let mut fields = network_fields(
+                            &self.config,
+                            self.client,
+                            if direction == Direction::ClientToServer {
+                                "client_to_server"
+                            } else {
+                                "server_to_client"
+                            },
+                        );
+                        fields.insert(
+                            "packet.size".into(),
+                            hydra_domain::FieldValue::Uint(bytes.len() as u64),
+                        );
+                        fields
+                    },
                     false,
                     ""
                 ),

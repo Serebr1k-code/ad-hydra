@@ -123,8 +123,9 @@ class Browser(unittest.TestCase):
                     self.assertEqual(r.getheader('X-Content-Type-Options'),'nosniff')
                     self.assertIn('immutable',r.getheader('Cache-Control'))
                     self.assertGreater(len(bundle),1000)
-                processes.append(subprocess.Popen([chrome,'--headless','--no-sandbox','--disable-gpu','--disable-background-networking','--disable-component-update','--no-first-run','--ignore-certificate-errors',f'--user-data-dir={tmp / "chrome"}',f'--remote-debugging-port={debug}','about:blank'],stdout=log,stderr=log))
-                for _ in range(100):
+                processes.append(subprocess.Popen([chrome,'--headless','--no-sandbox','--disable-gpu','--disable-dev-shm-usage','--disable-background-networking','--disable-component-update','--no-first-run','--ignore-certificate-errors',f'--user-data-dir={tmp / "chrome"}',f'--remote-debugging-port={debug}','about:blank'],stdout=log,stderr=log))
+                # GitHub's shared hosted runners can take several seconds to start Chrome.
+                for _ in range(300):
                     try:
                         c=http.client.HTTPConnection('127.0.0.1',debug,timeout=2);c.request('GET','/json/list');targets=json.loads(c.getresponse().read());c.close()
                         target=next(t for t in targets if t['type']=='page');break
@@ -224,11 +225,20 @@ class Browser(unittest.TestCase):
                 wait("document.querySelector('#traffic-stream').innerText.includes('/browser-stream')")
                 for section in ['Filters','Traffic','Protocols','Farm','Flags','Settings','Users / audit']:
                     cdp.evaluate(f"[...document.querySelectorAll('nav button')].find(b=>b.textContent==={json.dumps(section)}).click()")
-                    expected = {'Users / audit':'Users and audit','Farm':'Exploit farm','Flags':'Flag Vault'}.get(section,section)
+                    expected = {'Users / audit':'Users and audit','Farm':'Exploit farm','Flags':'Flag Manager'}.get(section,section)
                     wait(f"document.querySelector('#page h1')?.textContent==={json.dumps(expected)}")
                     wait("!document.querySelector('#page').innerText.includes('Loading')")
                     self.assertFalse(cdp.evaluate("document.querySelector('#error').textContent"))
                     self.assertFalse(cdp.evaluate("[...document.querySelectorAll('#page [role=alert]')].some(e=>e.textContent.trim())"),cdp.evaluate("document.querySelector('#page').innerText"))
+                    if section == 'Filters':
+                        cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add filter').click()")
+                        wait("Boolean(document.querySelector('[role=dialog]')?.innerText.includes('Match conditions'))")
+                        self.assertFalse(cdp.evaluate("Boolean(document.querySelector('[role=dialog] textarea:not(#filter-description)'))"), 'Filter editor must not request an expression JSON textarea')
+                        self.assertTrue(cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].some(b=>b.textContent==='Add group')"))
+                        cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Add group').click()")
+                        wait("document.querySelectorAll('[role=dialog] [aria-label=\"Group match mode\"]').length===2")
+                        cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Cancel').click()")
+                        wait("!document.querySelector('[role=dialog]')")
                 self.assertIn('alice',cdp.evaluate("document.querySelector('#page').innerText"))
                 cdp.evaluate("document.querySelector('#logout').click()")
                 wait("document.querySelector('#login') && !document.querySelector('#login').hidden")

@@ -61,6 +61,10 @@ fn requests_fragment_body_pipeline_and_exact_bytes() {
         requests[0].message.fields["http.user_agent"],
         Value::String("Hydra".into())
     );
+    assert_eq!(
+        requests[0].message.fields["http.body_text"],
+        Value::String("abc".into())
+    );
     assert!(!d.has_pending());
 }
 #[test]

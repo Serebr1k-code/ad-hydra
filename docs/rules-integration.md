@@ -1,5 +1,20 @@
 # Rule engine integration
 
+The Vue Filters page uses a visual rule builder instead of an expression JSON
+editor. Add conditions or nested groups, choose `all (AND)` or `any (OR)` for
+each group, and select the comparison from the field type. String operators
+include equals, contains, prefix, regex match and regex non-match. Numeric
+comparisons accept plain byte counts or human-readable binary/decimal suffixes
+such as `512kb`, `512KiB`, and `2MiB`; values are sent as typed unsigned
+integers. The UI serializes groups and negated regexes to the existing API
+expression tree, so no contract migration is needed.
+
+Built-in filterable fields include HTTP method, path, user agent, UTF-8 request
+body (up to 16,000 bytes), HTTP body length, observed message size, client/server
+IP and port, transport and direction. Protocol decoder fields are available by
+their `protocol.*` path. Non-UTF-8 or oversized request bodies are omitted from
+the text field rather than silently truncated before matching.
+
 `hydra-domain` owns pure rule types and typed field values (`rules.rs`).
 `hydra-filter-engine` reexports these types and owns compilation, evaluation and
 `NetworkFilterBackend` / `UserspaceBackend`. It has no application, transport,
