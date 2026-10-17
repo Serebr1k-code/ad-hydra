@@ -96,6 +96,10 @@ export const operations = {
     "method": "GET",
     "path": "/api/v1/traffic/flows/{id}"
   },
+  "flow_history": {
+    "method": "GET",
+    "path": "/api/v1/traffic/flows/{id}/history"
+  },
   "flows": {
     "method": "GET",
     "path": "/api/v1/traffic/flows"

@@ -80,6 +80,52 @@ fn ambiguous_http_fails_and_raw_has_no_fake_messages() {
             .is_empty()
     );
 }
+
+#[test]
+fn utf8_decoder_handles_fragmented_and_invalid_text_without_losing_data() {
+    let mut decoder = SessionDecoder::Utf8(hydra_protocol_runtime::Utf8Decoder::default());
+    assert!(
+        decoder
+            .feed(Direction::ClientToServer, &[0xe2, 0x82])
+            .unwrap()
+            .is_empty()
+    );
+    let messages = decoder
+        .feed(Direction::ClientToServer, &[0xac, b' ', 0xff, b'!'])
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].protocol, "utf8");
+    assert_eq!(messages[0].message_type, "text");
+    assert_eq!(messages[0].direction, Direction::ClientToServer);
+    assert_eq!(
+        messages[0].fields["utf8.text"],
+        Value::String("€ �!".into())
+    );
+    let other = decoder.feed(Direction::ServerToClient, b"reply").unwrap();
+    assert_eq!(other[0].direction, Direction::ServerToClient);
+    assert_eq!(other[0].fields["utf8.text"], Value::String("reply".into()));
+}
+
+#[test]
+fn utf8_decoder_splits_large_reads_into_bounded_text_events() {
+    let mut decoder = SessionDecoder::Utf8(hydra_protocol_runtime::Utf8Decoder::default());
+    let input = vec![b'a'; 16 * 1024];
+    let messages = decoder.feed(Direction::ClientToServer, &input).unwrap();
+    assert!(messages.len() > 1);
+    assert!(messages.len() <= 8);
+    let joined = messages
+        .iter()
+        .map(|message| match &message.fields["utf8.text"] {
+            Value::String(value) => value.as_str(),
+            _ => panic!("text field must be a string"),
+        })
+        .collect::<String>();
+    assert_eq!(joined, "a".repeat(16 * 1024));
+    assert!(messages.iter().all(|m| match &m.fields["utf8.text"] {
+        Value::String(value) => value.len() <= 4096,
+        _ => false,
+    }));
+}
 #[test]
 fn failed_pipeline_recovers_every_unforwarded_byte() {
     let bytes = b"GET /a HTTP/1.1\r\n\r\nGET /bad HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
@@ -196,4 +242,250 @@ fn optional_metadata_is_typed_bounded_and_legacy_compatible() {
             );
         }
     }
+}
+
+#[test]
+fn server_response_fragmented_text_is_indexed_without_consuming_pending_request() {
+    let mut d = HttpDecoder::default();
+    d.feed(Direction::ClientToServer, b"GET / HTTP/1.1\r\n\r\n")
+        .unwrap();
+    d.feed(Direction::ClientToServer, b"GET /next HT").unwrap();
+    assert!(
+        d.feed(
+            Direction::ServerToClient,
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhe"
+        )
+        .unwrap()
+        .is_empty()
+    );
+    let messages = d.feed(Direction::ServerToClient, b"llo").unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].message.direction, Direction::ServerToClient);
+    assert_eq!(
+        messages[0].message.fields["http.status_code"],
+        Value::Unsigned(200)
+    );
+    assert_eq!(
+        messages[0].message.fields["http.body_text"],
+        Value::String("hello".into())
+    );
+    assert_eq!(d.take_pending(), b"GET /next HT");
+}
+
+#[test]
+fn response_pipeline_head_informational_chunked_and_close_delimited() {
+    let mut d = HttpDecoder::default();
+    d.feed(
+        Direction::ClientToServer,
+        b"HEAD / HTTP/1.1\r\n\r\nGET / HTTP/1.1\r\n\r\nGET / HTTP/1.1\r\n\r\n",
+    )
+    .unwrap();
+    let frames = d.feed(Direction::ServerToClient, b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nHTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n2;ext=yes\r\n{}\r\n0\r\nX-Trailer: value\r\n\r\nHTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\nbye").unwrap();
+    assert_eq!(frames.len(), 3);
+    assert_eq!(
+        frames[0].message.fields["http.body_length"],
+        Value::Unsigned(0)
+    );
+    assert_eq!(
+        frames[1].message.fields["http.status_code"],
+        Value::Unsigned(100)
+    );
+    assert_eq!(
+        frames[2].message.fields["http.body_text"],
+        Value::String("{}".into())
+    );
+    let final_frame = d.finish_response().unwrap();
+    assert_eq!(
+        final_frame[0].message.fields["http.body_text"],
+        Value::String("bye".into())
+    );
+}
+
+#[test]
+fn response_failure_does_not_disable_request_inspection() {
+    let mut d = HttpDecoder::default();
+    assert!(
+        d.feed(
+            Direction::ServerToClient,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n"
+        )
+        .is_err()
+    );
+    assert_eq!(
+        d.feed(
+            Direction::ClientToServer,
+            b"GET /still-works HTTP/1.1\r\n\r\n"
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+    assert!(
+        d.feed(Direction::ServerToClient, b"opaque")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn response_preview_bounded_utf8_and_binary_not_logged() {
+    for (content_type, encoding, expected) in [
+        ("text/plain", "identity", true),
+        ("application/octet-stream", "identity", false),
+        ("text/plain", "gzip", false),
+    ] {
+        let mut d = HttpDecoder::default();
+        let body = "€".repeat(2000);
+        let input = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Encoding: {encoding}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let frames = d.feed(Direction::ServerToClient, input.as_bytes()).unwrap();
+        let fields = &frames[0].message.fields;
+        assert_eq!(fields["http.body_length"], Value::Unsigned(6000));
+        assert_eq!(fields["http.body_preview_truncated"], Value::Bool(true));
+        assert_eq!(fields.contains_key("http.body_text"), expected);
+        if expected {
+            assert!(matches!(&fields["http.body_text"], Value::String(s) if s.len() == 4095));
+        }
+    }
+    let mut d = HttpDecoder::default();
+    assert!(
+        d.feed(
+            Direction::ServerToClient,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 999999999999\r\n\r\n"
+        )
+        .is_err()
+    );
+}
+
+fn header(name: &str, value: &str) -> Value {
+    Value::Object(std::collections::BTreeMap::from([
+        ("name".into(), Value::String(name.into())),
+        ("value".into(), Value::String(value.into())),
+    ]))
+}
+
+#[test]
+fn request_and_response_headers_preserve_order_duplicates_case_and_whitespace() {
+    let mut decoder = HttpDecoder::default();
+    let request = b"GET / HTTP/1.1\r\nHost: hydra.test\r\nX-Custom:\t first \t\r\nx-custom:second\r\nCookie: session=observed\r\n\r\n";
+    let messages = decoder.feed(Direction::ClientToServer, request).unwrap();
+    assert_eq!(messages[0].bytes, request);
+    assert_eq!(
+        messages[0].message.fields["http.headers"],
+        Value::List(vec![
+            header("Host", " hydra.test"),
+            header("X-Custom", "\t first \t"),
+            header("x-custom", "second"),
+            header("Cookie", " session=observed"),
+        ])
+    );
+    let response = b"HTTP/1.1 200 OK\r\nSet-Cookie: a=one\r\nset-cookie:\tb=two \r\nX-Empty:\r\nContent-Length: 0\r\n\r\n";
+    let messages = decoder.feed(Direction::ServerToClient, response).unwrap();
+    assert_eq!(messages[0].bytes, response);
+    assert_eq!(
+        messages[0].message.fields["http.headers"],
+        Value::List(vec![
+            header("Set-Cookie", " a=one"),
+            header("set-cookie", "\tb=two "),
+            header("X-Empty", ""),
+            header("Content-Length", " 0"),
+        ])
+    );
+}
+
+#[test]
+fn headers_have_explicit_byte_and_count_bounds_in_both_directions() {
+    for direction in [Direction::ClientToServer, Direction::ServerToClient] {
+        let start = if direction == Direction::ClientToServer {
+            "GET / HTTP/1.1\r\n"
+        } else {
+            "HTTP/1.1 204 No Content\r\n"
+        };
+        let fixed = start.len() + "X:\r\n\r\n".len();
+        let accepted = format!("{start}X:{}\r\n\r\n", "v".repeat(16_384 - fixed));
+        let mut decoder = HttpDecoder::default();
+        let messages = decoder.feed(direction, accepted.as_bytes()).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].message.fields["http.headers"],
+            Value::List(vec![header("X", &"v".repeat(16_384 - fixed))])
+        );
+        let oversized = format!("{start}X:{}\r\n\r\n", "v".repeat(16_385 - fixed));
+        assert!(
+            HttpDecoder::default()
+                .feed(direction, oversized.as_bytes())
+                .is_err()
+        );
+        let accepted = format!("{start}{}\r\n", "X:v\r\n".repeat(128));
+        let messages = HttpDecoder::default()
+            .feed(direction, accepted.as_bytes())
+            .unwrap();
+        assert!(
+            matches!(&messages[0].message.fields["http.headers"], Value::List(headers) if headers.len()==128)
+        );
+        let excessive = format!("{start}{}\r\n", "X:v\r\n".repeat(129));
+        assert!(
+            HttpDecoder::default()
+                .feed(direction, excessive.as_bytes())
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn chunked_response_trailers_preserve_all_headers_and_leave_pipeline_intact() {
+    let mut decoder = HttpDecoder::default();
+    let first = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: X-Result\r\n\r\n2\r\nOK\r\n0\r\nX-Result: first\r\nx-result:\tsecond \r\nX-Empty:\r\n";
+    assert!(
+        decoder
+            .feed(Direction::ServerToClient, first)
+            .unwrap()
+            .is_empty()
+    );
+    let messages = decoder
+        .feed(
+            Direction::ServerToClient,
+            b"\r\nHTTP/1.1 204 No Content\r\n\r\n",
+        )
+        .unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].bytes, [first.as_slice(), b"\r\n"].concat());
+    assert_eq!(
+        messages[0].message.fields["http.body_length"],
+        Value::Unsigned(2)
+    );
+    assert_eq!(
+        messages[0].message.fields["http.trailers"],
+        Value::List(vec![
+            header("X-Result", " first"),
+            header("x-result", "\tsecond "),
+            header("X-Empty", ""),
+        ])
+    );
+    assert!(!messages[1].message.fields.contains_key("http.trailers"));
+}
+
+#[test]
+fn chunked_response_trailer_bytes_count_and_syntax_are_bounded() {
+    let prefix = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n";
+    for (trailers, accepted) in [
+        ("X:v\r\n".repeat(128), true),
+        ("X:v\r\n".repeat(129), false),
+        (format!("X:{}\r\n", "v".repeat(16_384 - 6)), true),
+        (format!("X:{}\r\n", "v".repeat(16_385 - 6)), false),
+        ("Not a header\r\n".into(), false),
+        ("X:bad\u{7f}\r\n".into(), false),
+    ] {
+        let input = format!("{prefix}{trailers}\r\n");
+        let result = HttpDecoder::default().feed(Direction::ServerToClient, input.as_bytes());
+        assert_eq!(result.is_ok(), accepted);
+    }
+    let incomplete = format!("{prefix}X:{}", "v".repeat(16_384));
+    assert!(
+        HttpDecoder::default()
+            .feed(Direction::ServerToClient, incomplete.as_bytes())
+            .is_err()
+    );
 }

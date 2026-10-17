@@ -22,6 +22,7 @@ impl From<&ServiceSnapshot> for v1::ApplyServiceSnapshotRequest {
                     upstream_address: s.upstream_address.to_string(),
                     protocol_id: s.protocol_id.clone(),
                     enabled: s.enabled,
+                    retain_history: s.retain_history,
                 })
                 .collect(),
             ..Default::default()
@@ -52,6 +53,7 @@ impl TryFrom<&v1::ApplyServiceSnapshotRequest> for ServiceSnapshot {
                         .map_err(|_| "invalid numeric upstream endpoint")?,
                     protocol_id: s.protocol_id.clone(),
                     enabled: s.enabled,
+                    retain_history: s.retain_history,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -84,6 +86,26 @@ mod tests {
             ServiceSnapshot::try_from(&v1::ApplyServiceSnapshotRequest::from(&snapshot)).unwrap(),
             snapshot
         );
+    }
+
+    #[test]
+    fn service_history_setting_survives_protobuf_snapshot_round_trip() {
+        let snapshot: ServiceSnapshot = serde_json::from_value(serde_json::json!({
+            "revision": 7,
+            "services": [{
+                "id": "svc",
+                "transport": "tcp",
+                "listen_address": "127.0.0.1:2001",
+                "upstream_address": "127.0.0.1:2002",
+                "protocol_id": "raw",
+                "enabled": true,
+                "retain_history": false
+            }]
+        }))
+        .unwrap();
+        let wire = v1::ApplyServiceSnapshotRequest::from(&snapshot);
+        let decoded = ServiceSnapshot::try_from(&wire).unwrap();
+        assert_eq!(decoded, snapshot);
     }
 }
 

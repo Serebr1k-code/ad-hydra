@@ -10,8 +10,8 @@ describe('bounded live metadata', () => {
   expect(frames.push('}\n\nevent: loss\ndata: 2\n\n')).toEqual(['event: message\ndata: {}','event: loss\ndata: 2'])
  })
  test('rejects an oversized incomplete and complete frame', () => {
-  expect(() => new EventFrames().push('x'.repeat(131073))).toThrow('limit')
-  expect(() => new EventFrames().push('x'.repeat(131073)+'\n\n')).toThrow('limit')
+  expect(() => new EventFrames().push('x'.repeat(262145))).toThrow('limit')
+  expect(() => new EventFrames().push('x'.repeat(262145)+'\n\n')).toThrow('limit')
  })
 })
 test('API build prefix is normalized and generated path values are encoded', () => {

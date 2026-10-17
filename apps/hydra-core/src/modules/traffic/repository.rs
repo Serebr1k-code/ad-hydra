@@ -17,6 +17,8 @@ pub struct Traffic {
 pub struct Query {
     pub after: Option<i64>,
     pub limit: Option<usize>,
+    /// Descending ingestion order with an exclusive older-than cursor; default remains oldest-first.
+    pub newest_first: Option<bool>,
     pub service_id: Option<String>,
     pub client_ip: Option<String>,
     pub since_ms: Option<i64>,
@@ -163,8 +165,10 @@ impl Traffic {
             let messages=flow.is_some();
             let table=if messages {"traffic_messages"} else {"traffic_flows"};
             let flow_ref=if messages {"t.flow_id"} else {"t.id"};
-            let mut sql=format!("SELECT t.seq,t.data FROM {table} t WHERE t.seq>?");
-            let mut values=vec![Sql::Integer(q.after.unwrap_or(0))];
+            let newest = q.newest_first.unwrap_or(false);
+            let comparison = if newest { "<" } else { ">" };
+            let mut sql=format!("SELECT t.seq,t.data FROM {table} t WHERE t.seq{comparison}?");
+            let mut values=vec![Sql::Integer(q.after.unwrap_or(if newest {i64::MAX}else{0}))];
             { let mut add=|clause:&str,value:Sql| {sql.push_str(clause);values.push(value);};
             if let Some(v)=flow {add(" AND t.flow_id=?",v.into());}
             if let Some(v)=q.service_id {add(" AND t.service_id=?",v.into());}
@@ -190,7 +194,7 @@ impl Traffic {
                 }
                 sql.push(')');
             }
-            sql.push_str(" ORDER BY t.seq LIMIT ?");values.push(Sql::Integer((limit+1) as i64));
+            sql.push_str(if newest {" ORDER BY t.seq DESC LIMIT ?"}else{" ORDER BY t.seq LIMIT ?"});values.push(Sql::Integer((limit+1) as i64));
             let mut stmt=db.prepare(&sql)?;
             let rows=stmt.query_map(rusqlite::params_from_iter(values),|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?;
             let next_cursor=if rows.len()>limit {Some(rows[limit-1].0)}else{None};
@@ -278,11 +282,15 @@ fn convert(event: proto::Event) -> anyhow::Result<Row> {
         }
         Some(Payload::FlowClosed(f)) => (
             "flow_closed",
-            json!({"bytes_client_to_server":f.bytes_client_to_server.to_string(),"bytes_server_to_client":f.bytes_server_to_client.to_string(),"reason":f.reason}),
+            json!({"bytes_client_to_server":f.bytes_client_to_server.to_string(),"bytes_server_to_client":f.bytes_server_to_client.to_string(),"reason":f.reason,"history_truncated":f.history_truncated}),
         ),
         Some(Payload::Message(m)) => {
             anyhow::ensure!(
-                !m.message_id.is_empty() && m.message_id.len() <= 128,
+                !m.message_id.is_empty()
+                    && m.message_id.len() <= 128
+                    && m.protocol_id.len() <= 128
+                    && m.message_type.len() <= 128
+                    && m.sample_id.len() <= 128,
                 "invalid message id"
             );
             message_id = m.message_id.clone();
@@ -323,6 +331,9 @@ fn convert(event: proto::Event) -> anyhow::Result<Row> {
     object.insert("occurred_ms".into(), at.into());
     object.insert("kind".into(), kind.into());
     let data = serde_json::to_string(&data)?;
+    // Keep this aligned with the SQLite CHECK constraints in migrations 0003
+    // and 0005. INSERT OR IGNORE treats a CHECK violation as an ignored row,
+    // which would otherwise be misreported as a duplicate event.
     anyhow::ensure!(data.len() <= 65536, "event row exceeds 64 KiB");
     Ok(Row {
         event_id: event.event_id,
@@ -340,7 +351,7 @@ pub(super) fn field(
     depth: usize,
     budget: &mut usize,
 ) -> anyhow::Result<Value> {
-    anyhow::ensure!(depth <= 16 && *budget <= 32768, "field complexity exceeded");
+    anyhow::ensure!(depth <= 16 && *budget <= 49152, "field complexity exceeded");
     *budget += 1;
     use proto::field_value::Value as F;
     let (kind, value) = match value.value {
@@ -378,7 +389,7 @@ pub(super) fn field(
         ),
         None => anyhow::bail!("missing typed field"),
     };
-    anyhow::ensure!(*budget <= 32768, "field data exceeds limit");
+    anyhow::ensure!(*budget <= 49152, "field data exceeds limit");
     Ok(json!({"type":kind,"value":value}))
 }
 

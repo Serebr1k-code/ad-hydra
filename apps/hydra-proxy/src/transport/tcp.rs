@@ -121,6 +121,7 @@ async fn client_to_server(
             write.shutdown().await?;
             return Ok(());
         }
+        c.flow.record_history(Direction::ClientToServer, &buf[..n]);
         c.flow.scan(Direction::ClientToServer, &buf[..n]);
         enum Inspected {
             Raw,
@@ -212,9 +213,31 @@ async fn server_to_client(
             result=tokio::time::timeout(c.idle,read.read(&mut buf))=>result??,
         };
         if n == 0 {
+            let result = c
+                .decoder
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_mut()
+                .and_then(|d| d.http_mut())
+                .map(|h| h.finish_response());
+            if let Some(result) = result {
+                match result {
+                    Ok(frames) => {
+                        for frame in frames {
+                            inspect_message(c, frame.message, frame.bytes.len(), false);
+                        }
+                    }
+                    Err(_) => c.telemetry.decoder_error(
+                        &c.config.id,
+                        &c.flow.id,
+                        "http_response_decoder_disabled",
+                    ),
+                }
+            }
             write.shutdown().await?;
             return Ok(());
         }
+        c.flow.record_history(Direction::ServerToClient, &buf[..n]);
         c.flow.scan(Direction::ServerToClient, &buf[..n]);
         if inspect_raw(c, Direction::ServerToClient, &buf[..n]) {
             return Err(std::io::ErrorKind::PermissionDenied.into());
@@ -248,18 +271,47 @@ fn inspect_message(
 fn inspect_raw(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
     let result = {
         let mut decoder = c.decoder.lock().unwrap_or_else(|e| e.into_inner());
-        match decoder.as_mut() {
-            Some(d) if d.is_wasm() => Some(d.feed(direction, bytes)),
-            _ => None,
+        if let Some(d) = decoder.as_mut() {
+            if direction == Direction::ServerToClient {
+                if let Some(http) = d.http_mut() {
+                    Some(
+                        http.feed(direction, bytes)
+                            .map_err(anyhow::Error::from)
+                            .map(|frames| {
+                                frames
+                                    .into_iter()
+                                    .map(|f| (f.message, f.bytes.len()))
+                                    .collect()
+                            }),
+                    )
+                } else if d.is_wasm() {
+                    Some(
+                        d.feed(direction, bytes).map(|messages| {
+                            messages.into_iter().map(|m| (m, 0)).collect::<Vec<_>>()
+                        }),
+                    )
+                } else {
+                    None
+                }
+            } else if d.is_wasm() {
+                Some(
+                    d.feed(direction, bytes)
+                        .map(|messages| messages.into_iter().map(|m| (m, 0)).collect::<Vec<_>>()),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
         }
     };
     if let Some(result) = result {
         match result {
             Ok(messages) => {
                 let emitted = !messages.is_empty();
-                for message in messages {
+                for (message, size) in messages {
                     if matches!(
-                        inspect_message(c, message, 0, false),
+                        inspect_message(c, message, size, false),
                         Some(Action::DropConnection)
                     ) {
                         return true;
@@ -270,9 +322,21 @@ fn inspect_raw(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
                 }
             }
             Err(_) => {
-                *c.decoder.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                c.telemetry
-                    .decoder_error(&c.config.id, &c.flow.id, "wasm_decoder_disabled");
+                let mut decoder = c.decoder.lock().unwrap_or_else(|e| e.into_inner());
+                let native_http = decoder.as_mut().is_some_and(|d| d.http_mut().is_some());
+                // A passive response failure must not discard buffered client requests.
+                if !native_http {
+                    *decoder = None;
+                }
+                c.telemetry.decoder_error(
+                    &c.config.id,
+                    &c.flow.id,
+                    if native_http {
+                        "http_response_decoder_disabled"
+                    } else {
+                        "wasm_decoder_disabled"
+                    },
+                );
             }
         }
     }

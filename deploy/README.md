@@ -27,4 +27,12 @@ systemctl enable --now hydra-proxy.service hydra-core.service
 
 Do not enable exploit execution until a writable cgroup subtree with cpu/memory/pids controllers has been delegated and provisioned. These baseline units deliberately leave operations sandbox configuration null. A supported deployment must place Core in a supervisor leaf, enable the delegated subtree controllers outside the application, allow unprivileged user namespaces, and grant Core write access to its own job subtree. Set a short private runtime directory such as `/run/hydra-core/jobs` (create0700). Consult `docs/sandbox-integration.md`; setting a path in JSON alone does not establish delegation. Missing prerequisites produce failed runs.
 
-Stop Core for backup, then archive the whole `/var/lib/hydra-core` directory preserving modes/ownership. Archive `/var/lib/hydra-proxy` separately. Core signing key and flag database are secrets. Restore matching state/key files together; do not replace Proxy state while it is running. Sample files are transient and may be omitted.
+Stop Core for backup, then archive the whole `/var/lib/hydra-core` directory preserving modes/ownership. Archive `/var/lib/hydra-proxy` separately. Core signing key and flag database are secrets. Restore matching state/key files together; do not replace Proxy state while it is running. Proxy's private directory includes completed gzip stream-history records and one-shot samples; keep its owner/mode intact. In-progress history is held in memory and is not recovered after restart. A normal Proxy restart preserves completed history.
+
+For Python workers install a trusted `uv` release, system Python and CA certificates.
+Set `sandbox.uv` to its absolute executable path if it is not `/usr/bin/uv`. First-run
+wheel preparation requires HTTPS/DNS access to PyPI; exploit execution itself remains
+offline apart from its explicit target broker. Keep the short private runtime directory
+on persistent storage when exact resolved Python environments must survive restarts,
+and provision a filesystem quota if a hard disk cap is required. See
+[Python preparation limits](../docs/sandbox-integration.md#python-packages-and-uv).

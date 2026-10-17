@@ -2,6 +2,10 @@
 
 The console uses Vue 3, TypeScript, Vue Router, Vite, Bun and local shadcn-vue primitives. Feature pages remain under `frontend/src/features/`, authentication under `frontend/src/features/auth/`, application routing under `frontend/src/app/`, and shared API/UI code under `frontend/src/shared/` and `frontend/src/components/`. The TypeScript HTTP operation map under `frontend/src/generated/` is generated from the checked-in OpenAPI snapshot using `python3 scripts/generate-frontend.py`. Browsers use Core's HTTP API only.
 
+Traffic is the landing page. Its left column starts with the configured-service dropdown and a searchable session list; selecting a session opens a separate scrolling stream pane on the right. TCP is the default transport, with advanced search still available. Session queries use the additive `newest_first=true` option; the API default remains oldest-first for existing clients. Cursors must be reused with the same ordering and filters. The sidebar loads 100 records per page and keeps at most 500, merges fresh closure/counter metadata without replacing the selected stream, and refreshes visible pages every five seconds. Decoded messages remain chronological, paginated and capped at 500 per preview.
+
+The stream displays client/server directions in separate colors with timestamps, decoded text, expandable typed fields, saved-field filter creation and message comparison. Captured bytes have ASCII and offset-based hexadecimal displays. These are explicitly requested next-chunk samples with the existing 30-second expiry, not a stored full TCP payload or a PCAP stream. A pending capture polls for at most 30 seconds and is canceled on navigation. Unknown/encrypted sessions retain their metadata and show the capture option for live traffic; historical bytes cannot be reconstructed from decoded fields. Both view modes and session search use escaped text, never packet-controlled HTML.
+
 Build from the repository root:
 
 ```sh

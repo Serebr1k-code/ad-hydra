@@ -66,6 +66,7 @@ impl State {
         let compiled = CompiledSnapshot::compile(saved.rules.clone(), &saved.snapshot.services)?;
         telemetry.replace_rules(compiled);
         let prepared = manager.prepare(&saved.snapshot).await?;
+        telemetry.apply_history_services(&saved.snapshot.services);
         persist(&path, &saved).await?;
         manager.activate(&saved.snapshot, prepared).await;
         Ok(Arc::new(Self {
@@ -144,6 +145,8 @@ impl State {
         };
         // No live state changes before durable replacement; failed preparation drops new sockets.
         persist(&self.path, &saved).await?;
+        self.telemetry
+            .apply_history_services(&saved.snapshot.services);
         self.telemetry.replace_rules(compiled);
         current.manager.activate(&saved.snapshot, prepared).await;
         current.saved = saved;
@@ -194,6 +197,9 @@ impl State {
                 provenance,
             };
             persist(&state.path, &saved).await?;
+            state
+                .telemetry
+                .apply_history_services(&saved.snapshot.services);
             state.telemetry.replace_rules(compiled);
             current.manager.activate(&saved.snapshot, prepared).await;
             current.saved = saved;

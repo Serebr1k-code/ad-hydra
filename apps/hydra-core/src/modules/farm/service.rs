@@ -34,6 +34,9 @@ pub struct Manifest {
     pub timeout_seconds: u64,
     pub memory_mib: u64,
     pub cpu_percent: u64,
+    /// Exact PyPI name==version pins prepared with uv before isolated execution.
+    #[serde(default)]
+    pub python_packages: Vec<String>,
 }
 impl Manifest {
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -44,6 +47,11 @@ impl Manifest {
                 && (32..=256).contains(&self.memory_mib)
                 && (10..=100).contains(&self.cpu_percent),
             "invalid manifest"
+        );
+        crate::infrastructure::sandbox::validate_python_packages(&self.python_packages)?;
+        anyhow::ensure!(
+            self.runtime == "python" || self.python_packages.is_empty(),
+            "packages require Python runtime"
         );
         Ok(())
     }
@@ -145,6 +153,12 @@ impl Farm {
             )
             .await?;
         auth.db
+            .migrate(
+                15,
+                include_str!("../../../../../migrations/0015_python_packages.sql"),
+            )
+            .await?;
+        auth.db
             .run(|db| {
                 let tx = db.transaction()?;
                 let rows = tx
@@ -211,7 +225,7 @@ impl Farm {
                 && e.interval_seconds.is_none_or(|n| (10..=86400).contains(&n)),
             "invalid exploit schedule"
         );
-        self.auth.db.run(move|db|{let tx=db.transaction()?;let old:Option<i64>=tx.query_row("SELECT revision FROM farm_exploits WHERE id=?1",[&e.id],|r|r.get(0)).optional()?;anyhow::ensure!(old.unwrap_or(0)==e.revision,"revision conflict");let count:i64=tx.query_row("SELECT count(*) FROM farm_exploits",[],|r|r.get(0))?;anyhow::ensure!(old.is_some() || count<64,"exploit quota exhausted");let mut endpoints = std::collections::HashSet::new();for id in &e.target_ids {if e.manifest.mode == "batch" {let endpoint:(String,u16,String)=tx.query_row("SELECT host,port,transport FROM farm_targets WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;anyhow::ensure!(endpoints.insert(endpoint),"duplicate batch target endpoint: selected target aliases share an address and transport");}anyhow::ensure!(tx.query_row("SELECT EXISTS(SELECT 1 FROM farm_targets WHERE id=?1 AND enabled=1)",[id],|r|r.get::<_,bool>(0))?,"target unavailable");}tx.execute("INSERT INTO farm_exploits VALUES(?1,?2,?3,1,?4,?5,?6,?7,?8,?9,?10,?10) ON CONFLICT(id) DO UPDATE SET name=excluded.name,enabled=excluded.enabled,revision=farm_exploits.revision+1,version=excluded.version,manifest=excluded.manifest,target_ids=excluded.target_ids,interval_seconds=excluded.interval_seconds,next_run=excluded.next_run,initiated_by=excluded.initiated_by,updated_at=excluded.updated_at",params![e.id,e.name,e.enabled,e.version,serde_json::to_string(&e.manifest)?,serde_json::to_string(&e.target_ids)?,e.interval_seconds.map(|n|n as i64),e.interval_seconds.map(|n|now()+n as i64),a.id,now()])?;audit::append(&tx,&a,"farm.exploit.write",&e.id,"farm",true,now())?;tx.commit()?;Ok(())}).await
+        self.auth.db.run(move|db|{let tx=db.transaction()?;let old:Option<i64>=tx.query_row("SELECT revision FROM farm_exploits WHERE id=?1",[&e.id],|r|r.get(0)).optional()?;anyhow::ensure!(old.unwrap_or(0)==e.revision,"revision conflict");let binding = serde_json::to_string(&(e.manifest.runtime.as_str(), &e.manifest.python_packages))?; let previous:Option<Option<String>>=tx.query_row("SELECT runtime_binding FROM farm_versions WHERE exploit_id=?1 AND version=?2",params![e.id,e.version],|r|r.get(0)).optional()?; if let Some(previous)=previous {anyhow::ensure!(previous.as_ref().is_none_or(|old|old==&binding),"immutable version runtime/packages differ; upload a new version");tx.execute("UPDATE farm_versions SET runtime_binding=?3 WHERE exploit_id=?1 AND version=?2 AND runtime_binding IS NULL",params![e.id,e.version,binding])?;} let count:i64=tx.query_row("SELECT count(*) FROM farm_exploits",[],|r|r.get(0))?;anyhow::ensure!(old.is_some() || count<64,"exploit quota exhausted");let mut endpoints = std::collections::HashSet::new();for id in &e.target_ids {if e.manifest.mode == "batch" {let endpoint:(String,u16,String)=tx.query_row("SELECT host,port,transport FROM farm_targets WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;anyhow::ensure!(endpoints.insert(endpoint),"duplicate batch target endpoint: selected target aliases share an address and transport");}anyhow::ensure!(tx.query_row("SELECT EXISTS(SELECT 1 FROM farm_targets WHERE id=?1 AND enabled=1)",[id],|r|r.get::<_,bool>(0))?,"target unavailable");}tx.execute("INSERT INTO farm_exploits VALUES(?1,?2,?3,1,?4,?5,?6,?7,?8,?9,?10,?10) ON CONFLICT(id) DO UPDATE SET name=excluded.name,enabled=excluded.enabled,revision=farm_exploits.revision+1,version=excluded.version,manifest=excluded.manifest,target_ids=excluded.target_ids,interval_seconds=excluded.interval_seconds,next_run=excluded.next_run,initiated_by=excluded.initiated_by,updated_at=excluded.updated_at",params![e.id,e.name,e.enabled,e.version,serde_json::to_string(&e.manifest)?,serde_json::to_string(&e.target_ids)?,e.interval_seconds.map(|n|n as i64),e.interval_seconds.map(|n|now()+n as i64),a.id,now()])?;audit::append(&tx,&a,"farm.exploit.write",&e.id,"farm",true,now())?;tx.commit()?;Ok(())}).await
     }
     pub async fn upload(
         &self,
@@ -230,7 +244,7 @@ impl Farm {
         let path = self.directory.join(format!("{id}-{version}-{hash}"));
         let path2 = path.clone();
         let hash2 = hash.clone();
-        self.auth.db.run(move|db|{let tx=db.transaction()?;let n:i64=tx.query_row("SELECT count(*) FROM farm_versions",[],|r|r.get(0))?;anyhow::ensure!(n<256,"version quota exhausted");anyhow::ensure!(!tx.query_row("SELECT EXISTS(SELECT 1 FROM farm_versions WHERE exploit_id=?1 AND version=?2)",params![id,version],|r|r.get::<_,bool>(0))?,"immutable version exists");anyhow::ensure!(std::fs::read_dir(path2.parent().ok_or_else(||anyhow::anyhow!("missing upload directory"))?)?.take(258).count()<257,"upload file quota exhausted (including orphans)");let mut f=std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path2)?;f.write_all(&bytes)?;f.sync_all()?;tx.execute("INSERT INTO farm_versions VALUES(?1,?2,?3,?4,?5,?6)",params![id,version,hash2,path2.to_string_lossy(),now(),a.id])?;audit::append(&tx,&a,"farm.version.upload",&id,"farm",true,now())?;tx.commit()?;Ok(())}).await?;
+        self.auth.db.run(move|db|{let tx=db.transaction()?;let n:i64=tx.query_row("SELECT count(*) FROM farm_versions",[],|r|r.get(0))?;anyhow::ensure!(n<256,"version quota exhausted");anyhow::ensure!(!tx.query_row("SELECT EXISTS(SELECT 1 FROM farm_versions WHERE exploit_id=?1 AND version=?2)",params![id,version],|r|r.get::<_,bool>(0))?,"immutable version exists");anyhow::ensure!(std::fs::read_dir(path2.parent().ok_or_else(||anyhow::anyhow!("missing upload directory"))?)?.take(258).count()<257,"upload file quota exhausted (including orphans)");let mut f=std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path2)?;f.write_all(&bytes)?;f.sync_all()?;tx.execute("INSERT INTO farm_versions(exploit_id,version,sha256,path,created_at,author_id) VALUES(?1,?2,?3,?4,?5,?6)",params![id,version,hash2,path2.to_string_lossy(),now(),a.id])?;if let Some(manifest)=tx.query_row("SELECT manifest FROM farm_exploits WHERE id=?1 AND version=?2",params![id,version],|r|r.get::<_,String>(0)).optional()? {let manifest:Manifest=serde_json::from_str(&manifest)?;let binding=serde_json::to_string(&(manifest.runtime,&manifest.python_packages))?;tx.execute("UPDATE farm_versions SET runtime_binding=?3 WHERE exploit_id=?1 AND version=?2",params![id,version,binding])?;} audit::append(&tx,&a,"farm.version.upload",&id,"farm",true,now())?;tx.commit()?;Ok(())}).await?;
         Ok(hash)
     }
 }

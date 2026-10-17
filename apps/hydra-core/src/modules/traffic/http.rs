@@ -9,7 +9,7 @@ use axum::{
 use serde_json::Value;
 use std::{convert::Infallible, time::Duration};
 use tokio::sync::{broadcast::error::RecvError, mpsc};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 struct Error(StatusCode);
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
@@ -105,9 +105,17 @@ async fn stream(State(t): State<Traffic>, h: HeaderMap) -> Result<Response, Erro
             tokio::select! {_= &mut expiry=>break,result=tx.send(Ok(event))=>if result.is_err(){break}}
         }
     });
-    Ok(Sse::new(ReceiverStream::new(rx))
-        .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(10)))
-        .into_response())
+    let mut response = Sse::new(
+        tokio_stream::once(Ok(Event::default().event("ready").data("{}")))
+            .chain(ReceiverStream::new(rx)),
+    )
+    .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(10)))
+    .into_response();
+    response.headers_mut().insert(
+        "x-accel-buffering",
+        axum::http::HeaderValue::from_static("no"),
+    );
+    Ok(response)
 }
 #[derive(utoipa::OpenApi)]
 #[openapi(

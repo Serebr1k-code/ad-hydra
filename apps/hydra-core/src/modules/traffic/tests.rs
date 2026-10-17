@@ -19,6 +19,57 @@ async fn setup() -> (Traffic, std::path::PathBuf) {
     )
 }
 #[tokio::test]
+async fn newest_sessions_page_without_duplicates_when_new_connections_arrive() {
+    let (t, path) = setup().await;
+    let batch = |indices: std::ops::Range<usize>| proto::EventBatch {
+        events: indices
+            .map(|i| proto::Event {
+                event_id: format!("open{i}"),
+                flow_id: format!("flow{i}"),
+                service_id: "svc".into(),
+                payload: Some(Payload::FlowOpened(proto::FlowOpened {
+                    transport: 1,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
+    t.ingest(batch(0..3)).await.unwrap();
+    let first = t
+        .flows(serde_json::from_value(serde_json::json!({"newest_first":true,"limit":2})).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|v| v["flow_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["flow2", "flow1"]
+    );
+    t.ingest(batch(3..4)).await.unwrap();
+    let next = t
+        .flows(
+            serde_json::from_value(
+                serde_json::json!({"newest_first":true,"after":first.next_cursor,"limit":2}),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(next.items.len(), 1);
+    assert_eq!(next.items[0]["flow_id"], "flow0");
+    assert!(next.next_cursor.is_none());
+    assert_eq!(
+        t.flows(Query::default()).await.unwrap().items[0]["flow_id"],
+        "flow0"
+    );
+    drop(t);
+    std::fs::remove_dir_all(path).unwrap();
+}
+#[tokio::test]
 async fn persistent_ingest_deduplicates_and_preserves_typed_fields() {
     let (t, path) = setup().await;
     let e = proto::Event {
@@ -308,5 +359,89 @@ async fn explorer_filters_share_message_predicate_and_stable_pagination() {
         .is_err()
     );
     drop(t);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn bounded_header_fields_commit_before_live_publication_without_losing_duplicates() {
+    use hydra_domain::FieldValue as V;
+    use std::collections::{BTreeMap, HashMap};
+    let (traffic, path) = setup().await;
+    let mut live = traffic.events.subscribe();
+    assert_eq!(traffic.events.receiver_count(), 1);
+    let event_id = format!("headers-event-{}", uuid::Uuid::new_v4());
+    let headers = V::List(
+        (0..128)
+            .map(|_| {
+                V::Object(BTreeMap::from([
+                    ("name".into(), V::String("X-Duplicate".into())),
+                    ("value".into(), V::String("\t".repeat(8))),
+                ]))
+            })
+            .collect(),
+    );
+    let fields = HashMap::from([
+        (
+            "http.headers".into(),
+            hydra_wire::rules::value_to_wire(&headers),
+        ),
+        (
+            "http.trailers".into(),
+            hydra_wire::rules::value_to_wire(&headers),
+        ),
+        (
+            "http.body_text".into(),
+            hydra_wire::rules::value_to_wire(&V::String("\0".repeat(1024))),
+        ),
+    ]);
+    let accepted = traffic
+        .ingest(proto::EventBatch {
+            events: vec![proto::Event {
+                event_id: event_id.clone(),
+                flow_id: "flow".into(),
+                service_id: "service".into(),
+                payload: Some(Payload::Message(proto::ParsedMessage {
+                    message_id: "headers-message".into(),
+                    fields: Some(proto::FieldObject { fields }),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        accepted.accepted, 1,
+        "event id: {event_id}, duplicates: {}",
+        accepted.duplicates
+    );
+    assert_eq!(traffic.events.receiver_count(), 1);
+    let notice = live.try_recv().unwrap_or_else(|error| {
+        panic!(
+            "No live event (receiver count {}, accepted {}): {error}",
+            traffic.events.receiver_count(),
+            accepted.accepted
+        )
+    });
+    let stored = traffic
+        .message("headers-message".into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(notice, stored);
+    assert_eq!(
+        stored["fields"]["http.headers"]["value"]
+            .as_array()
+            .unwrap()
+            .len(),
+        128
+    );
+    assert_eq!(
+        stored["fields"]["http.trailers"]["value"][127]["value"]["name"]["value"],
+        "X-Duplicate"
+    );
+    assert!(serde_json::to_vec(&stored).unwrap().len() < 65536);
+    drop(traffic);
     std::fs::remove_dir_all(path).unwrap();
 }

@@ -9,6 +9,7 @@ fn service() -> Service {
         upstream_address: "127.0.0.1:2".parse().unwrap(),
         protocol_id: "raw".into(),
         enabled: true,
+        retain_history: true,
     }
 }
 fn predicate(op: Comparison, expected: FieldValue) -> Expression {

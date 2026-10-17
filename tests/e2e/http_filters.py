@@ -22,9 +22,10 @@ class Filters(unittest.TestCase):
             protocol_version = 'HTTP/1.1'
             def do_GET(self):
                 seen.append(self.path)
-                data = ('backend:' + self.path).encode()
+                data = b'x' * 100_000 if self.path == '/large-response' else ('backend:' + self.path).encode()
                 self.send_response(200)
                 self.send_header('Content-Length', str(len(data)))
+                self.send_header('Content-Type', 'text/plain')
                 self.end_headers()
                 try:
                     self.wfile.write(data)
@@ -111,7 +112,19 @@ class Filters(unittest.TestCase):
                 created = good('POST', '/services', service, alice)
                 sid = created['services']['services'][0]['id']
                 wait_revision(1, alice)
-                self.assertEqual(proxied('/normal')[0], 200)
+                self.assertEqual(proxied('/normal'), (200, b'backend:/normal'))
+                # Oversized passive response inspection must never truncate the relay.
+                self.assertEqual(proxied('/large-response'), (200, b'x' * 100_000))
+                for _ in range(100):
+                    response_found = False
+                    for flow in good('GET', '/traffic/flows', token=alice)['items']:
+                        messages = good('GET', f"/traffic/flows/{flow['flow_id']}/messages", token=alice)['items']
+                        if any(m['direction'] == 2 and m['fields'].get('http.body_text', {}).get('value') == 'backend:/normal' for m in messages):
+                            response_found = True
+                            break
+                    if response_found: break
+                    time.sleep(.05)
+                self.assertTrue(response_found, 'HTTP server response was not indexed')
                 rule = {'expected_revision': 1, 'service_id': sid, 'name': 'path-and-agent', 'description': 'real test', 'enabled': True, 'mode': 'shadow', 'priority': 10, 'expression': {'all': [{'field': 'http.path', 'op': 'eq', 'value': {'type': 'string', 'value': '/blocked'}}, {'field': 'http.user_agent', 'op': 'contains', 'value': {'type': 'string', 'value': 'test-agent'}}]}, 'action': {'type': 'block', 'http_status': 403}, 'backend': 'userspace', 'expires_at_ms': None}
                 made = good('POST', '/filters', rule, alice)
                 rid = made['rules']['rules'][0]['id']

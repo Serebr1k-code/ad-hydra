@@ -76,6 +76,11 @@ pub struct ServiceInput {
     pub upstream_address: SocketAddr,
     pub protocol_id: String,
     pub enabled: bool,
+    #[serde(default = "history_enabled")]
+    pub retain_history: bool,
+}
+fn history_enabled() -> bool {
+    true
 }
 impl ServiceInput {
     fn into_service(self, id: String) -> Service {
@@ -86,6 +91,7 @@ impl ServiceInput {
             upstream_address: self.upstream_address,
             protocol_id: self.protocol_id,
             enabled: self.enabled,
+            retain_history: self.retain_history,
         }
     }
 }
@@ -339,4 +345,41 @@ pub fn router(control: Control) -> Router {
         )
         .with_state(control.clone())
         .merge(crate::modules::filters::router(control))
+}
+
+#[cfg(test)]
+mod history_input_tests {
+    use super::*;
+
+    #[test]
+    fn service_api_input_defaults_and_preserves_history_retention() {
+        let defaults: ServiceInput = serde_json::from_value(serde_json::json!({
+            "expected_revision": 0,
+            "transport": "tcp",
+            "listen_address": "127.0.0.1:21001",
+            "upstream_address": "127.0.0.1:21002",
+            "protocol_id": "raw",
+            "enabled": true
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(defaults.into_service("svc".into())).unwrap()["retain_history"],
+            true
+        );
+
+        let disabled: ServiceInput = serde_json::from_value(serde_json::json!({
+            "expected_revision": 0,
+            "transport": "tcp",
+            "listen_address": "127.0.0.1:21001",
+            "upstream_address": "127.0.0.1:21002",
+            "protocol_id": "raw",
+            "enabled": true,
+            "retain_history": false
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(disabled.into_service("svc".into())).unwrap()["retain_history"],
+            false
+        );
+    }
 }

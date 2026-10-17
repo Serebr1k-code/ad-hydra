@@ -11,6 +11,7 @@ import ssl
 import struct
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from relay import BIN, port
@@ -69,6 +70,10 @@ class CDP:
         result = self.call('Runtime.evaluate', {'expression': source, 'returnByValue': True, 'awaitPromise': True})
         assert 'exceptionDetails' not in result, result
         return result.get('result', {}).get('value')
+    def click(self, expression):
+        point=self.evaluate(f'(()=>{{const e=({expression}),r=e.getBoundingClientRect();return {{x:r.x+r.width/2,y:r.y+r.height/2}}}})()')
+        for kind in ['mousePressed','mouseReleased']:
+            self.call('Input.dispatchMouseEvent',{'type':kind,**point,'button':'left','clickCount':1})
 
 
 class Browser(unittest.TestCase):
@@ -76,6 +81,7 @@ class Browser(unittest.TestCase):
     def test_native_https_login_navigation_logout(self):
         chrome = shutil.which('chromium') or shutil.which('google-chrome')
         processes = []
+        upstream = None
         with tempfile.TemporaryDirectory(prefix='hydra-browser-') as directory:
             tmp = pathlib.Path(directory)
             ap, debug = port(), port()
@@ -127,29 +133,95 @@ class Browser(unittest.TestCase):
                 else:
                     log.seek(0);self.fail(log.read())
                 cdp=CDP(target['webSocketDebuggerUrl'])
+                cdp.call('Emulation.setDeviceMetricsOverride',{'width':1280,'height':900,'deviceScaleFactor':1,'mobile':False})
                 cdp.call('Page.navigate',{'url':f'https://localhost:{ap}/'})
                 def wait(expression):
                     for _ in range(100):
                         if cdp.evaluate(expression):
                             return
                         time.sleep(.05)
-                    self.fail(cdp.evaluate("document.body.innerText+'\\nTextarea DOM: '+[...document.querySelectorAll('textarea')].map(e=>e.outerHTML).join('\\n')"))
+                    self.fail(cdp.evaluate("'Controls: '+JSON.stringify([...document.querySelectorAll('[role=combobox]')].map(e=>e.outerHTML))+'\\n'+document.body.innerText+'\\nTextarea DOM: '+[...document.querySelectorAll('textarea')].map(e=>e.outerHTML).join('\\n')"))
                 wait("document.querySelector('#login') && !document.querySelector('#login').hidden")
                 self.assertTrue(cdp.evaluate("document.querySelector('#app')?.hasAttribute('data-v-app')"), "Vue must mount the application")
                 cdp.evaluate("for (const [name,value] of [['username','alice'],['password','test-password-1234']]) { const input=document.querySelector(`[name=${name}]`);input.value=value;input.dispatchEvent(new Event('input',{bubbles:true})); }")
                 cdp.evaluate("document.querySelector('#login-form').requestSubmit()")
                 wait("document.querySelector('#console') && !document.querySelector('#console').hidden")
+                wait("Boolean(document.querySelector('#traffic-sessions') && document.querySelector('#traffic-service'))")
+                self.assertEqual(cdp.evaluate('location.hash'), '#/traffic')
                 original=cdp.evaluate('performance.timeOrigin')
                 cdp.call('Page.reload')
                 wait(f"performance.timeOrigin!=={original} && document.querySelector('#console') && !document.querySelector('#console').hidden")
                 # Real Vue bindings and mutations, with a loopback-only service and no workers.
+                cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Services').click()")
                 wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent==='Add service' && !b.disabled)")
                 cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add service').click()")
-                wait("document.querySelector('#editor-value') !== null")
-                service = {'transport':'tcp','listen_address':f'127.0.0.1:{port()}','upstream_address':f'127.0.0.1:{port()}','protocol_id':'raw','enabled':True}
-                cdp.evaluate(f"{{ const input=document.querySelector('#editor-value');input.value={json.dumps(json.dumps(service))};input.dispatchEvent(new Event('input',{{bubbles:true}})); }}")
-                cdp.evaluate("document.querySelector('#editor-save').click()")
-                wait(f"document.querySelector('#page').innerText.includes({json.dumps(service['listen_address'])}) && !document.querySelector('#editor-value')")
+                wait("document.querySelector('#service-form') !== null")
+                upstream=socket.socket();upstream.bind(('127.0.0.1',0));upstream.listen();upstream.settimeout(10)
+                release_response=threading.Event()
+                def reply():
+                    try:
+                        connection,_=upstream.accept()
+                        with connection:
+                            connection.settimeout(3);data=b''
+                            while b'\r\n\r\n' not in data and len(data)<8192:
+                                chunk=connection.recv(4096)
+                                if not chunk:return
+                                data+=chunk
+                            release_response.wait(5)
+                            connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\nX-Reply: visible\r\nConnection: close\r\n\r\nOK')
+                    except OSError:
+                        pass
+                threading.Thread(target=reply,daemon=True).start()
+                service = {'transport':'tcp','listen_address':f'127.0.0.1:{port()}','upstream_address':f'127.0.0.1:{upstream.getsockname()[1]}','protocol_id':'http','enabled':True}
+                def fill_service(value):
+                    for field,key in [('service-listener','listen_address'),('service-backend','upstream_address'),('service-profile','protocol_id')]:
+                        cdp.evaluate(f"{{const e=document.querySelector('#{field}');e.value={json.dumps(value[key])};e.dispatchEvent(new Event('input',{{bubbles:true}}));}}")
+                    cdp.evaluate("document.querySelector('#service-form').requestSubmit()")
+                    wait(f"document.querySelector('#page').innerText.includes({json.dumps(value['listen_address'])}) && !document.querySelector('#service-form')")
+                fill_service(service)
+                # A second real configured service has no sessions, to verify dropdown filtering.
+                cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add service').click()")
+                wait("document.querySelector('#service-form') !== null")
+                other={**service,'listen_address':f'127.0.0.1:{port()}'}
+                fill_service(other)
+                cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Traffic').click()")
+                wait("document.querySelector('#traffic-live-status')?.textContent==='Live'")
+                for _ in range(100):
+                    try:
+                        connection=socket.create_connection(('127.0.0.1',int(service['listen_address'].split(':')[1])),timeout=2)
+                        break
+                    except OSError:time.sleep(.05)
+                else:self.fail('Fixture listener did not apply')
+                with connection:
+                    connection.sendall(b'GET /browser-stream HTTP/1.1\r\nHost: browser-fixture\r\nX-Visible: one\r\nX-Visible: two\r\nConnection: close\r\n\r\n')
+                    wait("Boolean(document.querySelector('#traffic-stream [data-direction=\"1\"]'))")
+                    release_response.set()
+                    self.assertIn(b'200 OK',connection.recv(4096))
+                wait("Boolean(document.querySelector('#traffic-sessions [data-flow-id]') && document.querySelector('#traffic-stream [data-message-id]'))")
+                self.assertIn('/browser-stream',cdp.evaluate("document.querySelector('#traffic-stream').innerText"))
+                self.assertIn('X-Visible: one',cdp.evaluate("document.querySelector('#traffic-stream').innerText"))
+                self.assertIn('X-Visible: two',cdp.evaluate("document.querySelector('#traffic-stream').innerText"))
+                self.assertTrue(cdp.evaluate("document.querySelector('#traffic-stream [data-direction=\"1\"]')!==null"))
+                wait("Boolean(document.querySelector('#traffic-stream [data-direction=\"2\"]'))")
+                self.assertIn('http.status_code: 200',cdp.evaluate("document.querySelector('#traffic-stream [data-direction=\"2\"]').innerText"))
+                self.assertIn('X-Reply: visible',cdp.evaluate("document.querySelector('#traffic-stream').innerText"))
+                self.assertIn('http.body_text: OK',cdp.evaluate("document.querySelector('#traffic-stream [data-direction=\"2\"]').innerText"))
+                cdp.evaluate("document.querySelector('#traffic-sessions [data-flow-id]').click()")
+                wait("document.querySelector('#traffic-sessions [aria-pressed=true]')!==null")
+                self.assertTrue(cdp.evaluate("(()=>{const l=document.querySelector('#traffic-sessions').getBoundingClientRect(),r=document.querySelector('#traffic-stream').getBoundingClientRect();return r.left>=l.right-1})()"))
+                if os.environ.get('HYDRA_SCREENSHOT'):
+                    shot=cdp.call('Page.captureScreenshot',{'format':'png'})
+                    pathlib.Path(os.environ['HYDRA_SCREENSHOT']).write_bytes(base64.b64decode(shot['data']))
+                service_id=cdp.evaluate("document.querySelector('#traffic-sessions [data-service-id]').dataset.serviceId")
+                cdp.click("document.querySelector('#traffic-service')")
+                wait("document.querySelectorAll('[role=option]').length===3")
+                cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()!=='All services'&&e.textContent.trim()!=={json.dumps(service_id)})")
+                wait("document.querySelector('#traffic-sessions').innerText.includes('No sessions for this service yet.')")
+                self.assertFalse(cdp.evaluate("document.querySelector('#traffic-stream').innerText.includes('/browser-stream')"))
+                cdp.click("document.querySelector('#traffic-service')")
+                wait("document.querySelectorAll('[role=option]').length===3")
+                cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==={json.dumps(service_id)})")
+                wait("document.querySelector('#traffic-stream').innerText.includes('/browser-stream')")
                 for section in ['Filters','Traffic','Protocols','Farm','Flags','Settings','Users / audit']:
                     cdp.evaluate(f"[...document.querySelectorAll('nav button')].find(b=>b.textContent==={json.dumps(section)}).click()")
                     expected = {'Users / audit':'Users and audit','Farm':'Exploit farm','Flags':'Flag Vault'}.get(section,section)
@@ -164,6 +236,7 @@ class Browser(unittest.TestCase):
                 cdp.socket.close()
                 print('Embedded Vue, native HTTPS and real Chromium login, navigation, API calls, logout: OK')
             finally:
+                if upstream:upstream.close()
                 if cdp:
                     cdp.socket.close()
                 try:

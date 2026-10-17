@@ -30,6 +30,7 @@ service ProxyDiagnostics {
   rpc TestProtocol(TestProtocolRequest) returns (TestProtocolReply);
   rpc CaptureSample(CaptureSampleRequest) returns (CaptureSampleReply);
   rpc GetSample(GetSampleRequest) returns (GetSampleReply);
+  rpc GetFlowHistory(GetFlowHistoryRequest) returns (GetFlowHistoryReply);
   // ONLY to a configured service upstream on the competition allowlist.
   // Does not inject arbitrary packets into pre-existing connections.
   rpc ProbeService(ProbeServiceRequest) returns (ProbeServiceReply);
@@ -152,6 +153,7 @@ message ServiceConfig {
   string upstream_address = 4;
   string protocol_id = 5;
   bool enabled = 6;
+  bool retain_history = 7;
 }
 message GetStatusRequest {}
 message ProxyStatus {
@@ -259,6 +261,25 @@ message FlowClosed {
   uint64 bytes_client_to_server = 1;
   uint64 bytes_server_to_client = 2;
   string reason = 3;
+  bool history_truncated = 4;
+}
+message HistorySegment {
+  Direction direction = 1;
+  bytes data = 2;
+}
+message GetFlowHistoryRequest { string flow_id = 1; }
+message GetFlowHistoryReply {
+  string flow_id = 1;
+  string service_id = 2;
+  string protocol_id = 3;
+  int64 opened_at_ms = 4;
+  int64 closed_at_ms = 5;
+  uint64 bytes_client_to_server = 6;
+  uint64 bytes_server_to_client = 7;
+  repeated HistorySegment segments = 8;
+  bool truncated_client_to_server = 9;
+  bool truncated_server_to_client = 10;
+  bool history_truncated = 11;
 }
 message ParsedMessage {
   string message_id = 1;

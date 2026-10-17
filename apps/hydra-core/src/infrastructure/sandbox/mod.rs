@@ -2,6 +2,8 @@
 mod bridge;
 mod cgroup;
 mod command;
+mod python;
+pub use python::validate_python_packages;
 
 pub use bridge::{BridgeConfig, Endpoint, bridge};
 pub use command::worker_child;
@@ -39,6 +41,7 @@ pub struct Config {
     pub runtime_dir: PathBuf,
     pub bwrap: PathBuf,
     pub ip: PathBuf,
+    pub uv: PathBuf,
     pub helper: PathBuf,
     /// Fixed numeric endpoints; worker input never selects the broker destination.
     pub allowlist: Vec<SocketAddr>,
@@ -55,6 +58,8 @@ pub struct Job {
     pub source_dir: PathBuf,
     pub entrypoint: String,
     pub runtime: Runtime,
+    pub python_packages: Vec<String>,
+    pub python_environment_key: String,
     pub target: SocketAddr,
     pub endpoints: Vec<Endpoint>,
     pub timeout: Duration,
@@ -144,7 +149,16 @@ impl Sandbox {
         // Declare before Group: cancellation drops Group (kills descendants) first.
         let _directory_cleanup = RuntimeDirectory(directory.clone());
         let group = cgroup::Group::create(&self.config.delegated_cgroup, &job)?;
-        let result = self.run_in(&job, &cancel, &group, &directory).await;
+        let result = async {
+            let python = if matches!(job.runtime, Runtime::Python) {
+                Some(python::prepare(&self.config, &job, &cancel, &group, &directory).await?)
+            } else {
+                None
+            };
+            self.run_in(&job, &cancel, &group, &directory, python.as_deref())
+                .await
+        }
+        .await;
         // Kill before removing broker paths, including daemonized descendants.
         let killed = group.kill();
         killed?;
@@ -156,6 +170,7 @@ impl Sandbox {
         cancel: &CancellationToken,
         group: &cgroup::Group,
         directory: &std::path::Path,
+        python: Option<&std::path::Path>,
     ) -> Result<RunOutcome> {
         let gateway_cancel = CancellationToken::new();
         let _gateway_guard = gateway_cancel.clone().drop_guard();
@@ -181,6 +196,7 @@ impl Sandbox {
             &self.config,
             job,
             directory,
+            python,
             &serde_json::to_string(&bridge_config)
                 .map_err(|e| SandboxError::Invalid(e.to_string()))?,
         );
@@ -319,6 +335,7 @@ mod tests {
             runtime_dir: root.clone(),
             bwrap: executable.clone(),
             ip: executable.clone(),
+            uv: "/usr/bin/uv".into(),
             helper: executable,
             allowlist: vec![target],
         };
@@ -327,6 +344,8 @@ mod tests {
             source_dir: root.clone(),
             entrypoint: "run.sh".into(),
             runtime: Runtime::Shell,
+            python_packages: vec![],
+            python_environment_key: "test".into(),
             target,
             endpoints: vec![Endpoint {
                 id: "test".into(),
@@ -368,6 +387,7 @@ mod tests {
             runtime_dir: root.clone(),
             bwrap: "/usr/bin/bwrap".into(),
             ip: "/usr/bin/ip".into(),
+            uv: "/usr/bin/uv".into(),
             helper: helper.into(),
             allowlist: vec![target],
         };
@@ -376,6 +396,8 @@ mod tests {
             source_dir: source.clone(),
             entrypoint: "run.py".into(),
             runtime: Runtime::Python,
+            python_packages: vec![],
+            python_environment_key: "test".into(),
             target,
             endpoints: vec![Endpoint {
                 id: "test".into(),

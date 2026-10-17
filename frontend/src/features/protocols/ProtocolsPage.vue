@@ -14,13 +14,15 @@ import DataTable from '@/components/DataTable.vue'
 type Protocol = { id: string; version: string; error: string | null; state: string; created_by: string; created_at: string; profile: unknown; metadata: unknown }
 type Activation = { service_id: string; id: string; version: string; applied: boolean; error: string | null }
 type Protocols = { items: Protocol[]; activations: Activation[]; native_schemas?: unknown }
-type Service = { id: string; listen_address: string }
+type Service = { id: string; listen_address: string; transport: string; upstream_address: string; protocol_id: string; enabled: boolean }
 type Services = Omit<ListResponse, 'items'> & { items: Service[] }
 type ApplyResult = { applied?: boolean; error?: string | null }
 const data = ref<Protocols | null>(null)
 const services = ref<Service[]>([])
 const targets = ref<Record<string, string>>({})
 const protocolId = ref('')
+const decoderChoice = ref('http')
+const decoderService = ref('')
 const version = ref('')
 const file = ref<File | null>(null)
 const busy = ref(false)
@@ -44,12 +46,51 @@ async function load() {
     const [protocols, listeners] = await Promise.all([api<Protocols>('/protocols'), api<Services>('/services')])
     data.value = protocols
     services.value = listeners.items
+    if (!listeners.items.some(service => service.id === decoderService.value)) decoderService.value = listeners.items[0]?.id ?? ''
     for (const protocol of protocols.items) {
       const selected = targets.value[key(protocol)]
       if (!listeners.items.some(service => service.id === selected)) targets.value[key(protocol)] = listeners.items[0]?.id ?? ''
     }
   } catch (cause) { error.value = errorMessage(cause) }
   finally { busy.value = false }
+}
+function decoderChoices() {
+  const native = Array.isArray(data.value?.native_schemas) ? data.value.native_schemas as { id?: string }[] : []
+  return [
+    ...native.flatMap(item => typeof item.id === 'string' ? [{ value: item.id, label: `${item.id} · built-in` }] : []),
+    ...(data.value?.items ?? []).map(item => ({ value: `custom:${item.id}/${item.version}`, label: `${item.id}/${item.version} · ${item.profile ? 'framing' : 'WASM'}` })),
+  ]
+}
+async function applyDecoder() {
+  await mutate(async () => {
+    const service = services.value.find(item => item.id === decoderService.value)
+    if (!service) throw new Error('Select a service')
+    const choice = decoderChoices().find(item => item.value === decoderChoice.value)
+    if (!choice) throw new Error('Choose a decoder from the list')
+    if (decoderChoice.value.startsWith('custom:')) {
+      const [id, version] = decoderChoice.value.slice(7).split('/')
+      if (!id || !version) throw new Error('Invalid custom decoder selection')
+      const result = await activateProtocol(id, version, service.id)
+      if (!result.applied) throw new Error(result.error || 'Activation pending; refresh to check applied state')
+      return
+    }
+    const active = data.value?.activations.find(item => item.service_id === service.id)
+    if (active) {
+      const result = await api<ApplyResult>(`/protocols/activations/${encodeURIComponent(service.id)}`, 'DELETE', undefined, true, { 'Idempotency-Key': crypto.randomUUID() })
+      if (!result.applied) throw new Error(result.error || 'Decoder removed; service profile update is still pending')
+    }
+    const current = await api<Services>('/services')
+    const latest = current.items.find(item => item.id === service.id)
+    if (!latest) throw new Error('Service no longer exists; refresh and choose it again')
+    await api(`/services/${encodeURIComponent(service.id)}`, 'PATCH', {
+      expected_revision: current.revision,
+      transport: latest.transport,
+      listen_address: latest.listen_address,
+      upstream_address: latest.upstream_address,
+      protocol_id: decoderChoice.value,
+      enabled: latest.enabled,
+    })
+  })
 }
 function selectFile(event: Event) {
   const input = event.target
@@ -104,8 +145,14 @@ onMounted(load)
 <template>
   <section class="space-y-4">
     <h1 class="text-2xl font-semibold">Protocols</h1>
-    <p class="text-sm text-muted-foreground">Built-in profiles: raw passthrough and bounded HTTP/1.1 requests. Configurable framing emits a typed bytes payload including frame headers/delimiters. Rust WASM parsers use Hydra ABI v1, with fuel and memory limits. Existing flows retain their parser version.</p>
+    <p class="text-sm text-muted-foreground">Built-in decoders: raw passthrough, UTF-8 text, and bounded HTTP/1.1. Configurable framing emits a typed bytes payload including frame headers/delimiters. Rust WASM parsers use Hydra ABI v1 with fuel and memory limits. Existing flows retain their parser version.</p>
     <div class="flex flex-wrap gap-3"><Button v-if="data?.native_schemas" variant="outline" @click="showDetail('Native parser schemas', data.native_schemas)">Native parser schemas</Button><Button variant="outline" :disabled="busy" @click="framing">Create framing profile</Button><Button variant="outline" :disabled="busy" @click="load">Refresh</Button></div>
+    <div class="flex flex-wrap items-end gap-3 rounded-md border p-4">
+      <div class="space-y-2"><Label for="decoder-choice">Capture decoder</Label><Input id="decoder-choice" v-model="decoderChoice" list="decoder-options" placeholder="Search decoders" /><datalist id="decoder-options"><option v-for="option in decoderChoices()" :key="option.value" :value="option.value">{{ option.label }}</option></datalist></div>
+      <div class="space-y-2"><Label for="decoder-service">Service</Label><Select v-model="decoderService"><SelectTrigger id="decoder-service" class="w-56"><SelectValue placeholder="Select a service" /></SelectTrigger><SelectContent><SelectItem v-for="service in services" :key="service.id" :value="service.id">{{ service.id }} · {{ service.listen_address }}</SelectItem></SelectContent></Select></div>
+      <Button :disabled="busy || !decoderService" @click="applyDecoder">Apply decoder</Button>
+      <p class="basis-full text-xs text-muted-foreground">Search built-ins (raw, UTF-8, HTTP) or installed WASM versions. This changes parsing for new flows; existing sessions keep their decoder.</p>
+    </div>
     <form class="flex flex-wrap items-end gap-3" @submit.prevent="upload">
       <div class="space-y-2"><Label for="protocol-id">Protocol ID</Label><Input id="protocol-id" v-model="protocolId" required /></div>
       <div class="space-y-2"><Label for="protocol-version">Version</Label><Input id="protocol-version" v-model="version" required /></div>

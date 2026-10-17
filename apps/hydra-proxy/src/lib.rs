@@ -1,6 +1,7 @@
 pub mod app;
 mod config;
 mod grpc;
+pub mod history;
 mod security;
 mod state;
 mod telemetry;

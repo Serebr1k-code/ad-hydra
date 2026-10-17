@@ -60,14 +60,18 @@ export async function api<T = Record<string, unknown>>(path: string, method = 'G
   return response.status === 204 ? undefined as T : response.json() as Promise<T>
 }
 export async function logout(): Promise<void> { await api('/auth/logout','POST'); clear(); changed(); sessions?.postMessage('logout') }
-export async function events(onEvent: (frame: string) => void, signal: AbortSignal): Promise<void> {
+export type LiveState = 'connecting' | 'live' | 'retrying'
+export async function events(onEvent: (frame: string) => void, signal: AbortSignal, onState?: (state:LiveState)=>void): Promise<void> {
+  onState?.('connecting')
   while (!signal.aborted) {
     try {
       if (!token || Date.now() > expires - 5000) await refresh()
       const response = await fetch(endpoint('/traffic/events/stream'), {headers: {Authorization:`Bearer ${token}`}, signal, credentials:'same-origin'})
-      if (!response.ok) throw new Error('Live events unavailable')
+      if (response.status === 401) { await refresh(); continue }
+      if (!response.ok) await error(response)
       if (!response.body) throw new Error('Live stream unavailable')
       const reader = response.body.getReader(), decoder = new TextDecoder(), frames = new EventFrames()
+      onState?.('live')
       try {
         while (!signal.aborted) {
           const {done,value} = await reader.read(); if (done) break
@@ -75,6 +79,7 @@ export async function events(onEvent: (frame: string) => void, signal: AbortSign
         }
       } finally { await reader.cancel().catch(() => {}); reader.releaseLock() }
     } catch { if (signal.aborted) return }
+    if (!signal.aborted) onState?.('retrying')
     if (!signal.aborted) await new Promise<void>(resolve => {
       const finish = () => { clearTimeout(timer); signal.removeEventListener('abort',finish); resolve() }
       const timer = setTimeout(finish,1000); signal.addEventListener('abort',finish,{once:true})

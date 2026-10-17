@@ -14,6 +14,7 @@ pub struct HttpBatch {
 pub struct HttpDecoder {
     buffer: Vec<u8>,
     failed: bool,
+    responses: crate::http_response::Responses,
 }
 impl HttpDecoder {
     pub fn feed(
@@ -21,6 +22,9 @@ impl HttpDecoder {
         direction: Direction,
         bytes: &[u8],
     ) -> Result<Vec<HttpRequest>, DecodeError> {
+        if direction == Direction::ServerToClient {
+            return self.responses.feed(bytes, false);
+        }
         if self.failed {
             return Err(DecodeError("decoder disabled".into()));
         }
@@ -40,6 +44,18 @@ impl HttpDecoder {
     /// Emits every safely framed prefix request, even when a later request fails.
     /// On failure take_pending contains ONLY the undecoded remainder.
     pub fn feed_available(&mut self, direction: Direction, bytes: &[u8]) -> HttpBatch {
+        if direction == Direction::ServerToClient {
+            return match self.responses.feed(bytes, false) {
+                Ok(requests) => HttpBatch {
+                    requests,
+                    failure: None,
+                },
+                Err(error) => HttpBatch {
+                    requests: vec![],
+                    failure: Some(error),
+                },
+            };
+        }
         let mut requests = vec![];
         let failure = if self.failed {
             Some(DecodeError("decoder disabled".into()))
@@ -57,9 +73,6 @@ impl HttpDecoder {
         bytes: &[u8],
         requests: &mut Vec<HttpRequest>,
     ) -> Result<(), DecodeError> {
-        if direction == Direction::ServerToClient {
-            return Ok(());
-        }
         if bytes.len() > 65_536 {
             return Err(DecodeError("HTTP buffer limit".into()));
         }
@@ -91,6 +104,7 @@ impl HttpDecoder {
                 ("http.method".into(), Value::String(parts[0].into())),
                 ("http.path".into(), Value::String(parts[1].into())),
             ]);
+            let mut headers = Vec::new();
             let mut length = None;
             for line in lines.filter(|s| !s.is_empty()) {
                 let (name, value) = line
@@ -104,6 +118,15 @@ impl HttpDecoder {
                 {
                     return Err(DecodeError("HTTP header syntax".into()));
                 }
+                // Preserve observed spelling, order, duplicates and whitespace separately
+                // from the normalized view used to validate message framing.
+                if headers.len() == 128 {
+                    return Err(DecodeError("HTTP header count limit".into()));
+                }
+                headers.push(Value::Object(BTreeMap::from([
+                    ("name".into(), Value::String(name.into())),
+                    ("value".into(), Value::String(value.into())),
+                ])));
                 let value = value.trim();
                 if name.eq_ignore_ascii_case("transfer-encoding")
                     || name.eq_ignore_ascii_case("upgrade")
@@ -133,6 +156,7 @@ impl HttpDecoder {
                     fields.insert("http.user_agent".into(), Value::String(value.into()));
                 }
             }
+            fields.insert("http.headers".into(), Value::List(headers));
             let length = length.unwrap_or(0);
             if length > 49_152 || end + length > 65_536 {
                 return Err(DecodeError("HTTP body limit".into()));
@@ -141,6 +165,7 @@ impl HttpDecoder {
                 break;
             }
             fields.insert("http.body_length".into(), Value::Unsigned(length as u64));
+            self.responses.request(parts[0]);
             let bytes = self.buffer.drain(..end + length).collect();
             requests.push(HttpRequest {
                 bytes,
@@ -156,6 +181,10 @@ impl HttpDecoder {
             return Err(DecodeError("HTTP header limit".into()));
         }
         Ok(())
+    }
+    /// Finish passive close-delimited response inspection at server EOF.
+    pub fn finish_response(&mut self) -> Result<Vec<HttpRequest>, DecodeError> {
+        self.responses.feed(&[], true)
     }
     /// Recover unforwarded bytes on failure/EOF; never contains already emitted frames.
     pub fn take_pending(&mut self) -> Vec<u8> {

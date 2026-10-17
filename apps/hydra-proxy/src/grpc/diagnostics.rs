@@ -12,6 +12,37 @@ use tokio::{
 };
 use tonic::{Request, Response, Status};
 
+fn history_status(error: crate::history::HistoryReadError) -> Status {
+    match error {
+        crate::history::HistoryReadError::Active => {
+            Status::failed_precondition("flow history is not complete")
+        }
+        crate::history::HistoryReadError::Storage(_) => {
+            Status::internal("flow history is unavailable")
+        }
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn history_store_errors_map_to_bounded_rpc_statuses() {
+        assert_eq!(
+            history_status(crate::history::HistoryReadError::Active).code(),
+            tonic::Code::FailedPrecondition
+        );
+        assert_eq!(
+            history_status(crate::history::HistoryReadError::Storage(anyhow::anyhow!(
+                "corrupt"
+            )))
+            .code(),
+            tonic::Code::Internal
+        );
+    }
+}
+
 #[tonic::async_trait]
 impl ProxyDiagnostics for Rpc {
     async fn test_protocol(
@@ -133,6 +164,70 @@ impl ProxyDiagnostics for Rpc {
                 seconds: sample.expires_at,
                 nanos: 0,
             }),
+        }))
+    }
+
+    async fn get_flow_history(
+        &self,
+        request: Request<v1::GetFlowHistoryRequest>,
+    ) -> Result<Response<v1::GetFlowHistoryReply>, Status> {
+        let flow_id = request.into_inner().flow_id;
+        if flow_id.len() > 128 || uuid::Uuid::parse_str(&flow_id).is_err() {
+            return Err(Status::invalid_argument("invalid flow identifier"));
+        }
+        let _permit = self
+            .diagnostics
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("diagnostics busy"))?;
+        if self
+            .state
+            .telemetry
+            .flows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&flow_id)
+        {
+            return Err(Status::failed_precondition("flow is still active"));
+        }
+        let store = self
+            .state
+            .telemetry
+            .history
+            .read()
+            .map_err(|_| Status::internal("history store unavailable"))?
+            .clone()
+            .ok_or_else(|| Status::unavailable("history store disabled"))?;
+        let history = store
+            .get(&flow_id)
+            .await
+            .map_err(history_status)?
+            .ok_or_else(|| Status::not_found("flow history is unavailable or expired"))?;
+        let total = history.client_to_server.len() + history.server_to_client.len();
+        if total > crate::history::MAX_HISTORY_BYTES {
+            return Err(Status::resource_exhausted("history exceeds response limit"));
+        }
+        Ok(Response::new(v1::GetFlowHistoryReply {
+            flow_id: history.flow_id,
+            service_id: history.service_id,
+            protocol_id: history.protocol_id,
+            opened_at_ms: history.opened_at_ms,
+            closed_at_ms: history.closed_at_ms,
+            bytes_client_to_server: history.bytes_client_to_server,
+            bytes_server_to_client: history.bytes_server_to_client,
+            segments: vec![
+                v1::HistorySegment {
+                    direction: 1,
+                    data: history.client_to_server,
+                },
+                v1::HistorySegment {
+                    direction: 2,
+                    data: history.server_to_client,
+                },
+            ],
+            truncated_client_to_server: history.truncated_client_to_server,
+            truncated_server_to_client: history.truncated_server_to_client,
+            history_truncated: history.history_truncated,
         }))
     }
     async fn probe_service(

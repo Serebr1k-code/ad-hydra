@@ -2,7 +2,7 @@ import { createRouter, createWebHashHistory } from 'vue-router'
 export const router = createRouter({
  history:createWebHashHistory(),
  routes:[
-  {path:'/',redirect:'/services'},
+  {path:'/',redirect:'/traffic'},
   {path:'/services',component:()=>import('@/features/services/ServicesPage.vue')},
   {path:'/filters',component:()=>import('@/features/filters/FiltersPage.vue')},
   {path:'/traffic',component:()=>import('@/features/traffic/TrafficPage.vue')},
@@ -11,6 +11,6 @@ export const router = createRouter({
   {path:'/flags',component:()=>import('@/features/flags/FlagsPage.vue')},
   {path:'/users',component:()=>import('@/features/users/UsersPage.vue')},
   {path:'/settings',component:()=>import('@/features/settings/SettingsPage.vue')},
-  {path:'/:pathMatch(.*)*',redirect:'/services'},
+  {path:'/:pathMatch(.*)*',redirect:'/traffic'},
  ],
 })

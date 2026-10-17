@@ -1107,6 +1107,12 @@ paths:
         schema:
           type: integer
           minimum: 0
+      - name: newest_first
+        in: query
+        description: Descending ingestion order with an exclusive older-than cursor; default remains oldest-first.
+        required: false
+        schema:
+          type: boolean
       - name: service_id
         in: query
         required: false
@@ -1229,6 +1235,32 @@ paths:
           description: ''
         '503':
           description: ''
+  /api/v1/traffic/flows/{id}/history:
+    get:
+      tags:
+      - traffic
+      operationId: flow_history
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlowHistory'
+        '401':
+          description: ''
+        '404':
+          description: ''
+        '409':
+          description: Flow is active or history is still being saved
+        '503':
+          description: ''
   /api/v1/traffic/flows/{id}/messages:
     get:
       tags:
@@ -1252,6 +1284,12 @@ paths:
         schema:
           type: integer
           minimum: 0
+      - name: newest_first
+        in: query
+        description: Descending ingestion order with an exclusive older-than cursor; default remains oldest-first.
+        required: false
+        schema:
+          type: boolean
       - name: service_id
         in: query
         required: false
@@ -1627,6 +1665,51 @@ components:
           type:
           - string
           - 'null'
+    FlowHistory:
+      type: object
+      required:
+      - flow_id
+      - service_id
+      - protocol_id
+      - opened_at_ms
+      - closed_at_ms
+      - bytes_client_to_server
+      - bytes_server_to_client
+      - segments
+      - truncated_client_to_server
+      - truncated_server_to_client
+      - history_truncated
+      properties:
+        bytes_client_to_server:
+          type: integer
+          format: int64
+          minimum: 0
+        bytes_server_to_client:
+          type: integer
+          format: int64
+          minimum: 0
+        closed_at_ms:
+          type: integer
+          format: int64
+        flow_id:
+          type: string
+        history_truncated:
+          type: boolean
+        opened_at_ms:
+          type: integer
+          format: int64
+        protocol_id:
+          type: string
+        segments:
+          type: array
+          items:
+            $ref: '#/components/schemas/HistorySegment'
+        service_id:
+          type: string
+        truncated_client_to_server:
+          type: boolean
+        truncated_server_to_client:
+          type: boolean
     FramingInput:
       oneOf:
       - type: object
@@ -1720,6 +1803,21 @@ components:
         name:
           type: string
       additionalProperties: false
+    HistorySegment:
+      type: object
+      required:
+      - direction
+      - data
+      properties:
+        data:
+          type: array
+          items:
+            type: integer
+            format: int32
+            minimum: 0
+        direction:
+          type: integer
+          format: int32
     ListResponse:
       type: object
       required:
@@ -1780,6 +1878,11 @@ components:
           minimum: 0
         mode:
           type: string
+        python_packages:
+          type: array
+          items:
+            type: string
+          description: Exact PyPI name==version pins prepared with uv before isolated execution.
         runtime:
           type: string
         timeout_seconds:
@@ -1979,6 +2082,8 @@ components:
           type: string
         protocol_id:
           type: string
+        retain_history:
+          type: boolean
         transport:
           type: string
         upstream_address:

@@ -45,6 +45,7 @@ fn exploit() -> Exploit {
             timeout_seconds: 1,
             memory_mib: 32,
             cpu_percent: 10,
+            python_packages: vec![],
         },
         target_ids: vec!["local".into()],
         interval_seconds: None,
@@ -273,4 +274,76 @@ async fn batch_target_aliases_rejected_without_worker_execution() {
     farm.exploit(actor, batch).await.unwrap();
     drop(farm);
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn python_package_pins_are_persisted_and_fixed_for_uploaded_version() {
+    let (farm, directory) = setup().await;
+    let actor = Actor::user("operator".into());
+    farm.target(actor.clone(), target()).await.unwrap();
+    farm.upload(
+        actor.clone(),
+        "toy".into(),
+        "v1".into(),
+        b"# benign fixture".to_vec(),
+    )
+    .await
+    .unwrap();
+    let mut configured = exploit();
+    configured.manifest.runtime = "python".into();
+    configured.manifest.python_packages = vec!["requests==2.32.5".into()];
+    farm.exploit(actor.clone(), configured.clone())
+        .await
+        .unwrap();
+    configured.revision = 1;
+    configured.manifest.python_packages = vec!["requests==2.31.0".into()];
+    assert!(
+        farm.exploit(actor.clone(), configured.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("immutable version")
+    );
+    configured.manifest.python_packages = vec!["requests==2.32.5".into()];
+    configured.name = "renamed".into();
+    farm.exploit(actor.clone(), configured.clone())
+        .await
+        .unwrap();
+    configured.revision = 2;
+    configured.version = "v2".into();
+    configured.manifest.python_packages = vec!["requests==2.31.0".into()];
+    farm.exploit(actor.clone(), configured).await.unwrap();
+    farm.upload(
+        actor,
+        "toy".into(),
+        "v2".into(),
+        b"# another benign fixture".to_vec(),
+    )
+    .await
+    .unwrap();
+    farm.auth
+        .db
+        .run(|db| {
+            let binding: String = db.query_row(
+                "SELECT runtime_binding FROM farm_versions WHERE version='v2'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(binding, r#"["python",["requests==2.31.0"]]"#);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(farm);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn packages_default_empty_and_non_python_packages_are_rejected() {
+    let manifest: Manifest = serde_json::from_value(serde_json::json!({"runtime":"python","mode":"batch","timeout_seconds":1,"memory_mib":32,"cpu_percent":10})).unwrap();
+    assert!(manifest.python_packages.is_empty());
+    let mut manifest = manifest;
+    manifest.runtime = "shell".into();
+    manifest.python_packages.push("requests==2.32.5".into());
+    assert!(manifest.validate().is_err());
 }

@@ -6,7 +6,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 const emit = defineEmits<{ search: [query: string] }>()
 const fields = [
-  ['service_id', 'Service ID'], ['source_ip', 'Source / client IP'], ['destination_ip', 'Destination / upstream IP'],
+  ['source_ip', 'Source / client IP'], ['destination_ip', 'Destination / upstream IP'],
   ['since_ms', 'Since UTC'], ['until_ms', 'Until UTC'], ['field_path', 'Parser field (exact ID)'],
   ['field_value', 'Field value'], ['matched_rule', 'Matched rule ID'],
 ] as const

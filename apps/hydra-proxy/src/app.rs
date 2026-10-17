@@ -40,6 +40,19 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     }
     *telemetry.samples.write().unwrap_or_else(|e| e.into_inner()) =
         Some(crate::samples::SampleRing::open(sample_directory).await?);
+    let history_directory = config
+        .state_file
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("history");
+    if !history_directory.exists() {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&history_directory)?;
+    }
+    *telemetry.history.write().unwrap_or_else(|e| e.into_inner()) =
+        Some(crate::history::HistoryStore::open(history_directory).await?);
     let plugin_directory = config
         .state_file
         .parent()
@@ -84,7 +97,11 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             ProxyControlServer::new(rpc.clone()).max_decoding_message_size(4 * 1024 * 1024 + 65536),
         )
         .add_service(ProxyTelemetryServer::new(rpc.clone()).max_decoding_message_size(4096))
-        .add_service(ProxyDiagnosticsServer::new(rpc).max_decoding_message_size(16384))
+        .add_service(
+            ProxyDiagnosticsServer::new(rpc)
+                .max_decoding_message_size(16384)
+                .max_encoding_message_size(256 * 1024),
+        )
         .serve_with_incoming_shutdown(security::incoming(listener, uid), shutdown.cancelled())
         .await;
     shutdown.cancel();

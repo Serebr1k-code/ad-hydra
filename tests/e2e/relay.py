@@ -7,6 +7,9 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -94,6 +97,68 @@ class Relay(unittest.TestCase):
                 p = subprocess.run([str(BIN / 'hydra-core'), '--socket', sock, 'status'], capture_output=True, text=True, check=True, timeout=5)
                 return json.loads(p.stdout)
 
+            def api_request(method, path, token=None, payload=None):
+                headers = {'Origin': origin}
+                data = None
+                if payload is not None:
+                    headers['Content-Type'] = 'application/json'
+                    data = json.dumps(payload).encode()
+                if token:
+                    headers['Authorization'] = 'Bearer ' + token
+                request = urllib.request.Request(f'http://127.0.0.1:{hp}{path}', data=data, headers=headers, method=method)
+                with urllib.request.urlopen(request, timeout=3) as response:
+                    return response.status, json.loads(response.read())
+
+            def auth_token():
+                _, result = api_request('POST', '/api/v1/auth/login', payload={
+                    'username': 'history-test', 'password': 'test-password-12345'})
+                return result['access_token']
+
+            def find_flow(token, client_port):
+                query = urllib.parse.urlencode({'service_id': 'tcp', 'limit': 50, 'newest_first': 'true'})
+                _, result = api_request('GET', '/api/v1/traffic/flows?' + query, token)
+                return next((flow for flow in result['items']
+                             if flow.get('client', {}).get('port') == client_port), None)
+
+            def check_saved_history(token):
+                live = socket.create_connection(('127.0.0.1', tp), timeout=2)
+                live.settimeout(3)
+                client_port = live.getsockname()[1]
+                sent = b'hydra-gzip-history-loopback'
+                live.sendall(sent)
+                self.assertEqual(live.recv(len(sent)), sent)
+                flow = None
+                for _ in range(60):
+                    flow = find_flow(token, client_port)
+                    if flow:
+                        break
+                    time.sleep(.05)
+                self.assertIsNotNone(flow, 'Core did not index the local TCP session')
+                flow_id = flow['flow_id']
+                with self.assertRaises(urllib.error.HTTPError) as active:
+                    api_request('GET', f'/api/v1/traffic/flows/{flow_id}/history', token)
+                self.assertEqual(active.exception.code, 409)
+                live.shutdown(socket.SHUT_WR)
+                received = b''
+                while data := live.recv(8192):
+                    received += data
+                live.close()
+                self.assertEqual(received, b'after-half-close')
+                history = None
+                for _ in range(60):
+                    try:
+                        _, history = api_request('GET', f'/api/v1/traffic/flows/{flow_id}/history', token)
+                        break
+                    except urllib.error.HTTPError as error:
+                        if error.code not in (404, 409):
+                            raise
+                        time.sleep(.05)
+                self.assertIsNotNone(history, 'Proxy did not persist the closed TCP stream history')
+                by_direction = {segment['direction']: bytes(segment['data']) for segment in history['segments']}
+                self.assertIn(sent, by_direction[1])
+                self.assertIn(b'after-half-close', by_direction[2])
+                self.assertFalse(history['history_truncated'])
+
             def check_tcp():
                 with socket.create_connection(('127.0.0.1', tp), timeout=2) as c:
                     payload = bytes(range(256)) * 257
@@ -125,9 +190,21 @@ class Relay(unittest.TestCase):
                 self.assertEqual(first['applied_services_revision'], 1)
                 self.assertEqual(os.stat(sock).st_mode & 0o777, 0o600)
                 hp = port()
-                core = subprocess.Popen([str(BIN / 'hydra-core'), '--socket', sock, '--database', str(tmp / 'core.db'), '--key', str(tmp / 'jwt.pem'), 'serve', '--listen', f'127.0.0.1:{hp}', '--snapshot', str(tmp / 'snapshot.json')], stdout=log, stderr=log)
+                origin = f'https://localhost:{hp}'
+                created = subprocess.run([str(BIN / 'hydra-core'), '--database', str(tmp / 'core.db'), '--key', str(tmp / 'jwt.pem'), 'create', 'user', 'history-test', 'test-password-12345'], capture_output=True, text=True, timeout=10)
+                self.assertEqual(created.returncode, 0, created.stderr)
+                core = subprocess.Popen([str(BIN / 'hydra-core'), '--socket', sock, '--database', str(tmp / 'core.db'), '--key', str(tmp / 'jwt.pem'), 'serve', '--origin', origin, '--listen', f'127.0.0.1:{hp}', '--snapshot', str(tmp / 'snapshot.json')], stdout=log, stderr=log)
                 processes.append(core)
                 os.sched_setaffinity(core.pid, sorted(os.sched_getaffinity(0))[:2])
+                for _ in range(100):
+                    try:
+                        token = auth_token()
+                        break
+                    except (urllib.error.URLError, ConnectionError):
+                        time.sleep(.05)
+                else:
+                    self.fail('Core HTTP did not become ready for login')
+                check_saved_history(token)
                 check_tcp()
                 check_udp()
                 live = socket.create_connection(('127.0.0.1', tp), timeout=2)

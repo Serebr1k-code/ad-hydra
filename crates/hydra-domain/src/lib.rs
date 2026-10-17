@@ -19,9 +19,14 @@ pub struct Service {
     #[serde(default = "raw")]
     pub protocol_id: String,
     pub enabled: bool,
+    #[serde(default = "history_enabled")]
+    pub retain_history: bool,
 }
 fn raw() -> String {
     "raw".into()
+}
+fn history_enabled() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -42,8 +47,8 @@ impl ServiceSnapshot {
             if s.id.is_empty() || s.id.len() > 128 || !ids.insert(&s.id) {
                 return Err("service IDs must be unique, nonempty, and at most 128 bytes".into());
             }
-            if !matches!(s.protocol_id.as_str(), "raw" | "http") {
-                return Err("only raw and http profiles are built in".into());
+            if !matches!(s.protocol_id.as_str(), "raw" | "utf8" | "http") {
+                return Err("only raw, utf8, and http profiles are built in".into());
             }
             if s.protocol_id == "http" && s.transport != Transport::Tcp {
                 return Err("HTTP profile requires TCP".into());
@@ -88,6 +93,7 @@ mod tests {
             upstream_address: "127.0.0.1:2002".parse().unwrap(),
             protocol_id: "raw".into(),
             enabled: true,
+            retain_history: true,
         }
     }
     #[test]
@@ -117,6 +123,70 @@ mod tests {
             }
             .validate()
             .is_ok()
+        );
+    }
+    #[test]
+    fn utf8_is_a_builtin_profile_on_tcp_and_udp() {
+        let mut utf8_service = service();
+        utf8_service.protocol_id = "utf8".into();
+        let tcp = ServiceSnapshot {
+            revision: 1,
+            services: vec![utf8_service.clone()],
+        };
+        assert!(tcp.validate().is_ok());
+        utf8_service.transport = Transport::Udp;
+        assert!(
+            ServiceSnapshot {
+                revision: 1,
+                services: vec![utf8_service]
+            }
+            .validate()
+            .is_ok()
+        );
+        let mut unknown = service();
+        unknown.protocol_id = "unknown-profile".into();
+        assert!(
+            ServiceSnapshot {
+                revision: 1,
+                services: vec![unknown]
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_service_json_defaults_history_retention_to_true() {
+        let service: Service = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "transport": "tcp",
+            "listen_address": "127.0.0.1:2001",
+            "upstream_address": "127.0.0.1:2002",
+            "protocol_id": "raw",
+            "enabled": true
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(service).unwrap()["retain_history"],
+            true
+        );
+    }
+
+    #[test]
+    fn explicit_history_retention_survives_service_json_round_trip() {
+        let service: Service = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "transport": "tcp",
+            "listen_address": "127.0.0.1:2001",
+            "upstream_address": "127.0.0.1:2002",
+            "protocol_id": "raw",
+            "enabled": true,
+            "retain_history": false
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(service).unwrap()["retain_history"],
+            false
         );
     }
 }

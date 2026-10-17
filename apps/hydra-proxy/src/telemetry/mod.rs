@@ -17,6 +17,7 @@ pub fn timestamp() -> prost_types::Timestamp {
 
 pub struct Telemetry {
     pub samples: std::sync::RwLock<Option<Arc<crate::samples::SampleRing>>>,
+    pub history: std::sync::RwLock<Option<Arc<crate::history::HistoryStore>>>,
     pub flows: std::sync::Mutex<std::collections::BTreeSet<String>>,
     pub scanner: std::sync::RwLock<Option<Arc<crate::inspection::flags::Scanner>>>,
     pub critical: std::sync::RwLock<Option<Arc<critical::CriticalSpool>>>,
@@ -38,6 +39,7 @@ impl Telemetry {
         let (events, _) = broadcast::channel(1024);
         Arc::new(Self {
             samples: std::sync::RwLock::new(None),
+            history: std::sync::RwLock::new(None),
             flows: std::sync::Mutex::new(Default::default()),
             scanner: std::sync::RwLock::new(None),
             critical: std::sync::RwLock::new(None),
@@ -60,6 +62,16 @@ impl Telemetry {
             permits: Arc::new(Semaphore::new(max_flows)),
             subscribers: Arc::new(Semaphore::new(4)),
         })
+    }
+    pub fn apply_history_services(&self, services: &[Service]) {
+        if let Some(history) = self
+            .history
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            history.apply_services(services);
+        }
     }
     pub fn decoder_error(&self, service: &str, flow: &str, reason: &str) {
         self.emit(
@@ -243,6 +255,20 @@ impl Telemetry {
         client: SocketAddr,
         permit: OwnedSemaphorePermit,
     ) -> Flow {
+        let id = uuid::Uuid::new_v4().to_string();
+        let history = if service.retain_history && service.transport == Transport::Tcp {
+            self.history
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .and_then(|store| {
+                    store.begin(id.clone(), service.id.clone(), service.protocol_id.clone())
+                })
+        } else {
+            None
+        };
+        let history_truncated =
+            service.retain_history && service.transport == Transport::Tcp && history.is_none();
         let flow = Flow {
             scanner: std::sync::Mutex::new(
                 self.scanner
@@ -252,12 +278,14 @@ impl Telemetry {
                     .map(|s| s.session()),
             ),
             transport: service.transport,
-            id: uuid::Uuid::new_v4().to_string(),
+            id,
             service: service.id.clone(),
             telemetry: self.clone(),
             up: AtomicU64::new(0),
             down: AtomicU64::new(0),
             reason: "closed".into(),
+            history: std::sync::Mutex::new(history),
+            history_truncated: std::sync::atomic::AtomicBool::new(history_truncated),
             _permit: permit,
         };
         self.flows
@@ -295,9 +323,21 @@ pub struct Flow {
     pub up: AtomicU64,
     pub down: AtomicU64,
     pub reason: String,
+    history: std::sync::Mutex<Option<crate::history::HistoryWriter>>,
+    history_truncated: std::sync::atomic::AtomicBool,
     _permit: OwnedSemaphorePermit,
 }
 impl Flow {
+    pub fn record_history(&self, direction: hydra_protocol_sdk::Direction, bytes: &[u8]) {
+        if let Some(history) = self
+            .history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            history.record(direction, bytes);
+        }
+    }
     pub fn scan(&self, direction: hydra_protocol_sdk::Direction, bytes: &[u8]) {
         if let Some(samples) = self
             .telemetry
@@ -330,6 +370,23 @@ impl Flow {
 }
 impl Drop for Flow {
     fn drop(&mut self) {
+        let history_truncated = self
+            .history
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .is_some_and(|history| {
+                history.finish(
+                    SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                        .min(i64::MAX as u128) as i64,
+                    self.up.load(Ordering::Relaxed),
+                    self.down.load(Ordering::Relaxed),
+                )
+            })
+            || self.history_truncated.load(Ordering::Relaxed);
         self.telemetry
             .flows
             .lock()
@@ -343,6 +400,7 @@ impl Drop for Flow {
                 bytes_client_to_server: self.up.load(Ordering::Relaxed),
                 bytes_server_to_client: self.down.load(Ordering::Relaxed),
                 reason: self.reason.clone(),
+                history_truncated,
             }),
         );
     }

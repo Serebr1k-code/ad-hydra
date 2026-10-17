@@ -104,6 +104,7 @@ async fn failed_persistence_preserves_revision_and_replay_checks_content() {
         upstream_address: "127.0.0.1:23002".parse().unwrap(),
         protocol_id: "raw".into(),
         enabled: false,
+        retain_history: true,
     });
     assert!(
         state
@@ -186,6 +187,7 @@ async fn combined_snapshot_moves_dependent_rules_and_service_together() {
         upstream_address: "127.0.0.1:24002".parse().unwrap(),
         protocol_id: "raw".into(),
         enabled: false,
+        retain_history: true,
     };
     let rule = hydra_domain::Rule {
         id: "rule".into(),

@@ -1,10 +1,13 @@
 //! Bounded decoders; decoding never owns or edits transport buffers.
 mod framing;
 mod http;
+mod http_response;
+mod utf8;
 pub use framing::FramingDecoder;
 mod wasm;
 pub use http::{HttpBatch, HttpDecoder, HttpRequest};
 pub use hydra_protocol_sdk::{Direction, ParsedMessage, Value};
+pub use utf8::Utf8Decoder;
 pub use wasm::{PluginRegistry, PluginVersion, WasmSession};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodeError(pub String);
@@ -18,6 +21,7 @@ pub enum SessionDecoder {
     Raw,
     Framing(FramingDecoder),
     Http(HttpDecoder),
+    Utf8(Utf8Decoder),
     Wasm(Box<WasmSession>),
 }
 impl SessionDecoder {
@@ -32,6 +36,7 @@ impl SessionDecoder {
             Self::Http(h) => h
                 .feed(direction, bytes)
                 .map(|v| v.into_iter().map(|r| r.message).collect()),
+            Self::Utf8(d) => d.feed(direction, bytes),
             Self::Wasm(w) => w.feed(direction, bytes),
         }
     }

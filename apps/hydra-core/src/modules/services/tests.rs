@@ -29,6 +29,7 @@ fn service() -> Service {
         upstream_address: "127.0.0.1:21002".parse().unwrap(),
         protocol_id: "http".into(),
         enabled: true,
+        retain_history: true,
     }
 }
 fn rule() -> Rule {

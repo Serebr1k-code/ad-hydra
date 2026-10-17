@@ -373,6 +373,9 @@ impl Protocols {
         } else {
             let decoder = match protocol_id {
                 "http" | "http1" | "http1.1" => SessionDecoder::Http(HttpDecoder::default()),
+                "utf8" | "utf-8" | "text" => {
+                    SessionDecoder::Utf8(hydra_protocol_runtime::Utf8Decoder::default())
+                }
                 _ => SessionDecoder::Raw,
             };
             (decoder, None)
@@ -622,6 +625,16 @@ mod tests {
             &reopened.session("other", "unknown").unwrap().decoder,
             SessionDecoder::Raw
         ));
+        let mut utf8 = reopened.session("other", "utf8").unwrap();
+        let decoded = utf8
+            .feed(Direction::ClientToServer, "привет".as_bytes())
+            .unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].protocol, "utf8");
+        assert_eq!(
+            decoded[0].fields["utf8.text"],
+            hydra_protocol_runtime::Value::String("привет".into())
+        );
         for entry in fs::read_dir(&directory).unwrap() {
             assert_eq!(
                 entry.unwrap().metadata().unwrap().permissions().mode() & 0o777,

@@ -58,6 +58,11 @@ pub struct SandboxSettings {
     pub runtime_dir: PathBuf,
     pub bwrap: PathBuf,
     pub ip: PathBuf,
+    #[serde(default = "default_uv")]
+    pub uv: PathBuf,
+}
+fn default_uv() -> PathBuf {
+    "/usr/bin/uv".into()
 }
 impl Settings {
     pub fn load(path: Option<&Path>) -> anyhow::Result<Self> {
@@ -178,6 +183,7 @@ impl farm::Runner for Runner {
                 runtime_dir: settings.runtime_dir.clone(),
                 bwrap: settings.bwrap,
                 ip: settings.ip,
+                uv: settings.uv,
                 helper: std::env::current_exe()?,
                 allowlist: targets.clone(),
             })?;
@@ -239,6 +245,8 @@ impl farm::Runner for Runner {
                                 "shell" => sandbox::Runtime::Shell,
                                 _ => sandbox::Runtime::Elf,
                             },
+                            python_packages: job.manifest.python_packages.clone(),
+                            python_environment_key: format!("{}:{}", job.exploit_id, job.version),
                             target: address,
                             endpoints,
                             timeout: remaining,

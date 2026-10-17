@@ -40,6 +40,12 @@ pub(super) fn validate_job(job: &Job, config: &Config) -> Result<()> {
             "invalid worker resource limits".into(),
         ));
     }
+    super::validate_python_packages(&job.python_packages)?;
+    if !matches!(job.runtime, Runtime::Python) && !job.python_packages.is_empty() {
+        return Err(SandboxError::Invalid(
+            "packages require Python runtime".into(),
+        ));
+    }
     let entry = Path::new(&job.entrypoint);
     if entry.as_os_str().is_empty()
         || entry
@@ -101,6 +107,7 @@ pub(super) fn outer_args(
     config: &Config,
     job: &Job,
     directory: &Path,
+    python: Option<&Path>,
     json: &str,
 ) -> Vec<OsString> {
     let mut output = args(&[
@@ -144,6 +151,16 @@ pub(super) fn outer_args(
         "C.UTF-8",
         "--ro-bind",
     ]);
+    if let Some(python) = python {
+        output.extend([
+            python.as_os_str().to_owned(),
+            OsString::from("/python"),
+            OsString::from("--ro-bind"),
+            config.uv.as_os_str().to_owned(),
+            OsString::from("/hydra-uv"),
+            OsString::from("--ro-bind"),
+        ]);
+    }
     output.extend([
         config.helper.as_os_str().to_owned(),
         OsString::from("/hydra-helper"),
@@ -168,6 +185,16 @@ pub(super) fn outer_args(
 }
 pub(super) fn inner_command(config: &super::BridgeConfig) -> std::process::Command {
     let mut command = std::process::Command::new("/hydra-bwrap");
+    if matches!(config.runtime, Runtime::Python) {
+        command.args([
+            "--ro-bind",
+            "/python",
+            "/python",
+            "--ro-bind",
+            "/hydra-uv",
+            "/uv",
+        ]);
+    }
     command.args([
         "--unshare-pid",
         "--unshare-ipc",
@@ -220,7 +247,23 @@ pub(super) fn inner_command(config: &super::BridgeConfig) -> std::process::Comma
     let entry = format!("/work/{}", config.entrypoint);
     match config.runtime {
         Runtime::Python => {
-            command.args(["/usr/bin/python3", "-I", &entry]);
+            command.args([
+                "/uv",
+                "--offline",
+                "--no-config",
+                "--no-cache",
+                "run",
+                "--no-env-file",
+                "--no-project",
+                "--no-sync",
+                "--no-python-downloads",
+                "--python",
+                "/python/bin/python",
+                "--",
+                "/python/bin/python",
+                "-I",
+                &entry,
+            ]);
         }
         Runtime::Shell => {
             command.args(["/usr/bin/sh", &entry]);
@@ -265,6 +308,7 @@ mod tests {
             runtime_dir: "/runtime".into(),
             bwrap: "/usr/bin/bwrap".into(),
             ip: "/usr/bin/ip".into(),
+            uv: "/usr/bin/uv".into(),
             helper: "/core".into(),
             allowlist: vec![],
         };
@@ -272,6 +316,8 @@ mod tests {
             source_dir: "/upload".into(),
             entrypoint: "run.py".into(),
             runtime: Runtime::Python,
+            python_packages: vec![],
+            python_environment_key: "test".into(),
             target: "192.0.2.1:80".parse().unwrap(),
             endpoints: vec![],
             timeout: std::time::Duration::from_secs(1),
@@ -279,12 +325,43 @@ mod tests {
             cpu_millis_per_second: 100,
             pids: 16,
         };
-        let values = outer_args(&config, &job, Path::new("/runtime/job"), "{}");
+        let values = outer_args(&config, &job, Path::new("/runtime/job"), None, "{}");
         assert!(values.contains(&OsString::from("--unshare-all")));
         assert!(values.contains(&OsString::from("--clearenv")));
         assert!(!values.contains(&OsString::from("--share-net")));
         assert!(!values.contains(&OsString::from("/home")));
         assert!(!values.contains(&OsString::from("/sys")));
+    }
+    #[test]
+    fn python_uses_prepared_read_only_environment_and_offline_uv() {
+        let config = super::super::BridgeConfig {
+            target: "192.0.2.1:80".parse().unwrap(),
+            endpoints: vec![],
+            entrypoint: "exploit".into(),
+            runtime: Runtime::Python,
+        };
+        let command = inner_command(&config);
+        let arguments = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        for required in [
+            "/python",
+            "/uv",
+            "--offline",
+            "--no-config",
+            "--no-env-file",
+            "--no-project",
+            "--no-sync",
+            "--no-python-downloads",
+            "-I",
+        ] {
+            assert!(
+                arguments.iter().any(|value| value == required),
+                "{required}"
+            );
+        }
+        assert!(!arguments.iter().any(|value| value == "--share-net"));
     }
     #[test]
     fn duplicate_batch_endpoints_rejected_before_filesystem_or_launch() {
@@ -294,6 +371,7 @@ mod tests {
             runtime_dir: "/missing".into(),
             bwrap: "/missing".into(),
             ip: "/missing".into(),
+            uv: "/usr/bin/uv".into(),
             helper: "/missing".into(),
             allowlist: vec![address],
         };
@@ -301,6 +379,8 @@ mod tests {
             source_dir: "/missing".into(),
             entrypoint: "run".into(),
             runtime: Runtime::Elf,
+            python_packages: vec![],
+            python_environment_key: "test".into(),
             target: address,
             endpoints: vec![
                 super::super::Endpoint {
@@ -330,6 +410,7 @@ mod tests {
             runtime_dir: "/missing".into(),
             bwrap: "/missing".into(),
             ip: "/missing".into(),
+            uv: "/usr/bin/uv".into(),
             helper: "/missing".into(),
             allowlist: vec!["192.0.2.1:80".parse().unwrap()],
         };
@@ -337,6 +418,8 @@ mod tests {
             source_dir: "/missing".into(),
             entrypoint: "../../etc/shadow".into(),
             runtime: Runtime::Shell,
+            python_packages: vec![],
+            python_environment_key: "test".into(),
             target: "192.0.2.2:80".parse().unwrap(),
             endpoints: vec![],
             timeout: std::time::Duration::from_secs(1),
