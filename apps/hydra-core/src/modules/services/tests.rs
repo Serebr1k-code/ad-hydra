@@ -207,6 +207,7 @@ async fn http_authorship_and_conflict_are_server_enforced() {
     let body: serde_json::Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
     assert_eq!(body["services"]["revision"], 1);
+    assert_eq!(body["id"], body["services"]["services"][0]["id"]);
     let response = app
         .clone()
         .oneshot(

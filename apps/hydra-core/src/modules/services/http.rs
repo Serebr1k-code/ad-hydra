@@ -235,7 +235,13 @@ pub async fn services(
         .map(Json)
         .map_err(Error::from)
 }
-#[utoipa::path(post,path="/api/v1/services",request_body=ServiceInput,responses((status=202,body=Object),(status=409)),tag="services")]
+#[derive(Serialize)]
+struct CreatedServiceResponse {
+    id: String,
+    #[serde(flatten)]
+    desired: super::Desired,
+}
+#[utoipa::path(post,path="/api/v1/services",request_body=ServiceInput,responses((status=202,description="Created service snapshot; id identifies the newly created service",body=Object),(status=409)),tag="services")]
 pub async fn create_service(
     State(c): State<Control>,
     headers: HeaderMap,
@@ -244,9 +250,16 @@ pub async fn create_service(
     let a = actor(&c, &headers).await?;
     let revision = input.expected_revision;
     let service = input.into_service(uuid::Uuid::new_v4().to_string());
+    let id = service.id.clone();
     c.put_service(a, revision, service, true, request())
         .await
-        .map(|v| (StatusCode::ACCEPTED, Json(v)).into_response())
+        .map(|desired| {
+            (
+                StatusCode::ACCEPTED,
+                Json(CreatedServiceResponse { id, desired }),
+            )
+                .into_response()
+        })
         .map_err(Error::from)
 }
 #[utoipa::path(patch,path="/api/v1/services/{id}",params(("id"=String,Path)),request_body=ServiceInput,responses((status=202,body=Object),(status=409)),tag="services")]

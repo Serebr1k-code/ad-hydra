@@ -96,7 +96,7 @@ Hydra enforces these ABI/resource bounds: module 4 MiB; no imports (including WA
 2. Open **Schema / profile** to inspect the decoder's metadata. Missing metadata is allowed for older ABI v1 decoders, but declaring it makes fields discoverable.
 3. Capture representative bytes from a live authorized session in **Traffic → Captured bytes**. Capture is opt-in and bounded. The resulting sample ID is used for deterministic decoder testing; the saved sample expires.
 4. Use **Test saved sample** for the uploaded version. This evaluates the sample without activating the parser or forwarding any traffic. Inspect emitted fields and fix the decoder/version if the result is incorrect. Versions are immutable: upload changes under a new version.
-5. In **Protocols → Capture decoder**, search for `<id>/<version>`, choose the target service, and apply it. This activates the decoder for newly created flows. Existing sessions retain the version they started with.
+5. In **Services**, add or edit a service, search **Capture decoder** for `custom:<id>/<version>`, then **Save service**. This activates the decoder for newly created flows. Existing sessions retain the version they started with. The Protocols page also retains its activation shortcut.
 6. Choose **Use service parser** in the service's activation row to remove the custom override. New flows then use the service's configured built-in profile (`raw`, `utf8`, or `http`). Existing sessions keep their original decoder until they close.
 
 The equivalent API operations use the public REST API documented by Swagger at `/docs`:
@@ -119,3 +119,22 @@ Use a fresh access token: access JWTs expire after 60 seconds. The browser handl
 ## Important limits
 
 Hydra does not decrypt TLS or infer application plaintext from encryption. HTTP/2, WebSocket, arbitrary compression, and protocol-specific authentication are not automatically decoded. The UTF-8 view simply decodes the captured bytes with replacement characters for invalid sequences. WASM checksums detect content changes but do not attest to who authored a module. The WASM sandbox has no filesystem, network, clock, or host callbacks. New versions do not migrate parser state from existing sessions.
+
+### Select an uploaded module for a service
+
+1. In **Protocols**, enter a protocol ID and version, choose the compiled `.wasm`, then **Upload**. Wait for `installed`; validation failures cannot be selected.
+2. In **Services**, add or edit a service. Search **Capture decoder** and select the uploaded `custom:ID/version` entry.
+3. **Save service** applies the listener and activates that module. The services table shows the selected module/version. Reopen the editor to change it; choosing raw, UTF-8 or HTTP removes the custom override.
+
+New connections use the selected decoder. Existing connections keep their decoder version. If saving reports a partial failure, the service is already saved: retry **Save service**, or refresh to inspect the pending activation. The module upload and activation shortcuts on Protocols remain available.
+
+The browser acceptance test exercises real upload, service selection, activation,
+switching to a built-in and retries after a lost activation response. Build an
+example first, then run it against local binaries:
+
+```sh
+cargo build --locked --release --manifest-path plugins/examples/length-prefixed/Cargo.toml --target wasm32-unknown-unknown
+(cd frontend && bun run build && bun test)
+cargo build --locked -p hydra-core -p hydra-proxy
+HYDRA_WASM_SAMPLE="$PWD/plugins/examples/length-prefixed/target/wasm32-unknown-unknown/release/hydra_length_prefixed_example.wasm" python3 tests/e2e/browser.py
+```

@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import DataTable from '@/components/DataTable.vue'
 import ServiceForm from './ServiceForm.vue'
+import {decoderLabel,type DecoderCatalog} from './decoders'
+const catalog=ref<DecoderCatalog>({items:[],activations:[]})
 
 type Service = Omit<ServiceInput, 'expected_revision'> & { id: string; applied_enabled: boolean | null }
 type Services = Omit<ListResponse, 'items'> & { items: Service[] }
@@ -17,11 +19,11 @@ const formBusy = ref(false)
 const editing = ref<Service>()
 const formRevision = ref(0)
 const formGeneration = ref(0)
-const columns = [{ key: 'transport', label: 'Transport' }, { key: 'listen_address', label: 'Public listener' }, { key: 'upstream_address', label: 'Application backend' }, { key: 'protocol_id', label: 'Profile' }, { key: 'enabled', label: 'Desired' }, { key: 'applied_enabled', label: 'Applied' }, { key: 'actions', label: 'Actions' }]
+const columns = [{ key: 'transport', label: 'Transport' }, { key: 'listen_address', label: 'Public listener' }, { key: 'upstream_address', label: 'Application backend' }, { key: 'protocol_id', label: 'Decoder' }, { key: 'enabled', label: 'Desired' }, { key: 'applied_enabled', label: 'Applied' }, { key: 'actions', label: 'Actions' }]
 async function load() {
   busy.value = true
   error.value = ''
-  try { data.value = await api<Services>('/services') }
+  try { const [listeners,decoders]=await Promise.all([api<Services>('/services'),api<DecoderCatalog>('/protocols')]);data.value=listeners;catalog.value=decoders }
   catch (cause) { error.value = errorMessage(cause) }
   finally { busy.value = false }
 }
@@ -63,6 +65,7 @@ onMounted(load)
     <p v-if="busy" role="status">Loading services…</p>
     <p v-else-if="data && !data.items.length" class="text-muted-foreground">No services configured. Add a listener and its defended upstream.</p>
     <DataTable v-if="data?.items.length" :columns="columns" :rows="data.items">
+      <template #cell-protocol_id="{row}">{{decoderLabel(row,catalog)}}</template>
       <template #cell-enabled="{ row }">{{ row.enabled ? 'On' : 'Off' }}</template>
       <template #cell-applied_enabled="{ row }">{{ row.applied_enabled === null ? 'Pending' : row.applied_enabled ? 'On' : 'Off' }}</template>
       <template #cell-actions="{ row }"><div class="flex gap-2"><Button variant="outline" size="sm" :disabled="busy" @click="edit(row)">Edit</Button><Button variant="destructive" size="sm" :disabled="busy" @click="remove(row)">Delete</Button></div></template>

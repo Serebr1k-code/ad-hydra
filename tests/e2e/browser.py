@@ -343,6 +343,63 @@ class Browser(unittest.TestCase):
                         cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Close logs').click()")
                         wait("!document.querySelector('[role=dialog]')")
                         wait("document.activeElement?.textContent==='Logs'")
+                    if section == 'Protocols':
+                        root=pathlib.Path(__file__).resolve().parents[2]
+                        candidates=[pathlib.Path(os.environ['HYDRA_WASM_SAMPLE'])] if os.environ.get('HYDRA_WASM_SAMPLE') else [root/'plugins/examples/length-prefixed/target/wasm32-unknown-unknown/release/hydra_length_prefixed_example.wasm']
+                        module=next((p for p in candidates if p.is_file()),None)
+                        self.assertIsNotNone(module,'Build an example decoder or set HYDRA_WASM_SAMPLE before the browser smoke')
+                        for field,value in [('protocol-id','browser-wasm'),('protocol-version','v1')]:
+                            cdp.evaluate(f"{{const e=document.getElementById({json.dumps(field)});e.value={json.dumps(value)};e.dispatchEvent(new Event('input',{{bubbles:true}}));}}")
+                        document=cdp.call('DOM.getDocument')['root']['nodeId']
+                        file_node=cdp.call('DOM.querySelector',{'nodeId':document,'selector':'#protocol-file'})['nodeId']
+                        cdp.call('DOM.setFileInputFiles',{'nodeId':file_node,'files':[str(module)]})
+                        cdp.evaluate("document.querySelector('#protocol-file').closest('form').requestSubmit()")
+                        wait("[...document.querySelectorAll('#page td')].some(e=>e.textContent==='installed')")
+                        cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Services').click()")
+                        wait("document.querySelector('#page h1')?.textContent==='Services' && !document.querySelector('#page').innerText.includes('Loading')")
+                        def edit_other():
+                            cdp.evaluate(f"[...document.querySelectorAll('#page tr')].find(e=>e.innerText.includes({json.dumps(other['listen_address'])})).querySelector('button').click()")
+                            wait("document.querySelector('#service-profile') && [...document.querySelectorAll('#service-protocol-options option')].some(e=>e.value==='custom:browser-wasm/v1')")
+                        edit_other()
+                        cdp.evaluate("{const e=document.querySelector('#service-profile');e.value='custom:browser-wasm/v1';e.dispatchEvent(new Event('input',{bubbles:true}));}")
+                        cdp.evaluate("document.querySelector('#service-form').requestSubmit()")
+                        wait("!document.querySelector('#service-form') && document.querySelector('#page').innerText.includes('browser-wasm / v1 · WASM')")
+                        with sqlite3.connect(tmp/'db') as db:self.assertEqual(db.execute("SELECT protocol_id,version,applied FROM protocol_activations WHERE protocol_id='browser-wasm'").fetchall(),[('browser-wasm','v1',1)])
+                        edit_other()
+                        self.assertEqual(cdp.evaluate("document.querySelector('#service-profile').value"),'custom:browser-wasm/v1')
+                        cdp.evaluate("{const e=document.querySelector('#service-profile');e.value='utf8';e.dispatchEvent(new Event('input',{bubbles:true}));}")
+                        cdp.evaluate("document.querySelector('#service-form').requestSubmit()")
+                        wait("!document.querySelector('#service-form') && document.querySelector('#page').innerText.includes('UTF-8 text')")
+                        with sqlite3.connect(tmp/'db') as db:self.assertEqual(db.execute("SELECT count(*) FROM protocol_activations WHERE protocol_id='browser-wasm'").fetchone()[0],0)
+                        wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent==='Add service' && !b.disabled)")
+                        cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add service').click()")
+                        wait("document.querySelector('#service-form') && !document.querySelector('#service-save').disabled")
+                        # TCP and UDP can share a listener address. Lose the activation
+                        # response after Proxy applies it, then retry with a built-in.
+                        cdp.click("document.querySelector('#service-transport')")
+                        wait("document.querySelector('[role=option][data-state]') !== null")
+                        cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='UDP')")
+                        cdp.evaluate("{const original=window.fetch;window.fetch=async(...args)=>{const response=await original(...args);if(String(args[0]).endsWith('/protocols/browser-wasm/v1/activate')){window.fetch=original;throw new Error('Injected response loss after real activation');}return response;};}")
+                        for field,value in [('service-listener',other['listen_address']),('service-backend',other['upstream_address']),('service-profile','custom:browser-wasm/v1')]:
+                            cdp.evaluate(f"{{const e=document.getElementById({json.dumps(field)});e.value={json.dumps(value)};e.dispatchEvent(new Event('input',{{bubbles:true}}));}}")
+                        cdp.evaluate("document.querySelector('#service-form').requestSubmit()")
+                        wait("document.querySelector('#service-form').innerText.includes('Service saved; decoder was not confirmed.')")
+                        with sqlite3.connect(tmp/'db') as db:
+                            active_id=db.execute("SELECT service_id FROM protocol_activations WHERE protocol_id='browser-wasm'").fetchone()[0]
+                            snapshot=json.loads(db.execute('SELECT services FROM control_state WHERE id=1').fetchone()[0])
+                            active_service=next(s for s in snapshot if s['id']==active_id)
+                            self.assertEqual(active_service['transport'],'udp')
+                            self.assertEqual(active_service['listen_address'],other['listen_address'])
+                        cdp.evaluate("{const e=document.querySelector('#service-profile');e.value='utf8';e.dispatchEvent(new Event('input',{bubbles:true}));}")
+                        cdp.evaluate("document.querySelector('#service-form').requestSubmit()")
+                        wait("!document.querySelector('#service-form')")
+                        with sqlite3.connect(tmp/'db') as db:self.assertEqual(db.execute("SELECT count(*) FROM protocol_activations WHERE protocol_id='browser-wasm'").fetchone()[0],0)
+                        wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent==='Add service' && !b.disabled)")
+                        cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add service').click()")
+                        wait("document.querySelector('#service-form') && !document.querySelector('#service-save').disabled")
+                        new_module_service={**service,'listen_address':f'127.0.0.1:{port()}','protocol_id':'custom:browser-wasm/v1'}
+                        fill_service(new_module_service)
+                        with sqlite3.connect(tmp/'db') as db:self.assertEqual(db.execute("SELECT protocol_id,version,applied FROM protocol_activations WHERE protocol_id='browser-wasm'").fetchall(),[('browser-wasm','v1',1)])
                     if section == 'Flags':
                         wait("Boolean(document.querySelector('#flag-paste') && document.querySelector('#submitter-manual-count'))")
                         wait("document.querySelector('#page').innerText.includes('submission stdout FLAG002000') && document.querySelector('#page').innerText.includes('submission stderr FLAG002000')")

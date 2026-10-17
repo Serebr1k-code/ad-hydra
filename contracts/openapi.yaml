@@ -1188,7 +1188,7 @@ paths:
         required: true
       responses:
         '202':
-          description: ''
+          description: Created service snapshot; id identifies the newly created service
           content:
             application/json:
               schema:
