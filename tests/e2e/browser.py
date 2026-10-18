@@ -441,7 +441,10 @@ class Browser(unittest.TestCase):
                                 peer.sendall(request_bytes);received=b''
                                 while len(received)<len(response_bytes):received+=peer.recv(4096)
                                 self.assertEqual(received,response_bytes)
-                            wait(f"document.querySelector('#traffic-stream').innerText.includes({json.dumps(expected_output)})")
+                            # Both directions expose protocol.payload in the generic
+                            # decoder. A rendered request does not imply that the
+                            # asynchronously delivered response has rendered yet.
+                            wait(f"[...document.querySelectorAll('#traffic-stream [data-direction=\"2\"]')].some(e=>e.innerText.includes({json.dumps(expected_output)}))")
                             self.assertEqual(cdp.evaluate("document.querySelector('[aria-label=\"Stream view\"]').textContent"),'Decoded conversation')
                             self.assertTrue(cdp.evaluate("Boolean(document.querySelector('#traffic-stream [data-direction=\"2\"]'))"))
                             cli_credentials=tmp/'deploy-credentials.json'
