@@ -164,9 +164,14 @@ pub async fn run() -> anyhow::Result<()> {
             let auth = AuthState::new(db, crypto, origin);
             let settings =
                 crate::infrastructure::operations::Settings::load(operations.as_deref())?;
+            let view = Arc::new(RwLock::new(ProxyView::default()));
+            let (history_policy, history_receiver) = tokio::sync::watch::channel(
+                u64::from(settings.traffic_history_per_service_mib) * hydra_domain::history::MIB,
+            );
             let settings_view = crate::modules::settings::SettingsView::from_settings(&settings);
             let settings_state =
-                crate::modules::settings::Settings::new(auth.clone(), settings_view, operations)?;
+                crate::modules::settings::Settings::new(auth.clone(), settings_view, operations)?
+                    .with_history_policy(history_policy, view.clone());
             let flags = crate::modules::flags::Flags::open(auth.clone(), settings.flags()).await?;
             let farm = crate::modules::farm::Farm::open(
                 auth.clone(),
@@ -199,7 +204,6 @@ pub async fn run() -> anyhow::Result<()> {
             )
             .await?;
             let listener = tokio::net::TcpListener::bind(listen).await?;
-            let view = Arc::new(RwLock::new(ProxyView::default()));
             let shutdown = CancellationToken::new();
             let submitter_flags = flags.clone();
             let submitter_shutdown = shutdown.child_token();
@@ -210,7 +214,7 @@ pub async fn run() -> anyhow::Result<()> {
             let farm_task = tokio::spawn(farm.clone().background(shutdown.child_token()));
             let task = tokio::spawn(proxy::reconcile(
                 args.socket.clone(),
-                snapshot,
+                history_receiver,
                 view.clone(),
                 shutdown.clone(),
                 control.clone(),

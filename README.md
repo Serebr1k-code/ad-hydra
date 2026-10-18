@@ -78,7 +78,7 @@ Bootstrap the first account through CLI; authenticated users can create addition
 
 ## Operations configuration
 
-Pass `serve --operations /private/operations.json`. This file must be private (0600), regular and <=64 KiB. The Settings page edits validated values and atomically saves this actual file; restart Core to apply changes. For UI writes, its directory must be owned and writable by Core (0700), with systemd write access; team-1 uses `/etc/hydra/core-settings/operations.json`. Hidden checker credentials are preserved unless explicitly replaced or cleared. Concurrent changes return a conflict requiring refresh. Defaults disable pattern matching, automatic submission and exploit execution; they do not invent competition settings.
+Pass `serve --operations /private/operations.json`. This file must be private (0600), regular and <=64 KiB. The Settings page edits validated values and atomically saves this actual file. The saved traffic-history budget applies live over the control socket (default 128 MiB per service, configurable from 1 to 1024 MiB); other changes require a Core restart. For UI writes, its directory must be owned and writable by Core (0700), with systemd write access; team-1 uses `/etc/hydra/core-settings/operations.json`. Hidden checker credentials are preserved unless explicitly replaced or cleared. Concurrent changes return a conflict requiring refresh. Defaults disable pattern matching, automatic submission and exploit execution; they do not invent competition settings.
 
 ```json
 {

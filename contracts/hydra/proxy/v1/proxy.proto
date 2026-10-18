@@ -9,6 +9,7 @@ import "google/protobuf/timestamp.proto";
 // and peer credentials. Actor fields are attribution, not credentials.
 service ProxyControl {
   rpc GetStatus(GetStatusRequest) returns (ProxyStatus);
+  rpc ConfigureHistory(ConfigureHistoryRequest) returns (ConfigureHistoryReply);
   rpc ApplyConfigSnapshot(ApplyConfigSnapshotRequest) returns (ApplyResult);
   rpc ApplyServiceSnapshot(ApplyServiceSnapshotRequest) returns (ApplyResult);
   rpc ApplyRuleSnapshot(ApplyRuleSnapshotRequest) returns (ApplyResult);
@@ -157,6 +158,13 @@ message ServiceConfig {
   bool enabled = 6;
   bool retain_history = 7;
 }
+// Persistent per-service disk budget for completed gzip traffic, including metadata.
+message ConfigureHistoryRequest {
+  uint64 per_service_bytes = 1;
+  Actor actor = 2;
+  string request_id = 3;
+}
+message ConfigureHistoryReply { uint64 per_service_bytes = 1; }
 message GetStatusRequest {}
 message ProxyStatus {
   string proxy_instance_id = 1;
@@ -172,6 +180,7 @@ message ProxyStatus {
   map<string, uint64> rule_hit_counts = 11;
   uint64 critical_dropped = 12;
   uint64 sample_dropped = 13;
+  uint64 history_per_service_bytes = 14;
 }
 message ApplyServiceSnapshotRequest {
   uint64 revision = 1;

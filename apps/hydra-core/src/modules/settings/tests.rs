@@ -257,3 +257,98 @@ fn request_cannot_supply_actor_or_config_file_path() {
     request["path"] = serde_json::json!("/etc/another-file");
     assert!(serde_json::from_value::<UpdateSettingsRequest>(request).is_err());
 }
+
+#[test]
+fn history_defaults_and_bounds_preserve_existing_configuration() {
+    let fixture = Fixture::new();
+    assert_eq!(
+        operations::Settings::default().traffic_history_per_service_mib,
+        128
+    );
+    assert_eq!(
+        operations::Settings::load(Some(&fixture.path))
+            .unwrap()
+            .traffic_history_per_service_mib,
+        128
+    );
+    let store = fixture.store();
+    let (revision, mut config) = fixture.editable();
+    let before = std::fs::read(&fixture.path).unwrap();
+    for invalid in [0, 1025] {
+        config.traffic_history_per_service_mib = invalid;
+        assert!(matches!(
+            store.save(&revision, &config),
+            Err(file::SaveError::Invalid(_))
+        ));
+        assert_eq!(std::fs::read(&fixture.path).unwrap(), before);
+    }
+    config.traffic_history_per_service_mib = 256;
+    store.save(&revision, &config).unwrap();
+    assert_eq!(
+        operations::Settings::load(Some(&fixture.path))
+            .unwrap()
+            .traffic_history_per_service_mib,
+        256
+    );
+    assert_eq!(
+        store.running_restart_revision,
+        Some(file::restart_revision(
+            &operations::Settings::load(Some(&fixture.path)).unwrap()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn history_updates_are_live_audited_and_pending_until_proxy_acknowledges() {
+    let fixture = Fixture::new();
+    let auth = AuthState::new(
+        crate::infrastructure::db::Database::open(fixture.dir.join("db"))
+            .await
+            .unwrap(),
+        crate::infrastructure::crypto::Crypto::load(&fixture.dir.join("key")).unwrap(),
+        "https://localhost".into(),
+    );
+    let running = operations::Settings::load(Some(&fixture.path)).unwrap();
+    let (policy, mut receive) = tokio::sync::watch::channel(128 * 1024 * 1024u64);
+    let proxy = Arc::new(tokio::sync::RwLock::new(crate::api::ProxyView {
+        connected: true,
+        history_per_service_bytes: 128 * 1024 * 1024,
+        ..Default::default()
+    }));
+    let state = Settings::new(
+        auth,
+        SettingsView::from_settings(&running),
+        Some(fixture.path.clone()),
+    )
+    .unwrap()
+    .with_history_policy(policy, proxy.clone());
+    let view = state.current_view().await.unwrap();
+    assert!(!view.history_apply_pending);
+    let mut config = view.editable_config;
+    config.traffic_history_per_service_mib = 256;
+    let saved = update_settings(
+        State(state.clone()),
+        Authenticated(audit::Actor::user("operator-id".into())),
+        HeaderMap::from_iter([(header::ORIGIN, "https://localhost".parse().unwrap())]),
+        Json(UpdateSettingsRequest {
+            saved_revision: view.saved_revision.unwrap(),
+            editable_config: config,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    receive.changed().await.unwrap();
+    assert_eq!(*receive.borrow(), 256 * 1024 * 1024);
+    assert!(!saved.restart_required);
+    assert!(saved.history_apply_pending);
+    assert_eq!(saved.traffic_history_per_service_mib_applied, Some(128));
+    proxy.write().await.history_per_service_bytes = 256 * 1024 * 1024;
+    assert!(!state.current_view().await.unwrap().history_apply_pending);
+    proxy.write().await.connected = false;
+    let disconnected = state.current_view().await.unwrap();
+    assert!(disconnected.history_apply_pending);
+    assert_eq!(disconnected.traffic_history_per_service_mib_applied, None);
+    let count=state.auth.db.run(|db|Ok(db.query_row("SELECT count(*) FROM audit WHERE actor_id='operator-id' AND action='settings.update.result' AND success=1",[],|r|r.get::<_,i64>(0))?)).await.unwrap();
+    assert_eq!(count, 1);
+}

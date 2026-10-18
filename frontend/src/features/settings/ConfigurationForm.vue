@@ -16,6 +16,8 @@ function sandbox(value: boolean | 'indeterminate') {
 </script>
 <template>
   <div class="space-y-4">
+    <fieldset class="space-y-2 rounded-md border p-4"><legend class="px-1 font-medium">Traffic history</legend><Label for="settings-history-limit">Saved traffic per service (MiB)</Label><Input id="settings-history-limit" type="number" min="1" max="1024" step="1" required :model-value="model.traffic_history_per_service_mib??128" @update:model-value="model.traffic_history_per_service_mib=Number($event)" /><p class="text-sm text-muted-foreground">Default 128 MiB for each service, including gzip traffic and metadata. Oldest streams rotate within their own service. Applies live; disconnected Proxy receives the setting when it reconnects. Completed streams retain up to 64 KiB per direction for 24 hours.</p></fieldset>
+
     <div><Label for="settings-pattern">Flag regex</Label><Input id="settings-pattern" :model-value="model.flag_pattern || ''" @update:model-value="model.flag_pattern = String($event) || null" maxlength="4096" /></div>
     <div class="flex items-center gap-2"><Checkbox id="settings-auto-submit" :model-value="model.auto_submit_captured" @update:model-value="model.auto_submit_captured = $event === true" /><Label for="settings-auto-submit">Automatically submit captured flags</Label></div>
     <CheckerSettings v-model="model.checker" />

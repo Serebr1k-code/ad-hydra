@@ -14,6 +14,7 @@ pub const MAX_BYTES: u64 = 65536;
 pub struct ConfigFile {
     pub path: Option<PathBuf>,
     pub running_revision: Option<String>,
+    pub running_restart_revision: Option<String>,
 }
 pub struct SavedConfig {
     pub settings: operations::Settings,
@@ -27,10 +28,13 @@ pub enum SaveError {
 }
 impl ConfigFile {
     pub fn new(path: Option<PathBuf>) -> anyhow::Result<Self> {
-        let running_revision = path.as_deref().map(read).transpose()?.map(|c| c.revision);
+        let saved = path.as_deref().map(read).transpose()?;
+        let running_restart_revision = saved.as_ref().map(|s| restart_revision(&s.settings));
+        let running_revision = saved.map(|s| s.revision);
         Ok(Self {
             path,
             running_revision,
+            running_restart_revision,
         })
     }
     pub fn read(&self) -> anyhow::Result<Option<SavedConfig>> {
@@ -94,6 +98,15 @@ impl ConfigFile {
             revision: digest(&bytes),
         })
     }
+}
+/// Live history policy changes do not require restarting unrelated workers.
+pub(super) fn restart_revision(settings: &operations::Settings) -> String {
+    let mut value = serde_json::to_value(settings).expect("serializable operations settings");
+    value
+        .as_object_mut()
+        .expect("operations object")
+        .remove("traffic_history_per_service_mib");
+    digest(&serde_json::to_vec(&value).expect("serializable operations settings"))
 }
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))

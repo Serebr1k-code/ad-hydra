@@ -1,4 +1,5 @@
 //! Pure, framework-independent service configuration shared by both applications.
+pub mod history;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, net::SocketAddr};
 

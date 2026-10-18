@@ -12,9 +12,11 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
+    #[serde(default = "hydra_domain::history::default_per_service_mib")]
+    pub traffic_history_per_service_mib: u32,
     pub flag_pattern: Option<String>,
     #[serde(default)]
     pub auto_submit_captured: bool,
@@ -23,6 +25,19 @@ pub struct Settings {
     #[serde(default)]
     pub execution_mode: ExecutionMode,
     pub host_runtime: Option<HostRuntimeSettings>,
+}
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            traffic_history_per_service_mib: hydra_domain::history::default_per_service_mib(),
+            flag_pattern: None,
+            auto_submit_captured: false,
+            checker: None,
+            sandbox: None,
+            execution_mode: ExecutionMode::default(),
+            host_runtime: None,
+        }
+    }
 }
 #[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -113,6 +128,12 @@ impl Settings {
         file.take(65537).read_to_end(&mut bytes)?;
         anyhow::ensure!(bytes.len() <= 65536, "operations config exceeds 64 KiB");
         let mut settings: Self = serde_json::from_slice(&bytes)?;
+        anyhow::ensure!(
+            (hydra_domain::history::MIN_PER_SERVICE_MIB
+                ..=hydra_domain::history::MAX_PER_SERVICE_MIB)
+                .contains(&settings.traffic_history_per_service_mib),
+            "traffic history must be 1..1024 MiB per service"
+        );
         if let Some(Checker::Https {
             ca_certificate_der,
             ca_certificate_path: Some(certificate),

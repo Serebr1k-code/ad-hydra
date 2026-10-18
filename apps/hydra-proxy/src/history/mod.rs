@@ -14,13 +14,12 @@ use std::{
     time::Duration,
 };
 use storage::read_record;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 pub const MAX_DIRECTION_BYTES: usize = 64 * 1024;
 pub const MAX_HISTORY_BYTES: usize = MAX_DIRECTION_BYTES * 2;
 const MAX_ACTIVE: usize = 256;
 const WRITE_QUEUE: usize = 64;
-const DISK_QUOTA: u64 = 100 * 1024 * 1024;
 const TTL_SECONDS: i64 = 24 * 60 * 60;
 const FILE_PREFIX: &str = "hydra-history-";
 
@@ -68,12 +67,21 @@ struct Buffer {
     discarded: bool,
 }
 
+enum WriteCommand {
+    Persist(FlowHistory),
+    SetQuota {
+        bytes: u64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+}
+
 struct Inner {
     directory: PathBuf,
     enabled_services: Mutex<HashSet<String>>,
     active: Mutex<HashMap<String, Arc<Mutex<Buffer>>>>,
     pending: Arc<Mutex<HashSet<String>>>,
-    writer: mpsc::Sender<FlowHistory>,
+    writer: mpsc::Sender<WriteCommand>,
+    quota: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
 }
 
@@ -122,7 +130,9 @@ impl HistoryStore {
         let checked = directory.clone();
         let mut disk =
             tokio::task::spawn_blocking(move || storage::Disk::open(checked, now_ms())).await??;
-        let (writer, mut reader) = mpsc::channel::<FlowHistory>(WRITE_QUEUE);
+        let (writer, mut reader) = mpsc::channel::<WriteCommand>(WRITE_QUEUE);
+        let quota = Arc::new(AtomicU64::new(disk.quota()));
+        let worker_quota = quota.clone();
         let dropped = Arc::new(AtomicU64::new(0));
         let worker_dropped = dropped.clone();
         let pending = Arc::new(Mutex::new(HashSet::new()));
@@ -137,10 +147,23 @@ impl HistoryStore {
                     item = reader.recv() => match item { Some(item) => Some(item), None => break },
                     _ = reap.tick() => None,
                 };
-                let flow_id = item.as_ref().map(|history| history.flow_id.clone());
+                let flow_id = match &item {
+                    Some(WriteCommand::Persist(history)) => Some(history.flow_id.clone()),
+                    _ => None,
+                };
+                let applied_quota = worker_quota.clone();
                 let completed = tokio::task::spawn_blocking(move || {
                     let result = match item {
-                        Some(history) => disk.persist(history),
+                        Some(WriteCommand::Persist(history)) => disk.persist(history),
+                        Some(WriteCommand::SetQuota { bytes, reply }) => {
+                            let result = disk.set_quota(bytes);
+                            if result.is_ok() {
+                                applied_quota.store(bytes, Ordering::Relaxed);
+                            }
+                            let _ = reply
+                                .send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+                            result
+                        }
                         None => disk.reap(now_ms()),
                     };
                     (disk, result)
@@ -163,8 +186,12 @@ impl HistoryStore {
                     }
                 }
                 if result.is_err() {
-                    worker_dropped.fetch_add(1, Ordering::Relaxed);
-                    tracing::warn!("flow history persistence or cleanup failed");
+                    if let Some(id) = &flow_id {
+                        let dropped = worker_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                        tracing::warn!(flow_id=%id,dropped,"completed stream history was dropped");
+                    } else {
+                        tracing::warn!("flow history policy or cleanup failed");
+                    }
                 }
                 if let Some(flow_id) = flow_id {
                     worker_pending
@@ -180,6 +207,7 @@ impl HistoryStore {
             active: Mutex::new(HashMap::new()),
             pending,
             writer,
+            quota,
             dropped,
         }))))
     }
@@ -243,6 +271,29 @@ impl HistoryStore {
             buffer,
             store: Arc::downgrade(&self.0),
         })
+    }
+
+    pub fn quota(&self) -> u64 {
+        self.0.quota.load(Ordering::Relaxed)
+    }
+
+    pub async fn set_quota(&self, bytes: u64) -> anyhow::Result<()> {
+        use hydra_domain::history::{MAX_PER_SERVICE_MIB, MIB, MIN_PER_SERVICE_MIB};
+        anyhow::ensure!(
+            (u64::from(MIN_PER_SERVICE_MIB) * MIB..=u64::from(MAX_PER_SERVICE_MIB) * MIB)
+                .contains(&bytes),
+            "history quota must be 1..1024 MiB per service"
+        );
+        let (reply, completed) = oneshot::channel();
+        self.0
+            .writer
+            .send(WriteCommand::SetQuota { bytes, reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("history worker unavailable"))?;
+        completed
+            .await
+            .map_err(|_| anyhow::anyhow!("history worker unavailable"))?
+            .map_err(anyhow::Error::msg)
     }
 
     pub fn dropped(&self) -> u64 {
@@ -354,7 +405,7 @@ impl HistoryWriter {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(self.flow_id.clone());
-        match store.writer.try_send(history) {
+        match store.writer.try_send(WriteCommand::Persist(history)) {
             Ok(()) => false,
             Err(_) => {
                 store
@@ -433,6 +484,20 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("history was not persisted")
+    }
+
+    #[tokio::test]
+    async fn quota_is_applied_by_worker_and_persisted_without_restarting_relays() {
+        let dir = Directory::new();
+        let store = HistoryStore::open(&dir.0).await.unwrap();
+        assert_eq!(store.quota(), 128 * 1024 * 1024);
+        assert!(store.set_quota(0).await.is_err());
+        assert!(store.set_quota(1025 * 1024 * 1024).await.is_err());
+        store.set_quota(2 * 1024 * 1024).await.unwrap();
+        assert_eq!(store.quota(), 2 * 1024 * 1024);
+        drop(store);
+        let reopened = HistoryStore::open(&dir.0).await.unwrap();
+        assert_eq!(reopened.quota(), 2 * 1024 * 1024);
     }
 
     #[tokio::test]
@@ -551,6 +616,7 @@ mod tests {
             active: Mutex::new(HashMap::new()),
             pending: Arc::new(Mutex::new(HashSet::new())),
             writer,
+            quota: Arc::new(AtomicU64::new(128 * 1024 * 1024)),
             dropped: Arc::new(AtomicU64::new(0)),
         })));
         let first_id = uuid::Uuid::new_v4().to_string();

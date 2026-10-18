@@ -138,3 +138,5 @@ HYDRA_BUILD_PROFILE=release python3 tests/e2e/proxy_runtime.py
 ```
 
 This Linux-only benign loopback check runs Proxy under one-CPU and up-to-three-CPU affinity, opens128 simultaneous TCP sessions, verifies8,192 binary exchanges per case and checks that total OS threads fit the shared-pool budget. It is also part of CI. A debug run observed one async worker/four total OS threads with one CPU, and three async workers/seven total OS threads with three CPUs. This is a concurrency/resource regression check, not a maximum-throughput benchmark.
+
+The subsequent per-service history change replaces the shared 100 MiB budget described in the historical benchmark above with a default 128 MiB per service (gzip plus sidecar bytes), configurable live in Settings. It retains startup-only enumeration, indexed append/eviction, the global 65,536-record memory ceiling and bounded worker queues. Byte/index pressure rotates only records belonging to the writing service; TTL expiration remains global. The older benchmark numbers describe its recorded configuration, not a new measurement of the expanded quota.

@@ -1,8 +1,9 @@
 # Traffic view
 
 Select a service above the session list, then select a TCP stream to follow its
-conversation. Each card has a left stripe with a stable color derived from its
-service ID. The service dropdown uses the same colors. Refreshes and pagination
+conversation. Each card has a left stripe with its configured service color, with automatic
+palette colors for services without an explicit choice. Set colors in Services.
+The service dropdown uses the same colors. Refreshes and pagination
 keep those colors unchanged.
 
 **Show blocked** is unchecked by default. Streams with an actual enforced HTTP
@@ -43,6 +44,10 @@ last as long as their underlying bounded event retention.
 
 ## Saved TCP history limits
 
-Enabled services retain a gzip-compressed tail of64KiB per direction after a stream closes. History expires after24hours, or earlier when the100MiB compressed-payload quota or65,536-stream limit evicts the oldest records. Metadata and filesystem allocation add disk overhead. The nonblocking writer queue holds64 completed streams; overload reports capture loss instead of delaying forwarding.
+Enabled services retain a gzip-compressed tail of 64 KiB per direction after a stream closes. Each service has its own disk budget, default **128 MiB**, covering gzip payloads and JSON metadata. Change **Settings → Traffic history → Saved traffic per service (MiB)** to any whole value from 1 to 1024. Saving applies live and persists in the Core configuration file; disconnected Proxy receives the latest value when it reconnects. Lowering the limit rotates each service's oldest records immediately. A busy service never evicts another service's history to meet its quota.
+
+History also expires after 24 hours. A global 65,536-record index ceiling bounds memory/inode growth: when full, only the writing service may rotate its own records; if it has none, the new capture is rejected and loss is reported. Filesystem allocation adds overhead beyond the accounted payload and metadata bytes. The nonblocking writer queue holds 64 completed streams; overload reports capture loss instead of delaying forwarding. Existing gzip archives are indexed by their saved service IDs on startup without conversion.
+
+The HYDRA header turns red when Core reports Proxy disconnected or the status request fails. It returns to its normal color after a successful reconnect. Connection status and telemetry counters refresh every five seconds; live traffic events do not override the connection state.
 
 The writer indexes completed files once at startup; appending and expiry do not rescan the history directory. Its private directory must not be edited while Proxy runs. Restart rebuilds the index; on-demand reads still validate permissions and bounded decompression. See [performance measurements](PERFORMANCE.md).

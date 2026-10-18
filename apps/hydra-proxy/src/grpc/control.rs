@@ -43,6 +43,12 @@ impl ProxyControl for Rpc {
                 .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
                 .map_or(0, |s| s.dropped()),
+            history_per_service_bytes: t
+                .history
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map_or(0, |store| store.quota()),
             rule_hit_counts: t
                 .hit_counts
                 .lock()
@@ -50,6 +56,44 @@ impl ProxyControl for Rpc {
                 .iter()
                 .map(|(id, n)| (id.clone(), *n))
                 .collect(),
+        }))
+    }
+    async fn configure_history(
+        &self,
+        request: Request<v1::ConfigureHistoryRequest>,
+    ) -> Result<Response<v1::ConfigureHistoryReply>, Status> {
+        let request = request.into_inner();
+        check_provenance(request.actor.as_ref(), &request.request_id)?;
+        use hydra_domain::history::{MAX_PER_SERVICE_MIB, MIB, MIN_PER_SERVICE_MIB};
+        if !(u64::from(MIN_PER_SERVICE_MIB) * MIB..=u64::from(MAX_PER_SERVICE_MIB) * MIB)
+            .contains(&request.per_service_bytes)
+        {
+            return Err(Status::invalid_argument(
+                "history quota must be 1..1024 MiB per service",
+            ));
+        }
+
+        let store = self
+            .state
+            .telemetry
+            .history
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .ok_or_else(|| Status::unavailable("history unavailable"))?;
+        store
+            .set_quota(request.per_service_bytes)
+            .await
+            .map_err(|_| Status::unavailable("history policy could not be applied"))?;
+        let actor = request.actor.as_ref().expect("validated actor");
+        let actor_id = if actor.user_id.is_empty() {
+            &actor.username
+        } else {
+            &actor.user_id
+        };
+        tracing::info!(request_id=%request.request_id,actor_id,actor_type=actor.r#type,per_service_bytes=request.per_service_bytes,"traffic history policy applied");
+        Ok(Response::new(v1::ConfigureHistoryReply {
+            per_service_bytes: store.quota(),
         }))
     }
     async fn apply_config_snapshot(

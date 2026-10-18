@@ -20,6 +20,7 @@ use utoipa::{OpenApi, ToSchema};
 #[derive(Clone, Debug, Default, Serialize, ToSchema)]
 pub struct ProxyView {
     pub connected: bool,
+    pub history_per_service_bytes: u64,
     pub proxy_epoch_id: String,
     pub active_flows: u32,
     pub applied_services_revision: u64,
@@ -37,6 +38,7 @@ impl ProxyView {
     pub fn from_status(s: v1::ProxyStatus) -> Self {
         Self {
             connected: true,
+            history_per_service_bytes: s.history_per_service_bytes,
             proxy_epoch_id: s.proxy_epoch_id,
             active_flows: s.active_flows,
             applied_services_revision: s.applied_services_revision,

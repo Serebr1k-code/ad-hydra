@@ -2221,6 +2221,10 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/SandboxSettings'
+        traffic_history_per_service_mib:
+          type: integer
+          format: int32
+          minimum: 0
       additionalProperties: false
     ExecutionMode:
       type: string
@@ -2832,6 +2836,7 @@ components:
       type: object
       required:
       - connected
+      - history_per_service_bytes
       - proxy_epoch_id
       - active_flows
       - applied_services_revision
@@ -2872,6 +2877,10 @@ components:
           format: int64
           minimum: 0
         events_received:
+          type: integer
+          format: int64
+          minimum: 0
+        history_per_service_bytes:
           type: integer
           format: int64
           minimum: 0
@@ -3076,6 +3085,7 @@ components:
       type: object
       required:
       - editable_config
+      - history_apply_pending
       - restart_required
       - configuration_editable
       - automatic_submission
@@ -3107,6 +3117,8 @@ components:
           type:
           - string
           - 'null'
+        history_apply_pending:
+          type: boolean
         readonly_reason:
           type:
           - string
@@ -3127,6 +3139,12 @@ components:
           type: array
           items:
             type: string
+        traffic_history_per_service_mib_applied:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
         worker_concurrency:
           type: integer
           minimum: 0

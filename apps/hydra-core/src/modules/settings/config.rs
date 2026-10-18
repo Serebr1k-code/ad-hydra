@@ -50,6 +50,8 @@ pub enum CheckerConfig {
 #[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditableConfig {
+    #[serde(default = "hydra_domain::history::default_per_service_mib")]
+    pub traffic_history_per_service_mib: u32,
     pub flag_pattern: Option<String>,
     pub auto_submit_captured: bool,
     pub execution_mode: operations::ExecutionMode,
@@ -109,6 +111,11 @@ impl EditableConfig {
 }
 
 pub fn validate(settings: &operations::Settings) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (hydra_domain::history::MIN_PER_SERVICE_MIB..=hydra_domain::history::MAX_PER_SERVICE_MIB)
+            .contains(&settings.traffic_history_per_service_mib),
+        "traffic history must be 1..1024 MiB per service"
+    );
     anyhow::ensure!(
         !settings.auto_submit_captured || settings.checker.is_some(),
         "automatic submission requires a checker"

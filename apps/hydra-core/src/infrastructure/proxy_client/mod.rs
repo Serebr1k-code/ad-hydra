@@ -71,7 +71,7 @@ pub async fn load_snapshot(path: &Path) -> anyhow::Result<ServiceSnapshot> {
 }
 pub async fn reconcile(
     socket: PathBuf,
-    _bootstrap: Option<ServiceSnapshot>,
+    mut history_policy: tokio::sync::watch::Receiver<u64>,
     view: crate::api::SharedView,
     shutdown: tokio_util::sync::CancellationToken,
     control: crate::modules::services::Control,
@@ -79,7 +79,16 @@ pub async fn reconcile(
     flags: crate::modules::flags::Flags,
 ) {
     loop {
-        let result = session(&socket, &view, &shutdown, &control, &traffic, &flags).await;
+        let result = session(
+            &socket,
+            &view,
+            &shutdown,
+            &control,
+            &traffic,
+            &flags,
+            &mut history_policy,
+        )
+        .await;
         view.write().await.connected = false;
         if let Err(error) = result {
             tracing::warn!(%error,"proxy disconnected; retrying");
@@ -108,8 +117,11 @@ async fn session(
     control: &crate::modules::services::Control,
     traffic: &crate::modules::traffic::Traffic,
     flags: &crate::modules::flags::Flags,
+    history_policy: &mut tokio::sync::watch::Receiver<u64>,
 ) -> anyhow::Result<()> {
     let channel = connect(socket).await?;
+    let history_bytes = *history_policy.borrow_and_update();
+    configure_history(channel.clone(), history_bytes).await?;
     sync(channel.clone(), control).await?;
     let mut stream = events(channel.clone()).await?;
     let mut critical =
@@ -121,9 +133,12 @@ async fn session(
     loop {
         tokio::select! {
             _=shutdown.cancelled()=>return Ok(()),
+            changed=history_policy.changed()=>{changed.context("history policy closed")?;let bytes=*history_policy.borrow_and_update();configure_history(channel.clone(),bytes).await?;},
             _=control.changed.notified()=>sync(channel.clone(),control).await?,
             _=tick.tick()=>{
                 let status=status(channel.clone()).await?;
+                let history_bytes=*history_policy.borrow();
+                if status.history_per_service_bytes!=history_bytes { configure_history(channel.clone(),history_bytes).await?; }
                 control.observe_counters(status.proxy_epoch_id.clone(),status.rule_hit_counts.clone()).await?;
                 let desired=control.desired().await?;
                 if status.applied_services_revision!=desired.services.revision || status.applied_rules_revision!=desired.rules.revision {
@@ -177,4 +192,20 @@ pub async fn apply_config(
         }))
         .await?
         .into_inner())
+}
+
+async fn configure_history(channel: Channel, bytes: u64) -> anyhow::Result<()> {
+    let response = ProxyControlClient::new(channel)
+        .configure_history(request(v1::ConfigureHistoryRequest {
+            per_service_bytes: bytes,
+            actor: Some(system_actor()),
+            request_id: uuid::Uuid::new_v4().to_string(),
+        }))
+        .await?
+        .into_inner();
+    ensure!(
+        response.per_service_bytes == bytes,
+        "proxy history policy was not applied"
+    );
+    Ok(())
 }

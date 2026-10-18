@@ -22,6 +22,8 @@ use utoipa::{OpenApi, ToSchema};
 #[derive(Clone, Serialize, ToSchema)]
 pub struct SettingsView {
     pub editable_config: EditableConfig,
+    pub traffic_history_per_service_mib_applied: Option<u32>,
+    pub history_apply_pending: bool,
     pub saved_revision: Option<String>,
     pub restart_required: bool,
     pub configuration_editable: bool,
@@ -50,6 +52,8 @@ impl SettingsView {
         Self {
             editable_config: EditableConfig::redacted(settings)
                 .expect("serializable operations config"),
+            traffic_history_per_service_mib_applied: None,
+            history_apply_pending: true,
             saved_revision: None,
             restart_required: false,
             configuration_editable: false,
@@ -71,6 +75,8 @@ pub struct Settings {
     pub auth: AuthState,
     pub view: SettingsView,
     pub file: Arc<Mutex<file::ConfigFile>>,
+    history_policy: Option<tokio::sync::watch::Sender<u64>>,
+    proxy_view: Option<crate::api::SharedView>,
 }
 #[utoipa::path(get,path="/api/v1/system/settings",responses((status=200,body=SettingsView),(status=401)),tag="system")]
 async fn settings(
@@ -137,7 +143,18 @@ impl Settings {
             auth,
             view,
             file: Arc::new(Mutex::new(file::ConfigFile::new(path)?)),
+            history_policy: None,
+            proxy_view: None,
         })
+    }
+    pub fn with_history_policy(
+        mut self,
+        policy: tokio::sync::watch::Sender<u64>,
+        view: crate::api::SharedView,
+    ) -> Self {
+        self.history_policy = Some(policy);
+        self.proxy_view = Some(view);
+        self
     }
     async fn current_view(&self) -> Result<SettingsView, StatusCode> {
         let file = self.file.lock().await.clone();
@@ -147,11 +164,10 @@ impl Settings {
             file.read().map(|saved| {
                 (
                     saved.map(|s| {
-                        (
-                            s.settings,
-                            s.revision.clone(),
-                            Some(s.revision) != file.running_revision,
-                        )
+                        let restart = Some(s.revision.clone()) != file.running_revision
+                            && Some(file::restart_revision(&s.settings))
+                                != file.running_restart_revision;
+                        (s.settings, s.revision.clone(), restart)
                     }),
                     reason,
                 )
@@ -166,6 +182,14 @@ impl Settings {
             view.saved_revision = Some(revision);
             view.restart_required = restart;
         }
+        if let Some(proxy) = &self.proxy_view {
+            let proxy = proxy.read().await;
+            view.traffic_history_per_service_mib_applied = (proxy.connected
+                && proxy.history_per_service_bytes > 0)
+                .then_some((proxy.history_per_service_bytes / hydra_domain::history::MIB) as u32);
+        }
+        view.history_apply_pending = view.traffic_history_per_service_mib_applied
+            != Some(view.editable_config.traffic_history_per_service_mib);
         view.configuration_editable = reason.is_none();
         view.readonly_reason = reason;
         Ok(view)
@@ -228,7 +252,8 @@ async fn update_settings(
 ) -> Result<Json<SettingsView>, ErrorResponse> {
     // Serialize API writers across revision check, audit intent, and atomic replacement.
     let file = state.file.lock().await;
-    let metadata = serde_json::json!({"source":"operations_file","apply_on":"core_restart"});
+    let history_mib = input.editable_config.traffic_history_per_service_mib;
+    let metadata = serde_json::json!({"source":"operations_file","apply_on":"history_live_other_settings_core_restart","traffic_history_per_service_mib":history_mib});
     record(
         &state,
         actor.clone(),
@@ -256,7 +281,8 @@ async fn update_settings(
         })
         .await
         {
-            Ok(Ok(_)) => Ok(()),
+            Ok(Ok(saved)) => Ok(u64::from(saved.settings.traffic_history_per_service_mib)
+                * hydra_domain::history::MIB),
             Ok(Err(file::SaveError::Conflict)) => Err(error(
                 StatusCode::CONFLICT,
                 "Configuration changed; reload Settings before saving",
@@ -270,7 +296,7 @@ async fn update_settings(
             )),
         }
     };
-    let outcome = serde_json::json!({"source":"operations_file","after":{"http_status":result.as_ref().map(|_|200).unwrap_or_else(|(code,_)|code.as_u16())}});
+    let outcome = serde_json::json!({"source":"operations_file","traffic_history_per_service_mib":history_mib,"after":{"http_status":result.as_ref().map(|_|200).unwrap_or_else(|(code,_)|code.as_u16())}});
     record(
         &state,
         actor,
@@ -279,7 +305,10 @@ async fn update_settings(
         outcome,
     )
     .await?;
-    result?;
+    let history_bytes = result?;
+    if let Some(policy) = &state.history_policy {
+        policy.send_replace(history_bytes);
+    }
     drop(file);
     state.current_view().await.map(Json).map_err(|status| {
         error(

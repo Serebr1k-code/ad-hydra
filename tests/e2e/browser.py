@@ -162,8 +162,8 @@ class Browser(unittest.TestCase):
                 cdp=CDP(target['webSocketDebuggerUrl'])
                 cdp.call('Emulation.setDeviceMetricsOverride',{'width':1280,'height':900,'deviceScaleFactor':1,'mobile':False})
                 cdp.call('Page.navigate',{'url':f'https://localhost:{ap}/'})
-                def wait(expression):
-                    for _ in range(100):
+                def wait(expression, seconds=5):
+                    for _ in range(int(seconds*20)):
                         if cdp.evaluate(expression):
                             return
                         time.sleep(.05)
@@ -337,6 +337,16 @@ class Browser(unittest.TestCase):
                     self.assertFalse(cdp.evaluate("[...document.querySelectorAll('#page [role=alert]')].some(e=>e.textContent.trim())"),cdp.evaluate("document.querySelector('#page').innerText"))
                     if section == 'Settings':
                         wait("Boolean(document.querySelector('#settings-form button[type=submit]'))")
+                        self.assertEqual(cdp.evaluate("document.querySelector('#settings-history-limit').value"),'128')
+                        cdp.evaluate("{const e=document.querySelector('#settings-history-limit');e.value='2';e.dispatchEvent(new Event('input',{bubbles:true}));}")
+                        cdp.evaluate("document.querySelector('#settings-form').requestSubmit()")
+                        wait("document.querySelector('#page').innerText.includes('Saved to the configuration file.')")
+                        self.assertEqual(json.loads((tmp/'operations.json').read_text())['traffic_history_per_service_mib'],2)
+                        wait("document.querySelector('#page').innerText.includes('2 MiB') && !document.querySelector('#page').innerText.includes('pending Proxy')",seconds=10)
+                        self.assertFalse(cdp.evaluate("document.querySelector('#page').innerText.includes('pending a Core restart')"))
+                        status=json.loads(subprocess.check_output([str(BIN/'hydra-core'),'--socket',sock,'status'],text=True))
+                        self.assertEqual(status['history_per_service_bytes'],2*1024*1024)
+
                         cdp.evaluate("const input=document.querySelector('#settings-pattern');input.value='FLAG[0-9]{6}|EXTRA[0-9]{6}';input.dispatchEvent(new Event('input',{bubbles:true}));")
                         cdp.evaluate("document.querySelector('#settings-form').requestSubmit()")
                         wait("document.querySelector('#page').innerText.includes('Saved to the configuration file.')")
@@ -564,6 +574,26 @@ class Browser(unittest.TestCase):
                         cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Next').click()")
                         wait("document.querySelector('#page').innerText.includes('Page 2') && [...document.querySelectorAll('#page table')].find(t=>[...t.querySelectorAll('th')].some(h=>h.textContent==='Flag'))?.querySelectorAll('tbody tr').length===2")
                 self.assertIn('alice',cdp.evaluate("document.querySelector('#page').innerText"))
+                # Proxy disconnect is a real child-process stop, with Core/UI live.
+                cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Traffic').click()")
+                wait("document.querySelector('#traffic-live-status')?.textContent==='Live'")
+                processes[0].terminate();processes[0].wait(timeout=10)
+                wait("document.querySelector('#hydra-header').dataset.proxyConnected==='false'",seconds=12)
+                self.assertTrue(cdp.evaluate("document.querySelector('#hydra-header').classList.contains('bg-red-950')"))
+                self.assertIn('Proxy disconnected',cdp.evaluate("document.querySelector('#status').textContent"))
+                # Save while disconnected; reconnection must apply the latest value.
+                cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Settings').click()")
+                wait("Boolean(document.querySelector('#settings-history-limit'))")
+                cdp.evaluate("{const e=document.querySelector('#settings-history-limit');e.value='3';e.dispatchEvent(new Event('input',{bubbles:true}));}")
+                cdp.evaluate("document.querySelector('#settings-form').requestSubmit()")
+                wait("document.querySelector('#page').innerText.includes('Saved to the configuration file.')")
+                self.assertEqual(json.loads((tmp/'operations.json').read_text())['traffic_history_per_service_mib'],3)
+                processes.append(subprocess.Popen([str(BIN/'hydra-proxy'),'--config',str(tmp/'proxy.json')],stdout=log,stderr=log))
+                wait("document.querySelector('#hydra-header').dataset.proxyConnected==='true'",seconds=12)
+                self.assertFalse(cdp.evaluate("document.querySelector('#hydra-header').classList.contains('bg-red-950')"))
+                status=json.loads(subprocess.check_output([str(BIN/'hydra-core'),'--socket',sock,'status'],text=True))
+                self.assertEqual(status['history_per_service_bytes'],3*1024*1024)
+
                 cdp.evaluate("document.querySelector('#logout').click()")
                 wait("document.querySelector('#login') && !document.querySelector('#login').hidden")
                 self.assertNotIn('hydra_csrf=',cdp.evaluate('document.cookie'))
