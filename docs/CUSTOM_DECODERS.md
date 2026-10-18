@@ -138,3 +138,4 @@ cargo build --locked --release --manifest-path plugins/examples/length-prefixed/
 cargo build --locked -p hydra-core -p hydra-proxy
 HYDRA_WASM_SAMPLE="$PWD/plugins/examples/length-prefixed/target/wasm32-unknown-unknown/release/hydra_length_prefixed_example.wasm" python3 tests/e2e/browser.py
 ```
+

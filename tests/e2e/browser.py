@@ -410,7 +410,7 @@ class Browser(unittest.TestCase):
                                 n=len(marker);protobuf=b'\x0a'+bytes([(n&127)|128,n>>7])+marker
                                 grpc=b'\x00'+len(protobuf).to_bytes(4,'big')+protobuf
                                 response_bytes=h2frame(4,0,0,b'')+h2frame(1,4,1,b'\x88')+h2frame(0,1,1,grpc)
-                                expected_output='protobuf.field_1: WASM_DECODED_RESPONSE_'
+                                expected_output='crypter.GetUserPublicKeyResponse.n: WASM_DECODED_RESPONSE_'
                             else:
                                 request_bytes=b'\x00\x04PING'
                                 response_bytes=len(marker).to_bytes(2,'big')+marker
@@ -444,6 +444,12 @@ class Browser(unittest.TestCase):
                             wait(f"document.querySelector('#traffic-stream').innerText.includes({json.dumps(expected_output)})")
                             self.assertEqual(cdp.evaluate("document.querySelector('[aria-label=\"Stream view\"]').textContent"),'Decoded conversation')
                             self.assertTrue(cdp.evaluate("Boolean(document.querySelector('#traffic-stream [data-direction=\"2\"]'))"))
+                            cli_credentials=tmp/'deploy-credentials.json'
+                            cli_credentials.write_text(json.dumps({'username':'alice','password':'test-password-1234'}));cli_credentials.chmod(0o600)
+                            result=subprocess.run(['python3',str(root/'scripts/deploy-protocol-remote.py'),str(module),'--id','browser-wasm','--version','script-v2','--service',module_service_id,'--origin',f'https://localhost:{ap}','--ca',str(tmp/'tls.crt'),'--credentials',str(cli_credentials)],check=True,capture_output=True,text=True,timeout=30)
+                            self.assertTrue(json.loads(result.stdout)['applied'])
+                            with sqlite3.connect(tmp/'db') as db:self.assertEqual(db.execute('SELECT version,applied FROM protocol_activations WHERE service_id=?',[module_service_id]).fetchone(),('script-v2',1))
+
                     if section == 'Flags':
                         wait("Boolean(document.querySelector('#flag-paste') && document.querySelector('#submitter-manual-count'))")
                         wait("document.querySelector('#page').innerText.includes('submission stdout FLAG002000') && document.querySelector('#page').innerText.includes('submission stderr FLAG002000')")
