@@ -16,7 +16,25 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from relay import BIN, port
+
+
+def browser_binary():
+    # Hosted runners also install an unpinned Chromium snapshot. Match the
+    # workflow's stable Chrome preference while retaining local Chromium support.
+    return shutil.which('google-chrome') or shutil.which('chromium')
+
+
+class BrowserSelection(unittest.TestCase):
+    def test_prefers_stable_chrome_over_runner_snapshot(self):
+        paths={'google-chrome':'/usr/bin/google-chrome','chromium':'/usr/bin/chromium'}
+        with patch.object(shutil,'which',side_effect=paths.get):
+            self.assertEqual(browser_binary(),paths['google-chrome'])
+
+    def test_falls_back_to_chromium(self):
+        with patch.object(shutil,'which',side_effect={'chromium':'/usr/bin/chromium'}.get):
+            self.assertEqual(browser_binary(),'/usr/bin/chromium')
 
 
 def rename_dist_preserving_parent_mtime(source, destination):
@@ -79,9 +97,9 @@ class CDP:
 
 
 class Browser(unittest.TestCase):
-    @unittest.skipUnless(shutil.which('chromium') or shutil.which('google-chrome'), 'Chromium is required')
+    @unittest.skipUnless(browser_binary(), 'Chromium or Google Chrome is required')
     def test_native_https_login_navigation_logout(self):
-        chrome = shutil.which('chromium') or shutil.which('google-chrome')
+        chrome = browser_binary()
         processes = []
         upstream = None
         with tempfile.TemporaryDirectory(prefix='hydra-browser-') as directory:
@@ -127,16 +145,20 @@ class Browser(unittest.TestCase):
                     self.assertEqual(r.getheader('X-Content-Type-Options'),'nosniff')
                     self.assertIn('immutable',r.getheader('Cache-Control'))
                     self.assertGreater(len(bundle),1000)
-                processes.append(subprocess.Popen([chrome,'--headless','--no-sandbox','--disable-gpu','--disable-dev-shm-usage','--disable-background-networking','--disable-component-update','--no-first-run','--ignore-certificate-errors',f'--user-data-dir={tmp / "chrome"}',f'--remote-debugging-port={debug}','about:blank'],stdout=log,stderr=log))
+                print(f'Browser smoke executable: {chrome}',flush=True)
+                browser=subprocess.Popen([chrome,'--headless','--no-sandbox','--disable-gpu','--disable-dev-shm-usage','--disable-background-networking','--disable-component-update','--no-first-run','--ignore-certificate-errors',f'--user-data-dir={tmp / "chrome"}',f'--remote-debugging-port={debug}','about:blank'],stdout=log,stderr=log)
+                processes.append(browser)
                 # GitHub's shared hosted runners can take several seconds to start Chrome.
                 for _ in range(300):
+                    if browser.poll() is not None:
+                        log.seek(0);self.fail(f'{chrome} exited with status {browser.returncode} before DevTools started:\n'+log.read())
                     try:
                         c=http.client.HTTPConnection('127.0.0.1',debug,timeout=2);c.request('GET','/json/list');targets=json.loads(c.getresponse().read());c.close()
                         target=next(t for t in targets if t['type']=='page');break
                     except (OSError,StopIteration,http.client.HTTPException):
                         time.sleep(.05)
                 else:
-                    log.seek(0);self.fail(log.read())
+                    log.seek(0);self.fail(f'{chrome} did not expose DevTools on port {debug}; exit status={browser.poll()}:\n'+log.read())
                 cdp=CDP(target['webSocketDebuggerUrl'])
                 cdp.call('Emulation.setDeviceMetricsOverride',{'width':1280,'height':900,'deviceScaleFactor':1,'mobile':False})
                 cdp.call('Page.navigate',{'url':f'https://localhost:{ap}/'})
@@ -179,6 +201,7 @@ class Browser(unittest.TestCase):
                 threading.Thread(target=reply,daemon=True).start()
                 service = {'transport':'tcp','listen_address':f'127.0.0.1:{port()}','upstream_address':f'127.0.0.1:{upstream.getsockname()[1]}','protocol_id':'http','enabled':True}
                 def fill_service(value):
+                    wait("document.querySelector('#service-save') && !document.querySelector('#service-save').disabled")
                     for field,key in [('service-listener','listen_address'),('service-backend','upstream_address'),('service-profile','protocol_id')]:
                         cdp.evaluate(f"{{const e=document.querySelector('#{field}');e.value={json.dumps(value[key])};e.dispatchEvent(new Event('input',{{bubbles:true}}));}}")
                     cdp.evaluate("document.querySelector('#service-form').requestSubmit()")
