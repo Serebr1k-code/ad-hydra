@@ -48,6 +48,85 @@ async fn raw_flow_closure_emits_testable_size_metadata_without_payloads() {
 }
 
 #[tokio::test]
+async fn raw_byte_filter_matches_across_reads_without_emitting_payload_telemetry() {
+    use hydra_domain::{Action, Comparison, Expression, FieldValue, Mode, Rule, RuleSnapshot};
+
+    let telemetry = Telemetry::new(1);
+    let mut events = telemetry.events.subscribe();
+    let service = Service {
+        id: "raw-match".into(),
+        transport: hydra_domain::Transport::Tcp,
+        listen_address: "127.0.0.1:9001".parse().unwrap(),
+        upstream_address: "127.0.0.1:19001".parse().unwrap(),
+        protocol_id: "raw".into(),
+        enabled: true,
+        retain_history: false,
+    };
+    let protocols = crate::inspection::protocols::Protocols::open(
+        std::env::temp_dir().join(format!("hydra-raw-filter-{}", uuid::Uuid::new_v4())),
+    )
+    .await
+    .unwrap();
+    *telemetry.protocols.write().unwrap() = Some(protocols.clone());
+    telemetry.replace_rules(
+        hydra_filter_engine::CompiledSnapshot::compile(
+            RuleSnapshot {
+                revision: 1,
+                rules: vec![Rule {
+                    id: "raw-rule".into(),
+                    service_id: service.id.clone(),
+                    name: "raw bytes".into(),
+                    description: String::new(),
+                    enabled: true,
+                    mode: Mode::Enforce,
+                    priority: 1,
+                    expression: Expression::Predicate {
+                        field: "raw.bytes".into(),
+                        op: Comparison::Contains,
+                        value: FieldValue::Bytes(vec![0xde, 0xad, 0xbe, 0xef]),
+                    },
+                    action: Action::DropConnection,
+                    backend: "userspace".into(),
+                    expires_at_ms: None,
+                }],
+            },
+            std::slice::from_ref(&service),
+        )
+        .unwrap(),
+    );
+    let client = "127.0.0.1:40001".parse().unwrap();
+    let flow = telemetry.open(
+        &service,
+        client,
+        telemetry.permits.clone().acquire_owned().await.unwrap(),
+    );
+    let decoder = Arc::new(Mutex::new(Some(
+        protocols.session(&service.id, "raw").unwrap(),
+    )));
+    let context = Context {
+        base: crate::transport::RelayBase::new(service.clone(), client, telemetry.clone(), decoder),
+        flow: &flow,
+        idle: Duration::from_secs(1),
+    };
+    assert!(!inspect_raw(
+        &context,
+        Direction::ClientToServer,
+        b"prefix\xde\xad"
+    ));
+    assert!(inspect_raw(
+        &context,
+        Direction::ClientToServer,
+        b"\xbe\xefsuffix"
+    ));
+    while let Ok(event) = events.try_recv() {
+        if let Some(Payload::Message(message)) = event.payload {
+            let fields = &message.fields.unwrap().fields;
+            assert!(!fields.contains_key("raw.bytes"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn byte_limit_stops_incomplete_uploads_before_forwarding_the_excess() {
     use hydra_domain::{Comparison, Expression, FieldValue, Mode, Rule, RuleSnapshot};
     use sha2::{Digest, Sha256};
@@ -127,11 +206,13 @@ async fn byte_limit_stops_incomplete_uploads_before_forwarding_the_excess() {
             protocols.session(&service.id, protocol).unwrap(),
         )));
         let context = Context {
-            config: &service,
-            client,
-            telemetry: &telemetry,
+            base: crate::transport::RelayBase::new(
+                service.clone(),
+                client,
+                telemetry.clone(),
+                decoder.clone(),
+            ),
             flow: &flow,
-            decoder: &decoder,
             idle: Duration::from_secs(5),
         };
         let (mut sender, input) = tokio::io::duplex(4096);
@@ -210,11 +291,13 @@ async fn utf8_tcp_inspection_emits_text_events_in_both_directions() {
         protocols.session(&service.id, "utf8").unwrap(),
     )));
     let context = Context {
-        config: &service,
-        client,
-        telemetry: &telemetry,
+        base: crate::transport::RelayBase::new(
+            service.clone(),
+            client,
+            telemetry.clone(),
+            decoder.clone(),
+        ),
         flow: &flow,
-        decoder: &decoder,
         idle: Duration::from_secs(1),
     };
     assert!(!inspect_raw(

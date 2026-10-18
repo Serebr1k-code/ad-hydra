@@ -2,6 +2,7 @@
 use super::{Rpc, control::check_provenance};
 use hydra_domain::Transport;
 use hydra_wire::v1::{self, proxy_diagnostics_server::ProxyDiagnostics};
+use std::collections::BTreeMap;
 use std::{
     net::SocketAddr,
     time::{Duration, Instant},
@@ -11,6 +12,179 @@ use tokio::{
     net::{TcpStream, UdpSocket},
 };
 use tonic::{Request, Response, Status};
+
+#[allow(clippy::result_large_err)]
+fn preview_fields(
+    target: &v1::FilterPreviewTarget,
+    direction: &str,
+) -> Result<BTreeMap<String, hydra_domain::FieldValue>, Status> {
+    let mut fields = BTreeMap::new();
+    if let Some(input) = &target.network_fields {
+        if input.fields.len() > 8 {
+            return Err(Status::invalid_argument("preview context field limit"));
+        }
+        for (key, value) in &input.fields {
+            if !matches!(
+                key.as_str(),
+                "network.src_ip"
+                    | "network.src_port"
+                    | "network.dst_ip"
+                    | "network.dst_port"
+                    | "transport.kind"
+            ) {
+                return Err(Status::invalid_argument(
+                    "unsupported preview context field",
+                ));
+            }
+            fields.insert(
+                key.clone(),
+                hydra_wire::rules::value_from_wire(value, 0)
+                    .map_err(|_| Status::invalid_argument("invalid preview context field"))?,
+            );
+        }
+    }
+    fields.insert(
+        "direction".into(),
+        hydra_domain::FieldValue::String(direction.into()),
+    );
+    Ok(fields)
+}
+
+#[allow(clippy::result_large_err)]
+async fn preview_history(
+    rpc: &Rpc,
+    service: &hydra_domain::Service,
+    target: &v1::FilterPreviewTarget,
+    compiled: &hydra_filter_engine::CompiledSnapshot,
+) -> Result<v1::FilterPreviewResult, Status> {
+    let mut result = v1::FilterPreviewResult {
+        flow_id: target.flow_id.clone(),
+        state: "not_retained".into(),
+        ..Default::default()
+    };
+    let store = rpc
+        .state
+        .telemetry
+        .history
+        .read()
+        .map_err(|_| Status::internal("history store unavailable"))?
+        .clone()
+        .ok_or_else(|| Status::unavailable("history is disabled"))?;
+    let history = match store.get(&target.flow_id).await {
+        Ok(Some(history)) => history,
+        Ok(None) => return Ok(result),
+        Err(crate::history::HistoryReadError::Active) => {
+            result.state = "active".into();
+            return Ok(result);
+        }
+        Err(error) => return Err(history_status(error)),
+    };
+    if history.service_id != service.id {
+        return Err(Status::invalid_argument(
+            "flow does not belong to selected service",
+        ));
+    }
+    let mut decoder = rpc
+        .protocols
+        .session(&service.id, &service.protocol_id)
+        .map_err(|_| Status::failed_precondition("decoder unavailable"))?;
+    let mut sizes = crate::inspection::body_size::BodySizes::default();
+    sizes.set_http(decoder.http_mut().is_some());
+    let directions = [
+        (
+            hydra_protocol_sdk::Direction::ClientToServer,
+            history.client_to_server,
+        ),
+        (
+            hydra_protocol_sdk::Direction::ServerToClient,
+            history.server_to_client,
+        ),
+    ];
+    for (direction, bytes) in directions {
+        let direction_name = if direction == hydra_protocol_sdk::Direction::ClientToServer {
+            "client_to_server"
+        } else {
+            "server_to_client"
+        };
+        for chunk in bytes.chunks(16_384) {
+            let mut base_fields = preview_fields(target, direction_name)?;
+            let size_eval = sizes.feed(direction, chunk, |size_fields| {
+                let mut all = base_fields.clone();
+                all.extend(size_fields.clone());
+                let eval = compiled.evaluate_stream_sizes(&hydra_domain::EvaluationContext {
+                    service_id: &service.id,
+                    transport: service.transport,
+                    fields: &all,
+                    now_ms: crate::state::now().saturating_mul(1000),
+                    safe_http: service.protocol_id == "http"
+                        && direction == hydra_protocol_sdk::Direction::ClientToServer,
+                });
+                if !eval.hits.is_empty() {
+                    result.matched = true;
+                    result.matched_messages = result.matched_messages.saturating_add(1);
+                    result.would_block |= eval.hits.iter().any(|hit| hit.blocked);
+                }
+                false
+            });
+            let _ = size_eval;
+            let messages = match decoder.feed(direction, chunk) {
+                Ok(messages) => messages,
+                Err(_) => {
+                    result.state = "decoder_error".into();
+                    return Ok(result);
+                }
+            };
+            for mut message in messages {
+                sizes.annotate(
+                    &mut message,
+                    if service.transport == Transport::Udp {
+                        "datagram"
+                    } else {
+                        "stream"
+                    },
+                );
+                let direction_name =
+                    if message.direction == hydra_protocol_sdk::Direction::ClientToServer {
+                        "client_to_server"
+                    } else {
+                        "server_to_client"
+                    };
+                base_fields = preview_fields(target, direction_name)?;
+                base_fields.insert(
+                    "packet.size".into(),
+                    hydra_domain::FieldValue::Uint(chunk.len() as u64),
+                );
+                base_fields.extend(
+                    message
+                        .fields
+                        .iter()
+                        .map(|(key, value)| (key.clone(), crate::inspection::domain_value(value))),
+                );
+                let safe_http = service.protocol_id == "http"
+                    && message.direction == hydra_protocol_sdk::Direction::ClientToServer;
+                let eval = compiled.evaluate(&hydra_domain::EvaluationContext {
+                    service_id: &service.id,
+                    transport: service.transport,
+                    fields: &base_fields,
+                    now_ms: crate::state::now().saturating_mul(1000),
+                    safe_http,
+                });
+                if !eval.hits.is_empty() {
+                    result.matched = true;
+                    result.matched_messages = result.matched_messages.saturating_add(1);
+                    result.would_block |= eval.hits.iter().any(|hit| hit.blocked);
+                }
+            }
+        }
+    }
+    result.state = if history.history_truncated {
+        "partial"
+    } else {
+        "ready"
+    }
+    .into();
+    Ok(result)
+}
 
 fn history_status(error: crate::history::HistoryReadError) -> Status {
     match error {
@@ -45,6 +219,53 @@ mod history_tests {
 
 #[tonic::async_trait]
 impl ProxyDiagnostics for Rpc {
+    async fn preview_filter(
+        &self,
+        request: Request<v1::PreviewFilterRequest>,
+    ) -> Result<Response<v1::PreviewFilterReply>, Status> {
+        let mut input = request.into_inner();
+        check_provenance(input.actor.as_ref(), &input.request_id)?;
+        if input.targets.is_empty() || input.targets.len() > 50 {
+            return Err(Status::invalid_argument("preview stream limit"));
+        }
+        let _permit = self
+            .diagnostics
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("diagnostics busy"))?;
+        let rule = input
+            .rule
+            .take()
+            .ok_or_else(|| Status::invalid_argument("missing candidate filter"))?;
+        if rule.id != "__preview__" {
+            return Err(Status::invalid_argument("invalid preview filter identity"));
+        }
+        let service = self
+            .state
+            .get_service(&rule.service_id)
+            .await
+            .ok_or_else(|| Status::not_found("service unavailable"))?;
+        let snapshot_wire = v1::ApplyRuleSnapshotRequest {
+            revision: 1,
+            rules: vec![rule],
+            ..Default::default()
+        };
+        let snapshot = hydra_domain::RuleSnapshot::try_from(&snapshot_wire)
+            .map_err(|_| Status::invalid_argument("invalid candidate filter"))?;
+        let compiled = hydra_filter_engine::CompiledSnapshot::compile(
+            snapshot,
+            std::slice::from_ref(&service),
+        )
+        .map_err(|_| Status::invalid_argument("candidate filter is invalid for this service"))?;
+        let mut results = Vec::with_capacity(input.targets.len());
+        for target in &input.targets {
+            if target.flow_id.len() > 128 || uuid::Uuid::parse_str(&target.flow_id).is_err() {
+                return Err(Status::invalid_argument("invalid stream identifier"));
+            }
+            results.push(preview_history(self, &service, target, &compiled).await?);
+        }
+        Ok(Response::new(v1::PreviewFilterReply { results }))
+    }
     async fn test_protocol(
         &self,
         request: Request<v1::TestProtocolRequest>,

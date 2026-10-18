@@ -53,11 +53,21 @@ impl ProtocolSession {
     pub fn is_stream_decoder(&self) -> bool {
         matches!(
             self.decoder,
-            SessionDecoder::Wasm(_) | SessionDecoder::Framing(_) | SessionDecoder::Utf8(_)
+            SessionDecoder::Raw(_)
+                | SessionDecoder::Wasm(_)
+                | SessionDecoder::Framing(_)
+                | SessionDecoder::Utf8(_)
         )
     }
     pub fn feed(&mut self, direction: Direction, bytes: &[u8]) -> Result<Vec<ParsedMessage>> {
         Ok(self.decoder.feed(direction, bytes)?)
+    }
+    pub fn feed_datagram(
+        &mut self,
+        direction: Direction,
+        bytes: &[u8],
+    ) -> Result<Vec<ParsedMessage>> {
+        Ok(self.decoder.feed_datagram(direction, bytes)?)
     }
 }
 impl Protocols {
@@ -353,6 +363,12 @@ impl Protocols {
             })
         };
         if let Some((id, profile)) = profile {
+            if matches!(profile.framing, hydra_domain::protocols::Framing::Raw) {
+                return Ok(ProtocolSession {
+                    decoder: SessionDecoder::Raw(hydra_protocol_runtime::RawDecoder::default()),
+                    _permit: None,
+                });
+            }
             return Ok(ProtocolSession {
                 decoder: SessionDecoder::Framing(hydra_protocol_runtime::FramingDecoder::new(
                     id, profile,
@@ -376,7 +392,7 @@ impl Protocols {
                 "utf8" | "utf-8" | "text" => {
                     SessionDecoder::Utf8(hydra_protocol_runtime::Utf8Decoder::default())
                 }
-                _ => SessionDecoder::Raw,
+                _ => SessionDecoder::Raw(hydra_protocol_runtime::RawDecoder::default()),
             };
             (decoder, None)
         };
@@ -564,7 +580,7 @@ mod tests {
                 .session("svc", "raw")
                 .unwrap()
                 .decoder,
-            SessionDecoder::Raw
+            SessionDecoder::Raw(_)
         ));
         fs::remove_dir_all(directory).unwrap();
     }
@@ -623,7 +639,7 @@ mod tests {
         ));
         assert!(matches!(
             &reopened.session("other", "unknown").unwrap().decoder,
-            SessionDecoder::Raw
+            SessionDecoder::Raw(_)
         ));
         let mut utf8 = reopened.session("other", "utf8").unwrap();
         let decoded = utf8

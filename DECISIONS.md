@@ -244,6 +244,12 @@ Live Proxy profiling identified repeated whole-directory metadata scans on every
 
 Proxy-only redeployment uses a checksum-verified atomic binary replacement, binary backup, real gRPC readiness check and rollback. Core/SQLite/configuration/modules are preserved; existing TCP sessions reconnect across the Proxy restart.
 
+### Shared relay and decoder contracts; retained-stream filter preview (2026-10-18)
+
+TCP and UDP relay contexts compose the same `RelayBase` and implement `RelayTransport`, which owns common configured service, client endpoint, telemetry and decoder state while leaving async socket behavior transport-specific. Rust uses a trait plus composition for a shared parent contract. Built-in raw, UTF-8, HTTP, framing and WASM decoders implement the protocol runtime's common `ProtocolDecoder` interface and expose the same typed field-schema shape. Raw byte rules are evaluated inside Proxy; raw payload samples are never sent in parsed telemetry.
+
+Traffic selection is bounded to 50 streams from one service. The visual filter editor loads fields from the selected service's applied decoder and sends an unsaved candidate plus flow IDs to Core. Core forwards only candidate/context metadata over the existing Unix gRPC channel. Proxy replays locally retained closed histories through its decoder and filter engine, returning match/block metadata only. Active, unavailable, decoder-error and partial-history states are explicit. This is a diagnostic preview, not enforcement; saving still applies the rule through the existing snapshot path. Each preview attempt is audited. OpenAPI and generated frontend types are checked against the handler.
+
 ### CPU-aware Proxy runtime pools (2026-10-18)
 
 Replace the hardcoded two-thread Tokio runtime with one async worker per CPU reported by Rust available_parallelism at startup. Bound blocking pool growth explicitly to min(available CPUs,4). Connections stay async tasks; no thread is created per connection/task. Record actual pool sizes in the startup log. Shared catalog serialization and per-connection parser order remain; independent connections can execute across workers. Existing two-vCPU deployment keeps two async workers and at most two blocking workers. No API, wire, settings or history-format changes.

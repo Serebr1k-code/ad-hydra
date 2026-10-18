@@ -1,12 +1,12 @@
 use crate::{
     config::Limits,
-    inspection::{domain_value, network_fields, protocols::ProtocolSession},
+    inspection::{domain_value, network_fields},
     telemetry::{Flow, Telemetry},
+    transport::{RelayBase, RelayTransport},
 };
 use hydra_domain::{Action, Service};
 use hydra_protocol_sdk::Direction;
 use std::{
-    net::SocketAddr,
     sync::{Arc, Mutex, atomic::Ordering},
     time::Duration,
 };
@@ -16,8 +16,6 @@ use tokio::{
     sync::{mpsc, watch},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-type Decoder = Arc<Mutex<Option<ProtocolSession>>>;
-
 #[cfg(test)]
 #[path = "tcp_tests.rs"]
 mod tests;
@@ -53,7 +51,7 @@ pub async fn listen(
                         let(cr,cw)=client.split();let(ur,uw)=upstream.split();
                         let idle=Duration::from_millis(limits.tcp_idle_ms);
                         let (block_tx,block_rx)=mpsc::channel(1);
-                        let context=Context{config:&config,client:addr,telemetry:&telemetry,flow:&flow,decoder:&decoder,idle};
+                        let context=Context{base:RelayBase::new(config.clone(),addr,telemetry.clone(),decoder.clone()),flow:&flow,idle};
                         tokio::try_join!(client_to_server(cr,uw,&context,block_tx),server_to_client(ur,cw,&context,block_rx))?;
                         Ok::<_,std::io::Error>(())
                     };
@@ -64,12 +62,20 @@ pub async fn listen(
     }
 }
 struct Context<'a> {
-    config: &'a Service,
-    client: SocketAddr,
-    telemetry: &'a Telemetry,
+    base: RelayBase,
     flow: &'a Flow,
-    decoder: &'a Decoder,
     idle: Duration,
+}
+impl RelayTransport for Context<'_> {
+    fn base(&self) -> &RelayBase {
+        &self.base
+    }
+}
+impl std::ops::Deref for Context<'_> {
+    type Target = RelayBase;
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
 }
 async fn client_to_server(
     mut read: impl AsyncRead + Unpin,
@@ -274,7 +280,7 @@ fn inspect_message(
     } else {
         "server_to_client"
     };
-    let mut fields = network_fields(c.config, c.client, direction);
+    let mut fields = c.network_fields(direction);
     fields.insert(
         "packet.size".into(),
         hydra_domain::FieldValue::Uint(size as u64),
@@ -285,10 +291,17 @@ fn inspect_message(
             .iter()
             .map(|(k, v)| (k.clone(), domain_value(v))),
     );
-    let message_id = c.telemetry.message(&c.config.id, &c.flow.id, message, size);
-    c.flow.reported_message.store(true, Ordering::Relaxed);
+    let raw_payload = message.protocol == "raw";
+    let message_id = if raw_payload {
+        String::new()
+    } else {
+        c.telemetry.message(&c.config.id, &c.flow.id, message, size)
+    };
+    if !raw_payload {
+        c.flow.reported_message.store(true, Ordering::Relaxed);
+    }
     c.telemetry
-        .evaluate(c.config, &c.flow.id, &fields, safe_http, &message_id)
+        .evaluate(&c.config, &c.flow.id, &fields, safe_http, &message_id)
 }
 fn inspect_raw(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
     if inspect_transfer(c, direction, bytes) {
@@ -373,33 +386,29 @@ fn inspect_raw(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
     } else {
         "server_to_client"
     };
-    let mut fields = network_fields(c.config, c.client, direction);
+    let mut fields = c.network_fields(direction);
     fields.insert(
         "packet.size".into(),
         hydra_domain::FieldValue::Uint(bytes.len() as u64),
     );
     matches!(
         c.telemetry
-            .evaluate(c.config, &c.flow.id, &fields, false, ""),
+            .evaluate(&c.config, &c.flow.id, &fields, false, ""),
         Some(Action::DropConnection)
     )
 }
 fn inspect_transfer(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
     let mut sizes = c.flow.body_sizes.lock().unwrap_or_else(|e| e.into_inner());
     sizes.feed(direction, bytes, |size_fields| {
-        let mut fields = network_fields(
-            c.config,
-            c.client,
-            if direction == Direction::ClientToServer {
-                "client_to_server"
-            } else {
-                "server_to_client"
-            },
-        );
+        let mut fields = c.network_fields(if direction == Direction::ClientToServer {
+            "client_to_server"
+        } else {
+            "server_to_client"
+        });
         fields.extend(size_fields.clone());
         matches!(
             c.telemetry
-                .evaluate_stream_sizes(c.config, &c.flow.id, &fields),
+                .evaluate_stream_sizes(&c.config, &c.flow.id, &fields),
             Some(Action::DropConnection)
         )
     })

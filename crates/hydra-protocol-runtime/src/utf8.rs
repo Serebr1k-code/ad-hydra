@@ -1,5 +1,5 @@
-use crate::DecodeError;
-use hydra_protocol_sdk::{Direction, MAX_INPUT, ParsedMessage, Value};
+use crate::{DecodeError, ProtocolDecoder};
+use hydra_protocol_sdk::{Direction, FieldSchema, FieldType, MAX_INPUT, ParsedMessage, Value};
 use std::collections::BTreeMap;
 
 const TEXT_CHUNK: usize = 4096;
@@ -79,5 +79,21 @@ impl Utf8Decoder {
             start = end;
         }
         Ok(messages)
+    }
+}
+
+impl ProtocolDecoder for Utf8Decoder {
+    fn feed(
+        &mut self,
+        direction: Direction,
+        bytes: &[u8],
+    ) -> Result<Vec<ParsedMessage>, DecodeError> {
+        Utf8Decoder::feed(self, direction, bytes)
+    }
+    fn field_schema(&self) -> Vec<FieldSchema> {
+        vec![FieldSchema {
+            path: "utf8.text".into(),
+            field_type: FieldType::String,
+        }]
     }
 }

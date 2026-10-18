@@ -1,7 +1,9 @@
+mod session;
 mod tcp;
 mod udp;
 use crate::{config::Limits, telemetry::Telemetry};
 use hydra_domain::{Service, ServiceSnapshot, Transport};
+pub use session::{RelayBase, RelayTransport};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
     net::{TcpListener, UdpSocket},

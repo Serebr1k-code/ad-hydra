@@ -10,9 +10,12 @@ import SessionList from './SessionList.vue'
 import { flowRows,mergeFlows,visibleFlows,text,serviceProtocol,type Flow } from './traffic'
 import { trafficEvent,updateFlows } from './live'
 import { parseEventFrame } from '@/shared/api/sse'
+import { useRouter } from 'vue-router'
+import { toggleStream, type StreamSelection } from './streamSelection'
 const rows=ref<Flow[]>([]),services=ref<{id:string;name:string;protocol_id:string}[]>([]),service=ref('all'),selected=ref<Flow>()
 const cursor=ref<number|null>(),query=ref(''),loading=ref(false),error=ref(''),serviceError=ref(''),advanced=ref(false)
 const liveState=ref<LiveState>('connecting'),liveNotice=ref(''),conversation=ref<InstanceType<typeof FlowConversation>>()
+const router=useRouter(),filterSelection=ref<StreamSelection|null>(null)
 const selectedProtocol=computed(()=>services.value.find(s=>s.id===selected.value?.service_id)?.protocol_id??'raw')
 const showBlocked=ref(false)
 const visible=computed(()=>visibleFlows(rows.value,showBlocked.value))
@@ -66,6 +69,8 @@ async function load(more=false,live=false) {
  finally{if(current===request){loading.value=false;if(loadAgain){loadAgain=false;reconcile()}}}
 }
 function search(value:string){query.value=value;selected.value=undefined;void load()}
+function toggleFilter(flow:Flow,checked:boolean){filterSelection.value=toggleStream(filterSelection.value,flow,checked)}
+function createFilterFromStreams(){if(!filterSelection.value)return;sessionStorage.setItem('hydra.filter.stream-selection',JSON.stringify(filterSelection.value));void router.push('/filters?createFromTraffic=1')}
 watch(showBlocked,()=>{selectVisible();void load()})
 watch(service,()=>{selected.value=undefined;rows.value=[];void load()})
 onMounted(async()=>{
@@ -91,12 +96,12 @@ onUnmounted(()=>{disposed=true;request++;controller.abort();clearTimeout(catchup
 </script>
 <template>
  <section class="space-y-3">
-  <div class="flex items-center justify-between"><div><h1 class="!mb-0">Traffic</h1><p id="traffic-live-status" role="status" class="text-xs text-muted-foreground">{{liveState==='live'?'Live':liveState==='retrying'?'Reconnecting live traffic…':'Connecting live traffic…'}}</p></div><Button variant="ghost" size="sm" :aria-expanded="advanced" @click="advanced=!advanced">{{advanced?'Hide filters':'Filters'}}</Button></div>
+  <div class="flex items-center justify-between"><div><h1 class="!mb-0">Traffic</h1><p id="traffic-live-status" role="status" class="text-xs text-muted-foreground">{{liveState==='live'?'Live':liveState==='retrying'?'Reconnecting live traffic…':'Connecting live traffic…'}}</p></div><div class="flex gap-2"><Button v-if="filterSelection" variant="outline" size="sm" @click="filterSelection=null">Clear {{filterSelection.flow_ids.length }} selected</Button><Button v-if="filterSelection" size="sm" @click="createFilterFromStreams">Create filter from {{filterSelection.flow_ids.length }} streams</Button><Button variant="ghost" size="sm" :aria-expanded="advanced" @click="advanced=!advanced">{{advanced?'Hide filters':'Filters'}}</Button></div></div>
   <p v-if="liveNotice" role="status" class="text-xs text-muted-foreground">{{liveNotice}}</p>
   <TrafficQuery v-if="advanced" @search="search" />
   <Alert v-if="error||serviceError" variant="destructive"><AlertDescription>{{error||serviceError}}</AlertDescription></Alert>
   <div class="grid min-h-[640px] overflow-hidden rounded-md border bg-card md:h-[calc(100dvh-230px)] md:min-h-[480px] md:grid-cols-[300px_minmax(0,1fr)] lg:grid-cols-[330px_minmax(0,1fr)]">
-   <SessionList :rows="visible" :show-blocked="showBlocked" @show-blocked="showBlocked=$event" :services="services" :service="service" :selected="selected?.flow_id??''" :loading="loading" :more="Boolean(cursor)" @service="service=$event" @select="selected=$event" @refresh="load()" @more="load(true)" />
+   <SessionList :rows="visible" :show-blocked="showBlocked" @show-blocked="showBlocked=$event" :services="services" :service="service" :selected="selected?.flow_id??''" :loading="loading" :more="Boolean(cursor)" :filter-selection="filterSelection?.flow_ids??[]" :filter-selection-service="filterSelection?.service_id??''" @service="service=$event" @select="selected=$event" @toggle-filter="toggleFilter" @refresh="load()" @more="load(true)" />
    <FlowConversation ref="conversation" v-if="selected" :key="selected.flow_id+':'+selectedProtocol" :flow-id="selected.flow_id" :flow="selected" :protocol-id="selectedProtocol" :show-blocked="showBlocked" />
    <section v-else id="traffic-stream" class="flex min-h-80 items-center justify-center p-8 text-center"><div><h2 class="!mt-0">Follow TCP stream</h2><p class="text-sm text-muted-foreground">Choose a service and select a session to inspect its conversation.</p></div></section>
   </div>

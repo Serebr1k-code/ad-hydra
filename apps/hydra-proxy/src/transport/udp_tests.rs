@@ -47,13 +47,15 @@ async fn byte_limits_work_before_udp_decoding_and_keep_directions_separate() {
             telemetry.permits.clone().acquire_owned().await.unwrap(),
         );
         let context = Context {
-            config: service,
-            client,
+            base: crate::transport::RelayBase::new(
+                service,
+                client,
+                telemetry.clone(),
+                Mutex::new(None).into(),
+            ),
             flow,
-            decoder: Mutex::new(None),
             last: AtomicU64::new(0),
             start: Instant::now(),
-            telemetry,
         };
         assert!(!context.inspect(Direction::ClientToServer, &[0xff; 512]));
         assert!(!context.inspect(Direction::ServerToClient, &[0xff; 512]));

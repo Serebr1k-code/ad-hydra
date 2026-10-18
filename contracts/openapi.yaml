@@ -606,6 +606,28 @@ paths:
           description: ''
         '409':
           description: ''
+  /api/v1/filters/preview:
+    post:
+      tags:
+      - filters
+      operationId: preview_filter
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FilterPreviewInput'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: ''
+        '401':
+          description: ''
   /api/v1/filters/state:
     put:
       tags:
@@ -2295,6 +2317,51 @@ components:
           minimum: 0
         expression:
           type: object
+        mode:
+          type: string
+        name:
+          type: string
+        priority:
+          type: integer
+          format: int32
+          minimum: 0
+        service_id:
+          type: string
+      additionalProperties: false
+    FilterPreviewInput:
+      type: object
+      required:
+      - service_id
+      - flow_ids
+      - name
+      - description
+      - enabled
+      - mode
+      - priority
+      - expression
+      - action
+      - backend
+      properties:
+        action:
+          type: object
+        backend:
+          type: string
+        description:
+          type: string
+        enabled:
+          type: boolean
+        expires_at_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        expression:
+          type: object
+        flow_ids:
+          type: array
+          items:
+            type: string
         mode:
           type: string
         name:

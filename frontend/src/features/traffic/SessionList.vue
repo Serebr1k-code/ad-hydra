@@ -6,8 +6,8 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { serviceColor,type Flow } from './traffic'
-const props=defineProps<{rows:Flow[];showBlocked:boolean;services:{id:string;name:string}[];service:string;selected:string;loading:boolean;more:boolean}>()
-const emit=defineEmits<{service:[value:string];showBlocked:[value:boolean];select:[flow:Flow];refresh:[];more:[]}>()
+const props=defineProps<{rows:Flow[];showBlocked:boolean;services:{id:string;name:string}[];service:string;selected:string;loading:boolean;more:boolean;filterSelection:string[];filterSelectionService:string}>()
+const emit=defineEmits<{service:[value:string];showBlocked:[value:boolean];select:[flow:Flow];refresh:[];more:[];toggleFilter:[flow:Flow,checked:boolean]}>()
 const search=ref('')
 const visible=computed(()=>props.rows.filter(f=>`${f.client} ${f.destination} ${f.flow_id}`.toLowerCase().includes(search.value.toLowerCase())))
 </script>
@@ -20,9 +20,12 @@ const visible=computed(()=>props.rows.filter(f=>`${f.client} ${f.destination} ${
    <div class="flex items-center justify-between"><span class="text-xs text-muted-foreground">{{rows.length}} sessions loaded</span><Button size="sm" variant="ghost" :disabled="loading" @click="emit('refresh')">{{loading?'Loading…':'Refresh'}}</Button></div>
   </div>
   <div class="min-h-0 flex-1 overflow-y-auto p-2" aria-label="Sessions">
-   <Button v-for="flow in visible" :key="flow.flow_id" :data-flow-id="flow.flow_id" :data-service-id="flow.service_id" :data-has-flag="flow.has_flag" :data-blocked="flow.blocked" :style="{borderLeftColor:serviceColor(flow.service_id)}" :class="flow.has_flag?'ring-1 ring-inset ring-amber-500/60 bg-amber-500/10':''" :aria-pressed="selected===flow.flow_id" :variant="selected===flow.flow_id?'secondary':'ghost'" class="mb-1 h-auto w-full border-l-4 justify-start whitespace-normal px-3 py-3 text-left font-normal" @click="emit('select',flow)">
+   <div v-for="flow in visible" :key="flow.flow_id" class="mb-1 flex items-stretch gap-1">
+   <Checkbox :model-value="filterSelection.includes(flow.flow_id)" :disabled="Boolean(filterSelectionService && filterSelectionService!==flow.service_id) || (filterSelection.length>=50 && !filterSelection.includes(flow.flow_id))" :aria-label="'Select stream for filter ' + flow.flow_id" class="mt-3" @update:model-value="value => emit('toggleFilter',flow,value===true)" />
+   <Button :data-flow-id="flow.flow_id" :data-service-id="flow.service_id" :data-has-flag="flow.has_flag" :data-blocked="flow.blocked" :style="{borderLeftColor:serviceColor(flow.service_id)}" :class="flow.has_flag?'ring-1 ring-inset ring-amber-500/60 bg-amber-500/10':''" :aria-pressed="selected===flow.flow_id" :variant="selected===flow.flow_id?'secondary':'ghost'" class="h-auto min-w-0 flex-1 border-l-4 justify-start whitespace-normal px-3 py-3 text-left font-normal" @click="emit('select',flow)">
     <span class="block w-full min-w-0 space-y-1"><span class="flex items-center justify-between gap-2"><span class="truncate font-mono text-xs">{{flow.client}}</span><span v-if="flow.has_flag" class="shrink-0 font-medium text-amber-500">Flag</span><span v-if="flow.blocked" class="shrink-0 font-medium text-destructive">Blocked</span><span class="text-[10px] text-muted-foreground">{{flow.state}}</span></span><span class="block truncate font-mono text-xs text-muted-foreground">→ {{flow.destination}}</span><span class="flex justify-between gap-2 text-[10px] text-muted-foreground"><span class="truncate">{{flow.service_id}}</span><span>{{flow.started.slice(11,19)}}</span></span></span>
    </Button>
+   </div>
    <p v-if="!loading&&!visible.length" class="p-4 text-sm text-muted-foreground">{{rows.length?'No sessions match your search.':'No sessions for this service yet.'}}</p>
    <Button v-if="more" variant="outline" class="mt-2 w-full" :disabled="loading||rows.length>=500" @click="emit('more')">More sessions</Button>
    <p v-if="rows.length>=500" class="p-2 text-xs text-muted-foreground">500-session limit. Narrow the time range to see other sessions.</p>

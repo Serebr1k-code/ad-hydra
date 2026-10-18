@@ -1,24 +1,29 @@
 <script setup lang="ts">
 import {username} from '@/shared/users/directory'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import type { FilterInput, ListResponse } from '@/generated/contracts'
 import { api, errorMessage } from '@/shared/api/client'
 import { date } from '@/shared/format'
 import { enforceSavedFilter } from './filterWorkflow'
 import FilterTestDialog from './FilterTestDialog.vue'
 import FilterEditorDialog, { type FilterRecord } from './FilterEditorDialog.vue'
+import type { DecoderCatalog } from './fieldCatalog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import DataTable from '@/components/DataTable.vue'
+import { parseStreamSelection, type StreamSelection } from '@/features/traffic/streamSelection'
 
 type Filter = FilterRecord & { updated_at: string; updated_by: string; desired_revision: number; applied_revision: number; desired_enabled: boolean; applied_enabled: boolean | null }
 type Filters = Omit<ListResponse, 'items'> & { items: Filter[] }
 const data = ref<Filters | null>(null)
-const services = ref<Array<{ id: string; name: string; transport: string }>>([])
+const services = ref<Array<{ id: string; name: string; transport: string; protocol_id: string }>>([])
+const decoderCatalog = ref<DecoderCatalog>({ items: [], activations: [], native_schemas: [] })
+const fromTraffic = ref<StreamSelection|null>(null)
 const busy = ref(false)
 const editorOpen = ref(false)
+watch(editorOpen, open => { if (!open) fromTraffic.value = null })
 const editing = ref<Filter | undefined>()
 const testOpen = ref(false)
 const testing = ref<Pick<FilterRecord, 'id' | 'name' | 'service_id'>>()
@@ -43,9 +48,14 @@ async function load(cursor = after.value) {
   busy.value = true
   error.value = ''
   try {
-    const [filters, serviceResponse] = await Promise.all([api<Filters>(`/filters?q=${encodeURIComponent(query.value)}&after=${encodeURIComponent(cursor)}`), api<ListResponse>('/services')])
+    const [filters, serviceResponse, protocols] = await Promise.all([
+      api<Filters>(`/filters?q=${encodeURIComponent(query.value)}&after=${encodeURIComponent(cursor)}`),
+      api<ListResponse>('/services'),
+      api<DecoderCatalog>('/protocols'),
+    ])
     data.value = filters
-    services.value = serviceResponse.items.flatMap(item => typeof item.id === 'string' ? [{ id: item.id, name: typeof item.name === 'string' ? item.name : item.id, transport: typeof item.transport === 'string' ? item.transport : 'tcp' }] : [])
+    decoderCatalog.value = protocols
+    services.value = serviceResponse.items.flatMap(item => typeof item.id === 'string' ? [{ id: item.id, name: typeof item.name === 'string' ? item.name : item.id, transport: typeof item.transport === 'string' ? item.transport : 'tcp', protocol_id: typeof item.protocol_id === 'string' ? item.protocol_id : 'raw' }] : [])
     after.value = cursor
     selected.value = []
   } catch (cause) { error.value = errorMessage(cause) }
@@ -109,12 +119,20 @@ async function enforced() {
   notice.value = 'Enforcement requested. Check the applied revision below.'
   await load()
 }
-onMounted(() => load(''))
+onMounted(async () => {
+  await load('')
+  if (new URLSearchParams(window.location.hash.split('?')[1] ?? '').get('createFromTraffic') !== '1') return
+  const serialized = sessionStorage.getItem('hydra.filter.stream-selection')
+  sessionStorage.removeItem('hydra.filter.stream-selection')
+  try { fromTraffic.value = parseStreamSelection(serialized ? JSON.parse(serialized) : null) }
+  catch { fromTraffic.value = null }
+  if (fromTraffic.value) edit()
+})
 </script>
 
 <template>
   <section class="space-y-4">
-    <FilterEditorDialog v-model:open="editorOpen" :busy="busy" :error="error" :services="services" :filter="editing" @save="saveFilter" />
+    <FilterEditorDialog v-model:open="editorOpen" :busy="busy" :error="error" :services="services" :catalog="decoderCatalog" :filter="editing" :initial-service-id="fromTraffic?.service_id" :initial-flow-ids="fromTraffic?.flow_ids" @save="saveFilter" />
     <FilterTestDialog v-model:open="testOpen" :filter="testing" @enforced="enforced" />
     <h1 class="text-2xl font-semibold">Filters</h1>
     <div class="flex flex-wrap items-center gap-3">

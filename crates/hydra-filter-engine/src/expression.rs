@@ -66,6 +66,7 @@ impl CompiledExpression {
                         | "network.dst_port"
                         | "transport.kind"
                         | "direction"
+                        | "raw.bytes"
                 ) || field.starts_with("protocol.");
                 if !registered {
                     return Err(invalid("unknown field path"));

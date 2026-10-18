@@ -14,6 +14,7 @@ use utoipa::ToSchema;
 pub enum Error {
     Auth,
     Missing,
+    Status(StatusCode),
     Invalid(anyhow::Error),
 }
 impl From<anyhow::Error> for Error {
@@ -33,6 +34,15 @@ impl IntoResponse for Error {
                 StatusCode::NOT_FOUND,
                 "not_found",
                 "Record not found".into(),
+            ),
+            Self::Status(status) => (
+                status,
+                if status == StatusCode::SERVICE_UNAVAILABLE {
+                    "proxy_unavailable"
+                } else {
+                    "preview_failed"
+                },
+                "Filter preview could not be completed".into(),
             ),
             Self::Invalid(e) => {
                 if e.downcast_ref::<Conflict>().is_some() {

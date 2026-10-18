@@ -31,6 +31,8 @@ service ProxyDiagnostics {
   rpc CaptureSample(CaptureSampleRequest) returns (CaptureSampleReply);
   rpc GetSample(GetSampleRequest) returns (GetSampleReply);
   rpc GetFlowHistory(GetFlowHistoryRequest) returns (GetFlowHistoryReply);
+  // Replays retained flows locally and returns only filter outcome metadata.
+  rpc PreviewFilter(PreviewFilterRequest) returns (PreviewFilterReply);
   // ONLY to a configured service upstream on the competition allowlist.
   // Does not inject arbitrary packets into pre-existing connections.
   rpc ProbeService(ProbeServiceRequest) returns (ProbeServiceReply);
@@ -281,6 +283,24 @@ message GetFlowHistoryReply {
   bool truncated_server_to_client = 10;
   bool history_truncated = 11;
 }
+message FilterPreviewTarget {
+  string flow_id = 1;
+  FieldObject network_fields = 2;
+}
+message PreviewFilterRequest {
+  repeated FilterPreviewTarget targets = 1;
+  Rule rule = 2;
+  Actor actor = 3;
+  string request_id = 4;
+}
+message FilterPreviewResult {
+  string flow_id = 1;
+  string state = 2; // ready, partial, active, not_retained, decoder_error
+  bool matched = 3;
+  bool would_block = 4;
+  uint32 matched_messages = 5;
+}
+message PreviewFilterReply { repeated FilterPreviewResult results = 1; }
 message ParsedMessage {
   string message_id = 1;
   string protocol_id = 2;

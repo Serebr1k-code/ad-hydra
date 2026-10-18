@@ -1,12 +1,16 @@
 //! Bounded decoders; decoding never owns or edits transport buffers.
+mod decoder;
 mod framing;
 mod http;
 mod http_response;
+mod raw;
 mod utf8;
+pub use decoder::ProtocolDecoder;
 pub use framing::FramingDecoder;
 mod wasm;
 pub use http::{HttpBatch, HttpDecoder, HttpRequest};
 pub use hydra_protocol_sdk::{Direction, ParsedMessage, Value};
+pub use raw::{MAX_RAW_PATTERN, RawDecoder};
 pub use utf8::Utf8Decoder;
 pub use wasm::{PluginRegistry, PluginVersion, WasmSession};
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,7 +22,7 @@ impl std::fmt::Display for DecodeError {
 }
 impl std::error::Error for DecodeError {}
 pub enum SessionDecoder {
-    Raw,
+    Raw(RawDecoder),
     Framing(FramingDecoder),
     Http(HttpDecoder),
     Utf8(Utf8Decoder),
@@ -31,13 +35,32 @@ impl SessionDecoder {
         bytes: &[u8],
     ) -> Result<Vec<ParsedMessage>, DecodeError> {
         match self {
-            Self::Framing(f) => f.feed(direction, bytes),
-            Self::Raw => Ok(Vec::new()),
-            Self::Http(h) => h
-                .feed(direction, bytes)
-                .map(|v| v.into_iter().map(|r| r.message).collect()),
-            Self::Utf8(d) => d.feed(direction, bytes),
-            Self::Wasm(w) => w.feed(direction, bytes),
+            Self::Framing(d) => ProtocolDecoder::feed(d, direction, bytes),
+            Self::Raw(d) => ProtocolDecoder::feed(d, direction, bytes),
+            Self::Http(d) => ProtocolDecoder::feed(d, direction, bytes),
+            Self::Utf8(d) => ProtocolDecoder::feed(d, direction, bytes),
+            Self::Wasm(d) => ProtocolDecoder::feed(d.as_mut(), direction, bytes),
+        }
+    }
+
+    pub fn field_schema(&self) -> Vec<hydra_protocol_sdk::FieldSchema> {
+        match self {
+            Self::Raw(d) => d.field_schema(),
+            Self::Framing(d) => d.field_schema(),
+            Self::Http(d) => d.field_schema(),
+            Self::Utf8(d) => d.field_schema(),
+            Self::Wasm(d) => d.field_schema(),
+        }
+    }
+    pub fn feed_datagram(
+        &mut self,
+        direction: Direction,
+        bytes: &[u8],
+    ) -> Result<Vec<ParsedMessage>, DecodeError> {
+        if let Self::Raw(decoder) = self {
+            decoder.feed_datagram(direction, bytes)
+        } else {
+            self.feed(direction, bytes)
         }
     }
 }

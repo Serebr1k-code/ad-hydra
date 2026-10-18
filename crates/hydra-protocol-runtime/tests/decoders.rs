@@ -77,11 +77,12 @@ fn ambiguous_http_fails_and_raw_has_no_fake_messages() {
         )
         .is_err()
     );
-    assert!(
-        SessionDecoder::Raw
+    assert_eq!(
+        SessionDecoder::Raw(hydra_protocol_runtime::RawDecoder::default())
             .feed(Direction::ClientToServer, b"opaque\0")
-            .unwrap()
-            .is_empty()
+            .unwrap()[0]
+            .fields["raw.bytes"],
+        hydra_protocol_runtime::Value::Bytes(b"opaque\0".to_vec())
     );
 }
 
@@ -126,6 +127,55 @@ fn utf8_decoder_keeps_fragment_tails_separate_between_directions() {
     );
     let request = decoder.feed(Direction::ClientToServer, &[0xac]).unwrap();
     assert_eq!(request[0].fields["utf8.text"], Value::String("€".into()));
+}
+
+#[test]
+fn raw_bytes_decoder_retains_only_bounded_overlap_and_matches_across_reads() {
+    use hydra_protocol_runtime::{ProtocolDecoder, RawDecoder};
+    use hydra_protocol_sdk::{Direction, Value};
+
+    let mut decoder = RawDecoder::default();
+    assert!(
+        decoder
+            .field_schema()
+            .iter()
+            .any(|field| field.path == "raw.bytes")
+    );
+    let first = decoder
+        .feed(Direction::ClientToServer, b"prefix\xde\xad")
+        .unwrap();
+    assert_eq!(
+        first[0].fields["raw.bytes"],
+        Value::Bytes(b"prefix\xde\xad".to_vec())
+    );
+    let second = decoder
+        .feed(Direction::ClientToServer, b"\xbe\xefsuffix")
+        .unwrap();
+    assert!(matches!(
+        &second[0].fields["raw.bytes"],
+        Value::Bytes(bytes) if bytes.windows(4).any(|window| window == [0xde, 0xad, 0xbe, 0xef])
+    ));
+    assert!(
+        decoder.feed(Direction::ServerToClient, b"reply").unwrap()[0]
+            .fields
+            .contains_key("raw.bytes")
+    );
+}
+
+#[test]
+fn built_in_decoders_share_a_typed_schema_interface() {
+    use hydra_protocol_runtime::{HttpDecoder, ProtocolDecoder, Utf8Decoder};
+
+    fn paths(decoder: &dyn ProtocolDecoder) -> Vec<String> {
+        decoder
+            .field_schema()
+            .iter()
+            .map(|field| field.path.clone())
+            .collect()
+    }
+
+    assert!(paths(&HttpDecoder::default()).contains(&"http.path".into()));
+    assert!(paths(&Utf8Decoder::default()).contains(&"utf8.text".into()));
 }
 
 #[test]

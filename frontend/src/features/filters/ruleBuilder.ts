@@ -1,4 +1,5 @@
-export type FieldKind = 'string' | 'number'
+export type FieldKind = 'string' | 'number' | 'boolean' | 'bytes'
+export interface RuleField { value: string; label: string; kind: FieldKind }
 export type Join = 'all' | 'any'
 export interface Condition {
   id: string
@@ -18,7 +19,7 @@ export interface Group {
 export type RuleNode = Condition | Group
 export type Expression = Record<string, unknown>
 
-export const fields: Array<{ value: string; label: string; kind: FieldKind }> = [
+export const fields: RuleField[] = [
   { value: 'http.method', label: 'HTTP method', kind: 'string' },
   { value: 'http.path', label: 'HTTP path', kind: 'string' },
   { value: 'http.user_agent', label: 'HTTP user agent', kind: 'string' },
@@ -33,16 +34,19 @@ export const fields: Array<{ value: string; label: string; kind: FieldKind }> = 
   { value: 'network.dst_port', label: 'Server port', kind: 'number' },
   { value: 'transport.kind', label: 'Transport', kind: 'string' },
   { value: 'direction', label: 'Direction', kind: 'string' },
+  { value: 'raw.bytes', label: 'Raw bytes (hex)', kind: 'bytes' },
+  { value: 'utf8.text', label: 'UTF-8 text', kind: 'string' },
 ]
 
-export function createCondition(): Condition {
-  return { id: crypto.randomUUID(), kind: 'condition', field: 'http.path', op: 'prefix', value: '/' }
+export function createCondition(field = 'http.path', available: RuleField[] = fields): Condition {
+  const kind = fieldKind(field, available)
+  return { id: crypto.randomUUID(), kind: 'condition', field, op: kind === 'number' ? 'gt' : 'eq', value: kind === 'number' ? '512' : '' }
 }
-export function createGroup(join: Join = 'all'): Group {
-  return { id: crypto.randomUUID(), kind: 'group', join, negate: false, children: [createCondition()] }
+export function createGroup(join: Join = 'all', field = 'http.path', available: RuleField[] = fields): Group {
+  return { id: crypto.randomUUID(), kind: 'group', join, negate: false, children: [createCondition(field, available)] }
 }
-export function fieldKind(field: string): FieldKind {
-  return fields.find(item => item.value === field)?.kind ?? 'string'
+export function fieldKind(field: string, available: RuleField[] = fields): FieldKind {
+  return available.find(item => item.value === field)?.kind ?? fields.find(item => item.value === field)?.kind ?? 'string'
 }
 
 function uintValue(input: string): string {
@@ -60,29 +64,41 @@ function uintValue(input: string): string {
   return result.toString()
 }
 
-function conditionExpression(node: Condition): Expression {
+function bytesValue(input: string): number[] {
+  const hex = input.replace(/(?:0x|[\s:_-])/gi, '')
+  if (!hex || hex.length > 2048 || hex.length % 2 || !/^[\da-f]+$/i.test(hex)) throw new Error('Enter an even-length hex byte pattern (up to 1024 bytes)')
+  return hex.match(/.{2}/g)!.map(byte => Number.parseInt(byte, 16))
+}
+function conditionExpression(node: Condition, available: RuleField[]): Expression {
   let op = node.op
   if (op === 'not_regex') op = 'regex'
-  const kind = fieldKind(node.field)
+  const kind = fieldKind(node.field, available)
   let value: Record<string, unknown>
   if (kind === 'number') {
     const converted = uintValue(node.value)
     value = { type: 'uint', value: converted }
+  } else if (kind === 'boolean') {
+    if (node.value !== 'true' && node.value !== 'false') throw new Error('Choose true or false')
+    value = { type: 'bool', value: node.value === 'true' }
+  } else if (kind === 'bytes') {
+    value = { type: 'bytes', value: bytesValue(node.value) }
   } else value = { type: 'string', value: node.value }
   const predicate = { field: node.field, op, value }
   return node.op === 'not_regex' || node.negate ? { not: predicate } : predicate
 }
-export function toExpression(node: RuleNode): Expression {
-  if (node.kind === 'condition') return conditionExpression(node)
+export function toExpression(node: RuleNode, available: RuleField[] = fields): Expression {
+  if (node.kind === 'condition') return conditionExpression(node, available)
   if (!node.children.length) throw new Error('A condition group must have at least one rule')
-  const children = node.children.map(toExpression)
+  const children = node.children.map(child => toExpression(child, available))
   const expression = node.join === 'all' ? { all: children } : { any: children }
   return node.negate ? { not: expression } : expression
 }
 
-function readValue(input: unknown): string {
+function readValue(input: unknown, type?: string): string {
   if (!input || typeof input !== 'object') return ''
   const value = (input as { value?: unknown }).value
+  if (type === 'bytes' && Array.isArray(value) && value.every(item => Number.isInteger(item) && item >= 0 && item <= 255)) return value.map(item => Number(item).toString(16).padStart(2, '0')).join(' ')
+  if (type === 'bool' && typeof value === 'boolean') return String(value)
   return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
 }
 function parseNode(input: unknown): RuleNode {
@@ -102,7 +118,7 @@ function parseNode(input: unknown): RuleNode {
     const expected = value.value && typeof value.value === 'object' ? value.value as Record<string, unknown> : {}
     return {
       id: crypto.randomUUID(), kind: 'condition', field: value.field,
-      op: value.op, value: readValue(expected),
+      op: value.op, value: readValue(expected, typeof expected.type === 'string' ? expected.type : undefined),
     }
   }
   throw new Error('Unsupported saved filter expression')

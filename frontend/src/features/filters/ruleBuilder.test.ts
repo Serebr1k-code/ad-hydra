@@ -52,6 +52,18 @@ describe('visual filter expression builder', () => {
     expect(() => toExpression({ ...condition, value: '18446744073709551616' })).toThrow()
     expect(() => toExpression({ ...condition, value: '0.1B' })).toThrow()
   })
+  test('serializes raw byte comparisons from hex without converting payload bytes to text', () => {
+    const raw = { id: 'raw', kind: 'condition' as const, field: 'raw.bytes', op: 'contains', value: 'DE AD be ef' }
+    expect(toExpression(raw)).toEqual({ field: 'raw.bytes', op: 'contains', value: { type: 'bytes', value: [222, 173, 190, 239] } })
+    expect(toExpression(fromExpression(toExpression(raw)))).toEqual({ all: [toExpression(raw)] })
+    expect(() => toExpression({ ...raw, value: 'ABC' })).toThrow()
+    expect(() => toExpression({ ...raw, value: 'AA'.repeat(1025) })).toThrow()
+  })
+  test('serializes typed boolean fields as boolean values', () => {
+    expect(toExpression({ id: 'bool', kind: 'condition', field: 'plugin.valid', op: 'eq', value: 'true' }, [
+      { value: 'plugin.valid', label: 'Valid', kind: 'boolean' },
+    ])).toEqual({ field: 'plugin.valid', op: 'eq', value: { type: 'bool', value: true } })
+  })
 })
 
 test('removes nested groups without changing siblings and keeps an editable last condition', async () => {

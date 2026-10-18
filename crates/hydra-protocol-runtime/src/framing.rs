@@ -1,5 +1,6 @@
-use crate::{DecodeError, Direction, ParsedMessage, Value};
+use crate::{DecodeError, Direction, ParsedMessage, ProtocolDecoder, Value};
 use hydra_domain::protocols::{Framing, FramingProfile};
+use hydra_protocol_sdk::{FieldSchema, FieldType};
 use std::collections::BTreeMap;
 /// Per-flow snapshot: profile activation never changes a live decoder.
 pub struct FramingDecoder {
@@ -100,6 +101,25 @@ impl FramingDecoder {
             }
         }
         Ok(frames)
+    }
+}
+impl ProtocolDecoder for FramingDecoder {
+    fn feed(
+        &mut self,
+        direction: Direction,
+        bytes: &[u8],
+    ) -> Result<Vec<ParsedMessage>, DecodeError> {
+        FramingDecoder::feed(self, direction, bytes)
+    }
+    fn field_schema(&self) -> Vec<FieldSchema> {
+        if matches!(self.profile.framing, Framing::Raw) {
+            vec![]
+        } else {
+            vec![FieldSchema {
+                path: "payload".into(),
+                field_type: FieldType::Bytes,
+            }]
+        }
     }
 }
 #[cfg(test)]

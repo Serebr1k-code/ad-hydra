@@ -180,6 +180,10 @@ export const operations = {
     "method": "GET",
     "path": "/api/v1/traffic/flows/{id}/messages"
   },
+  "preview_filter": {
+    "method": "POST",
+    "path": "/api/v1/filters/preview"
+  },
   "probe": {
     "method": "POST",
     "path": "/api/v1/services/{id}/probe"

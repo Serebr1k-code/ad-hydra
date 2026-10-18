@@ -135,3 +135,22 @@ The picker loads 25 sessions per page, retains at most 100 session choices, and
 shows at most 100 messages from the selected session. Use **Older sessions** or
 **Refresh traffic** to select other retained sessions. If no parsed messages are
 available, check the decoder profile and send a normal request through the proxy.
+
+From Traffic, select up to 50 streams from one service and choose **Create
+filter from streams**. The editor loads filterable scalar fields from that
+service's active built-in, framing, or installed WASM decoder. Byte fields such
+as `raw.bytes` accept hexadecimal input. Universal network, direction and
+stream-size fields remain available for every decoder. As the unsaved rule is
+edited, Core asks Proxy to replay each retained closed history through the
+same decoder and filter engine and shows whether it matches and would block.
+Only flow IDs, a candidate rule, and endpoint metadata cross gRPC; packet bytes
+stay in Proxy. Active streams wait until closure. Expired histories are marked
+unavailable, and truncated captures are explicitly partial; a no-match in a
+partial capture is not shown as a definite pass. Preview reads are audited.
+
+The selected-stream filter dialog shows the rule configurator on the left and
+the same conversation component used on Traffic on the right. Click any selected
+stream to switch the viewer without losing the unsaved rule. Its decoded fields,
+client/server directions, captured-byte modes and live updates work as on Traffic.
+The selected streams remain clickable while filter outcomes are recalculated.
+On narrow screens the panes stack vertically.

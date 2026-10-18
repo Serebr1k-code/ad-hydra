@@ -269,7 +269,7 @@ fn expression_from_wire(
         },
     })
 }
-fn value_from_wire(v: &p::FieldValue, depth: usize) -> Result<FieldValue, String> {
+pub fn value_from_wire(v: &p::FieldValue, depth: usize) -> Result<FieldValue, String> {
     if depth > 16 {
         return Err("value nesting limit".into());
     }

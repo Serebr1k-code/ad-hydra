@@ -231,6 +231,28 @@ class Browser(unittest.TestCase):
                 wait("document.querySelectorAll('[role=option]').length===3")
                 cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==={json.dumps(service_id)})")
                 wait("document.querySelector('#traffic-stream').innerText.includes('/browser-stream')")
+                # Open the exact shared stream viewer beside an unsaved filter,
+                # switch between two selected real flows, and retain form edits.
+                threading.Thread(target=reply,daemon=True).start()
+                with socket.create_connection(('127.0.0.1',int(service['listen_address'].split(':')[1])),timeout=3) as second:
+                    second.sendall(b'GET /browser-second HTTP/1.1\r\nHost: browser-fixture\r\nConnection: close\r\n\r\n')
+                    self.assertIn(b'200 OK',second.recv(4096))
+                wait("document.querySelectorAll('#traffic-sessions [data-flow-id]').length===2")
+                cdp.evaluate("document.querySelectorAll('#traffic-sessions [aria-label^=\"Select stream for filter\"]').forEach(e=>e.click())")
+                wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent.includes('Create filter from 2 streams'))")
+                cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent.includes('Create filter from 2 streams')).click()")
+                wait("document.querySelectorAll('#filter-stream-workspace [data-preview-flow-id]').length===2")
+                self.assertTrue(cdp.evaluate("(()=>{const l=document.querySelector('#filter-editor-form').getBoundingClientRect(),r=document.querySelector('#filter-stream-workspace').getBoundingClientRect();return r.left>=l.right})()"))
+                selected_ids=cdp.evaluate("[...document.querySelectorAll('[data-preview-flow-id]')].map(e=>e.dataset.previewFlowId)")
+                cdp.evaluate("{const e=document.querySelector('#filter-name');e.value='Keep my rules';e.dispatchEvent(new Event('input',{bubbles:true}));}")
+                for selected_id in selected_ids:
+                    cdp.click(f"document.querySelector('[data-preview-flow-id=\"{selected_id}\"]')")
+                    wait(f"Boolean(document.querySelector('#filter-stream-workspace #traffic-stream [title=\"{selected_id}\"]'))")
+                    wait("Boolean(document.querySelector('#filter-stream-workspace #traffic-stream [data-direction=\"2\"]'))")
+                    self.assertIn('X-Reply: visible',cdp.evaluate("document.querySelector('#filter-stream-workspace #traffic-stream').innerText"))
+                    self.assertEqual(cdp.evaluate("document.querySelector('#filter-name').value"),'Keep my rules')
+                cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Cancel').click()")
+                wait("!document.querySelector('[role=dialog]')")
                 # Seed synthetic diagnostic history only; no worker/checker execution.
                 output=b'A'*70000+b'OUTPUT_AFTER_64K FLAG002000'
                 with sqlite3.connect(tmp/'db') as database:
@@ -297,6 +319,10 @@ class Browser(unittest.TestCase):
                         cdp.click("document.querySelector('[aria-label=\"Filter action\"]')")
                         wait("document.querySelectorAll('[role=option]').length>2")
                         cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='Block HTTP request')")
+                        cdp.click("document.querySelector('[aria-label=\"Rule field\"]')")
+                        wait("[...document.querySelectorAll('[role=option]')].some(e=>e.textContent.trim()==='HTTP method')")
+                        cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='HTTP method')")
+                        cdp.evaluate("{const e=document.querySelector('[aria-label=\"Rule text value\"]');e.value='GET';e.dispatchEvent(new Event('input',{bubbles:true}));}")
                         cdp.evaluate("document.querySelector('[role=dialog] form').requestSubmit()")
                         wait("!document.querySelector('[role=dialog]') && document.querySelector('#page').innerText.includes('Enforce — applies action to matches')")
                         self.assertTrue(cdp.evaluate("[...document.querySelectorAll('#page td')].some(e=>e.textContent==='alicealice')"),'Filter author/editor must resolve to username')

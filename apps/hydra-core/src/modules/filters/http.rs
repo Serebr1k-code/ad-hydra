@@ -10,8 +10,210 @@ use axum::{
     routing::{get, post, put},
 };
 use hydra_domain::{Action, Expression, Mode, Rule};
+use hydra_domain::{FieldValue, RuleSnapshot, Transport};
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
+use std::{collections::BTreeMap, time::Duration};
 use utoipa::ToSchema;
+
+#[derive(Clone)]
+struct PreviewState {
+    control: Control,
+    socket: std::path::PathBuf,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FilterPreviewInput {
+    pub service_id: String,
+    pub flow_ids: Vec<String>,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    #[schema(value_type=String)]
+    pub mode: Mode,
+    pub priority: u32,
+    #[schema(value_type=Object)]
+    pub expression: Expression,
+    #[schema(value_type=Object)]
+    pub action: Action,
+    pub backend: String,
+    pub expires_at_ms: Option<u64>,
+}
+
+fn preview_field_object(fields: BTreeMap<String, FieldValue>) -> hydra_wire::v1::FieldObject {
+    hydra_wire::v1::FieldObject {
+        fields: fields
+            .into_iter()
+            .map(|(key, value)| (key, hydra_wire::rules::value_to_wire(&value)))
+            .collect(),
+    }
+}
+
+async fn preview_targets(
+    control: &Control,
+    service: &hydra_domain::Service,
+    ids: &[String],
+) -> Result<Vec<hydra_wire::v1::FilterPreviewTarget>, Error> {
+    let ids = ids.to_vec();
+    let expected_service = service.id.clone();
+    let transport = service.transport;
+    control
+        .db
+        .run(move |db| {
+            let mut targets = Vec::with_capacity(ids.len());
+            for id in ids {
+                let row: Option<(String, String)> = db
+                    .query_row(
+                        "SELECT service_id,data FROM traffic_flows WHERE id=?1",
+                        [&id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                let Some((service_id, data)) = row else {
+                    targets.push(hydra_wire::v1::FilterPreviewTarget {
+                        flow_id: id,
+                        network_fields: None,
+                    });
+                    continue;
+                };
+                anyhow::ensure!(
+                    service_id == expected_service,
+                    "selected stream belongs to another service"
+                );
+                let data: serde_json::Value = serde_json::from_str(&data)?;
+                let mut fields = BTreeMap::new();
+                if let Some(client) = data.get("client") {
+                    if let Some(ip) = client.get("ip").and_then(serde_json::Value::as_str) {
+                        fields.insert("network.src_ip".into(), FieldValue::String(ip.to_owned()));
+                    }
+                    if let Some(port) = client.get("port").and_then(serde_json::Value::as_u64) {
+                        fields.insert("network.src_port".into(), FieldValue::Uint(port));
+                    }
+                }
+                if let Some(upstream) = data.get("upstream") {
+                    if let Some(ip) = upstream.get("ip").and_then(serde_json::Value::as_str) {
+                        fields.insert("network.dst_ip".into(), FieldValue::String(ip.to_owned()));
+                    }
+                    if let Some(port) = upstream.get("port").and_then(serde_json::Value::as_u64) {
+                        fields.insert("network.dst_port".into(), FieldValue::Uint(port));
+                    }
+                }
+                fields.insert(
+                    "transport.kind".into(),
+                    FieldValue::String(
+                        match transport {
+                            Transport::Tcp => "tcp",
+                            Transport::Udp => "udp",
+                        }
+                        .into(),
+                    ),
+                );
+                targets.push(hydra_wire::v1::FilterPreviewTarget {
+                    flow_id: id,
+                    network_fields: Some(preview_field_object(fields)),
+                });
+            }
+            Ok(targets)
+        })
+        .await
+        .map_err(Error::from)
+}
+
+#[utoipa::path(post, path="/api/v1/filters/preview", request_body=FilterPreviewInput, responses((status=200,body=Object),(status=400),(status=401)),tag="filters")]
+async fn preview_filter(
+    State(state): State<PreviewState>,
+    headers: HeaderMap,
+    Json(input): Json<FilterPreviewInput>,
+) -> Result<Json<serde_json::Value>, Error> {
+    if input.flow_ids.is_empty()
+        || input.flow_ids.len() > 50
+        || input
+            .flow_ids
+            .iter()
+            .any(|id| uuid::Uuid::parse_str(id).is_err())
+    {
+        return Err(Error::Invalid(anyhow::anyhow!(
+            "preview accepts 1 to 50 valid stream IDs"
+        )));
+    }
+    let actor = actor(&state.control, &headers).await?;
+    let desired = state.control.desired().await.map_err(Error::from)?;
+    let service = desired
+        .services
+        .services
+        .iter()
+        .find(|s| s.id == input.service_id)
+        .cloned()
+        .ok_or(Error::Missing)?;
+    let targets = preview_targets(&state.control, &service, &input.flow_ids).await?;
+    let request_id = request();
+    let rule = Rule {
+        id: "__preview__".into(),
+        service_id: input.service_id.clone(),
+        name: input.name,
+        description: input.description,
+        enabled: input.enabled,
+        mode: input.mode,
+        priority: input.priority,
+        expression: input.expression,
+        action: input.action,
+        backend: input.backend,
+        expires_at_ms: input.expires_at_ms,
+    };
+    let mut wire = hydra_wire::v1::ApplyRuleSnapshotRequest::from(&RuleSnapshot {
+        revision: 1,
+        rules: vec![rule],
+    });
+    let rule = wire
+        .rules
+        .pop()
+        .ok_or_else(|| Error::Invalid(anyhow::anyhow!("invalid candidate filter")))?;
+    let rpc = async {
+        let channel = crate::infrastructure::proxy_client::connect(&state.socket).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        let mut client = hydra_wire::v1::proxy_diagnostics_client::ProxyDiagnosticsClient::new(channel);
+        let request = hydra_wire::v1::PreviewFilterRequest {
+            targets, rule: Some(rule),
+            actor: Some(hydra_wire::v1::Actor { r#type: 1, user_id: actor.id.clone(), request_id: request_id.clone(), ..Default::default() }),
+            request_id: request_id.clone(),
+        };
+        let mut request = tonic::Request::new(request);
+        request.set_timeout(Duration::from_secs(8));
+        let result = client.preview_filter(request).await.map_err(|status| match status.code() {
+            tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
+            tonic::Code::NotFound => StatusCode::NOT_FOUND,
+            tonic::Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            _ => StatusCode::BAD_GATEWAY,
+        })?.into_inner();
+        Ok::<_, StatusCode>(serde_json::json!({"results": result.results.into_iter().map(|r| serde_json::json!({"flow_id":r.flow_id,"state":r.state,"matched":r.matched,"would_block":r.would_block,"matched_messages":r.matched_messages})).collect::<Vec<_>>() }))
+    }.await;
+    let audit_success = rpc.is_ok();
+    state
+        .control
+        .db
+        .run({
+            let actor = actor.clone();
+            let request_id = request_id.clone();
+            let target = input.service_id.clone();
+            move |db| {
+                let tx = db.transaction()?;
+                crate::modules::audit::append(
+                    &tx,
+                    &actor,
+                    "filter.preview",
+                    &target,
+                    &request_id,
+                    audit_success,
+                    crate::modules::auth::now(),
+                )?;
+                tx.commit()?;
+                Ok(())
+            }
+        })
+        .await
+        .map_err(Error::from)?;
+    rpc.map(Json).map_err(Error::Status)
+}
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FilterInput {
@@ -266,7 +468,8 @@ async fn from_message(
         get_filter,
         test_filter,
         bulk_state,
-        from_message
+        from_message,
+        preview_filter
     ),
     components(schemas(
         FilterInput,
@@ -274,6 +477,7 @@ async fn from_message(
         TestInput,
         BulkStateInput,
         FromMessageInput,
+        FilterPreviewInput,
         ListResponse
     ))
 )]
@@ -290,4 +494,10 @@ pub fn router(control: Control) -> Router {
         .route("/api/v1/filters/{id}/state", put(filter_state))
         .route("/api/v1/filters/{id}/test", post(test_filter))
         .with_state(control)
+}
+
+pub fn preview_router(control: Control, socket: std::path::PathBuf) -> Router {
+    Router::new()
+        .route("/api/v1/filters/preview", post(preview_filter))
+        .with_state(PreviewState { control, socket })
 }

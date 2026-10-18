@@ -1,7 +1,8 @@
 use crate::{
     config::Limits,
-    inspection::{domain_value, network_fields, protocols::ProtocolSession},
+    inspection::domain_value,
     telemetry::{Flow, Telemetry},
+    transport::{RelayBase, RelayTransport},
 };
 use hydra_domain::{Action, Service};
 use hydra_protocol_sdk::Direction;
@@ -30,13 +31,21 @@ impl Drop for Session {
     }
 }
 struct Context {
-    config: Service,
-    client: SocketAddr,
+    base: RelayBase,
     flow: Flow,
-    decoder: Mutex<Option<ProtocolSession>>,
     last: AtomicU64,
     start: Instant,
-    telemetry: Arc<Telemetry>,
+}
+impl RelayTransport for Context {
+    fn base(&self) -> &RelayBase {
+        &self.base
+    }
+}
+impl std::ops::Deref for Context {
+    type Target = RelayBase;
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
 }
 impl Context {
     fn activity(&self) {
@@ -50,15 +59,11 @@ impl Context {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .datagram(direction, bytes.len());
-        let mut live_fields = network_fields(
-            &self.config,
-            self.client,
-            if direction == Direction::ClientToServer {
-                "client_to_server"
-            } else {
-                "server_to_client"
-            },
-        );
+        let mut live_fields = self.network_fields(if direction == Direction::ClientToServer {
+            "client_to_server"
+        } else {
+            "server_to_client"
+        });
         live_fields.extend(size_fields);
         if matches!(
             self.telemetry
@@ -71,7 +76,7 @@ impl Context {
         self.flow.scan(direction, bytes);
         let mut decoder = self.decoder.lock().unwrap_or_else(|e| e.into_inner());
         let result = match decoder.as_mut() {
-            Some(d) if d.is_stream_decoder() => Some(d.feed(direction, bytes)),
+            Some(d) if d.is_stream_decoder() => Some(d.feed_datagram(direction, bytes)),
             _ => None,
         };
         if matches!(result, Some(Err(_))) {
@@ -92,15 +97,11 @@ impl Context {
                     .unwrap_or_else(|e| e.into_inner())
                     .annotate(&mut message, "datagram");
                 evaluated = true;
-                let mut fields = network_fields(
-                    &self.config,
-                    self.client,
-                    if direction == Direction::ClientToServer {
-                        "client_to_server"
-                    } else {
-                        "server_to_client"
-                    },
-                );
+                let mut fields = self.network_fields(if direction == Direction::ClientToServer {
+                    "client_to_server"
+                } else {
+                    "server_to_client"
+                });
                 fields.insert(
                     "packet.size".into(),
                     hydra_domain::FieldValue::Uint(bytes.len() as u64),
@@ -111,10 +112,16 @@ impl Context {
                         .iter()
                         .map(|(k, v)| (k.clone(), domain_value(v))),
                 );
-                let message_id =
+                let raw_payload = message.protocol == "raw";
+                let message_id = if raw_payload {
+                    String::new()
+                } else {
                     self.telemetry
-                        .message(&self.config.id, &self.flow.id, message, bytes.len());
-                self.flow.reported_message.store(true, Ordering::Relaxed);
+                        .message(&self.config.id, &self.flow.id, message, bytes.len())
+                };
+                if !raw_payload {
+                    self.flow.reported_message.store(true, Ordering::Relaxed);
+                }
                 let action = self.telemetry.evaluate(
                     &self.config,
                     &self.flow.id,
@@ -134,15 +141,12 @@ impl Context {
                     &self.config,
                     &self.flow.id,
                     &{
-                        let mut fields = network_fields(
-                            &self.config,
-                            self.client,
-                            if direction == Direction::ClientToServer {
+                        let mut fields =
+                            self.network_fields(if direction == Direction::ClientToServer {
                                 "client_to_server"
                             } else {
                                 "server_to_client"
-                            },
-                        );
+                            });
                         fields.insert(
                             "packet.size".into(),
                             hydra_domain::FieldValue::Uint(bytes.len() as u64),
@@ -195,7 +199,7 @@ pub async fn listen(
            if socket.connect(config.upstream_address).await.is_err()||socket.writable().await.is_err(){telemetry.udp_dropped.fetch_add(1,Ordering::Relaxed);continue}
            let flow=telemetry.open(&config,client,permit);
            let decoder=telemetry.protocols.read().unwrap_or_else(|e|e.into_inner()).as_ref().and_then(|p|match p.session(&config.id,&config.protocol_id){Ok(s)=>Some(s),Err(_)=>{telemetry.decoder_error(&config.id,&flow.id,"decoder_initialization_failed");None}});
-           let context=Arc::new(Context{config,client,flow,decoder:Mutex::new(decoder),last:AtomicU64::new(start.elapsed().as_millis() as u64),start,telemetry:telemetry.clone()});
+           let context=Arc::new(Context{base:RelayBase::new(config,client,telemetry.clone(),Arc::new(Mutex::new(decoder))),flow,last:AtomicU64::new(start.elapsed().as_millis() as u64),start});
            let task=replies.spawn(reply(socket.clone(),listener.clone(),context.clone()));
            entry.insert(Session{socket,context,task});
           }

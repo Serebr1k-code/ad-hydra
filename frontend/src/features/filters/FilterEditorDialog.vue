@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import type { FilterInput } from '@/generated/contracts'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -10,6 +10,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Textarea } from '@/components/ui/textarea'
 import RuleGroupEditor from './RuleGroupEditor.vue'
 import { createGroup, fromExpression, toExpression, type Group } from './ruleBuilder'
+import { fieldsForService, type DecoderCatalog } from './fieldCatalog'
+import type { RuleField } from './ruleBuilder'
+import { api, errorMessage } from '@/shared/api/client'
+import FilterStreamWorkspace, { type StreamPreviewResult } from './FilterStreamWorkspace.vue'
+import { serviceProtocol } from '@/features/traffic/traffic'
 
 export interface FilterRecord extends Omit<FilterInput, 'expected_revision'> {
   id: string
@@ -17,10 +22,21 @@ export interface FilterRecord extends Omit<FilterInput, 'expected_revision'> {
   created_by: string
   hit_count: number
 }
-interface ServiceOption { id: string; name: string; transport: string }
-const props = defineProps<{ open: boolean; busy: boolean; error: string; services: ServiceOption[]; filter?: FilterRecord }>()
+interface ServiceOption { id: string; name: string; transport: string; protocol_id: string }
+const emptyCatalog: DecoderCatalog = { items: [], activations: [], native_schemas: [] }
+const props = defineProps<{ open: boolean; busy: boolean; error: string; services: ServiceOption[]; catalog?: DecoderCatalog; filter?: FilterRecord; initialServiceId?: string; initialFlowIds?: string[] }>()
 const emit = defineEmits<{ 'update:open': [value: boolean]; save: [value: Omit<FilterInput, 'expected_revision'>] }>()
 const isOpen = computed({ get: () => props.open, set: value => emit('update:open', value) })
+const hasSelectedStreams = computed(() => Boolean(props.initialFlowIds?.length))
+const streamProtocol = computed(() => {
+  const service = props.services.find(item => item.id === props.initialServiceId)
+  return service ? serviceProtocol(service, props.catalog?.activations ?? []) : 'raw'
+})
+const availableFields = computed<RuleField[]>(() => {
+  const service = props.services.find(item => item.id === form.service_id)
+  return service ? fieldsForService(service, props.catalog ?? emptyCatalog) : []
+})
+const defaultField = computed(() => availableFields.value.find(field => !['body.size','transfer.bytes','packet.size','body.size_scope','network.src_ip','network.src_port','network.dst_ip','network.dst_port','transport.kind','direction'].includes(field.value))?.value ?? availableFields.value[0]?.value ?? 'http.path')
 const ruleError = ref('')
 const expressionEditable = ref(true)
 const preservedAction = ref<Record<string, unknown> | null>(null)
@@ -28,6 +44,36 @@ const form = reactive({
   service_id: '', name: '', description: '', enabled: true, mode: 'enforce', priority: 10,
   actionType: 'block', httpStatus: 403, tag: '', expires: '', rules: createGroup(),
 })
+const previewRows = ref<StreamPreviewResult[]>([])
+const previewBusy = ref(false)
+const previewError = ref('')
+let previewTimer: ReturnType<typeof setTimeout> | undefined
+let previewGeneration = 0
+function schedulePreview() {
+  if (previewTimer) clearTimeout(previewTimer)
+  const flowIds = props.initialFlowIds ?? []
+  const generation = ++previewGeneration
+  previewRows.value = []
+  previewError.value = ''
+  if (!props.open || !flowIds.length || !form.service_id) { previewBusy.value = false; return }
+  previewBusy.value = true
+  previewTimer = setTimeout(async () => {
+    try {
+      const expression = toExpression(form.rules, availableFields.value)
+      const action: Record<string, unknown> = form.actionType === '__preserve__' && preservedAction.value ? preservedAction.value : form.actionType === 'block'
+        ? { type: 'block', http_status: form.httpStatus }
+        : form.actionType === 'tag' ? { type: 'tag', tag: form.tag } : { type: form.actionType }
+      const response = await api<{ results: StreamPreviewResult[] }>('/filters/preview', 'POST', { ...buildPayload({ expression, action }), flow_ids: flowIds })
+      if (generation === previewGeneration) previewRows.value = response.results
+    } catch (cause) {
+      if (generation === previewGeneration) previewError.value = errorMessage(cause)
+    } finally {
+      if (generation === previewGeneration) previewBusy.value = false
+    }
+  }, 250)
+}
+watch(() => [props.open, form.service_id, form.name, form.description, form.enabled, form.mode, form.priority, form.actionType, form.httpStatus, form.tag, form.expires, form.rules, props.initialFlowIds] as const, schedulePreview, { deep: true })
+onBeforeUnmount(() => { if (previewTimer) clearTimeout(previewTimer); previewGeneration++ })
 watch(() => [props.open, props.filter, props.services] as const, ([open]) => {
   if (!open) return
   const filter = props.filter
@@ -37,7 +83,7 @@ watch(() => [props.open, props.filter, props.services] as const, ([open]) => {
   preservedAction.value = actionType === '__preserve__' ? structuredClone(action) : null
   ruleError.value = ''
   expressionEditable.value = true
-  form.service_id = filter?.service_id ?? props.services[0]?.id ?? ''
+  form.service_id = filter?.service_id ?? props.initialServiceId ?? props.services[0]?.id ?? ''
   form.name = filter?.name ?? 'New filter'
   form.description = filter?.description ?? ''
   form.enabled = filter?.enabled ?? true
@@ -48,7 +94,7 @@ watch(() => [props.open, props.filter, props.services] as const, ([open]) => {
   form.tag = typeof action.tag === 'string' ? action.tag : ''
   const localExpiration = filter?.expires_at_ms ? new Date(filter.expires_at_ms - new Date().getTimezoneOffset() * 60_000) : null
   form.expires = localExpiration ? localExpiration.toISOString().slice(0, 16) : ''
-  try { form.rules = filter ? fromExpression(filter.expression) : createGroup() }
+  try { form.rules = filter ? fromExpression(filter.expression) : createGroup('all', defaultField.value, availableFields.value) }
   catch {
     form.rules = createGroup()
     expressionEditable.value = false
@@ -58,7 +104,7 @@ watch(() => [props.open, props.filter, props.services] as const, ([open]) => {
 function save() {
   if (!expressionEditable.value) return
   let expression: Record<string, unknown>
-  try { expression = toExpression(form.rules); ruleError.value = '' }
+  try { expression = toExpression(form.rules, availableFields.value); ruleError.value = '' }
   catch (cause) { ruleError.value = cause instanceof Error ? cause.message : 'Invalid rules'; return }
   const action: Record<string, unknown> = form.actionType === '__preserve__' && preservedAction.value ? preservedAction.value : form.actionType === 'block'
     ? { type: 'block', http_status: form.httpStatus }
@@ -67,6 +113,7 @@ function save() {
   emit('save', buildPayload({ expression, action }))
 }
 watch(() => form.service_id, id => {
+  if (!props.filter && availableFields.value.length) form.rules = createGroup('all', defaultField.value, availableFields.value)
   if (!props.filter && ['drop_connection', 'drop_datagram'].includes(form.actionType)) {
     form.actionType = props.services.find(service => service.id === id)?.transport === 'udp' ? 'drop_datagram' : 'drop_connection'
   }
@@ -76,7 +123,7 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
   return {
     service_id: form.service_id, name: form.name, description: form.description,
     enabled: form.enabled, mode: form.mode, priority: form.priority,
-    expression: overrides.expression as Record<string, unknown> ?? toExpression(form.rules),
+    expression: overrides.expression as Record<string, unknown> ?? toExpression(form.rules, availableFields.value),
     action: overrides.action as Record<string, unknown> ?? { type: 'block', http_status: form.httpStatus },
     backend: 'userspace', expires_at_ms: Number.isFinite(expires) ? expires : null,
   }
@@ -85,15 +132,16 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
 
 <template>
   <Dialog v-model:open="isOpen">
-    <DialogContent class="max-h-[90vh] max-w-4xl overflow-y-auto">
+    <DialogContent :class="hasSelectedStreams ? 'flex h-[94dvh] w-[96vw] max-w-[1800px] flex-col overflow-hidden' : 'max-h-[90vh] max-w-4xl overflow-y-auto'">
       <DialogHeader>
         <DialogTitle>{{ filter ? 'Edit filter' : 'Create filter' }}</DialogTitle>
         <DialogDescription>New filters enforce when saved and applied by the proxy. Choose Shadow to observe matches without applying the action; traffic testing is optional.</DialogDescription>
       </DialogHeader>
-      <form class="space-y-5" @submit.prevent="save">
+      <div :class="hasSelectedStreams ? 'grid min-h-0 flex-1 gap-4 overflow-y-auto lg:grid-cols-2 lg:overflow-hidden' : ''">
+      <form id="filter-editor-form" class="min-w-0 space-y-5" :class="hasSelectedStreams ? 'lg:overflow-y-auto lg:pr-3' : ''" @submit.prevent="save">
         <div class="grid gap-4 md:grid-cols-2">
           <div class="space-y-2"><Label for="filter-name">Name</Label><Input id="filter-name" v-model="form.name" required maxlength="256" /></div>
-          <div class="space-y-2"><Label>Service</Label><Select v-model="form.service_id"><SelectTrigger aria-label="Filter service"><SelectValue placeholder="Choose service" /></SelectTrigger><SelectContent><SelectItem v-for="service in services" :key="service.id" :value="service.id">{{ service.name }}</SelectItem></SelectContent></Select></div>
+          <div class="space-y-2"><Label>Service</Label><Select v-model="form.service_id" :disabled="hasSelectedStreams"><SelectTrigger aria-label="Filter service"><SelectValue placeholder="Choose service" /></SelectTrigger><SelectContent><SelectItem v-for="service in services" :key="service.id" :value="service.id">{{ service.name }}</SelectItem></SelectContent></Select></div>
           <div class="space-y-2"><Label for="filter-mode">Mode</Label><Select v-model="form.mode"><SelectTrigger id="filter-mode"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="shadow">Shadow (observe only)</SelectItem><SelectItem value="enforce">Enforce</SelectItem></SelectContent></Select></div>
           <div class="space-y-2"><Label for="filter-priority">Priority</Label><Input id="filter-priority" v-model.number="form.priority" type="number" min="0" max="1000000" /></div>
           <div class="space-y-2 md:col-span-2"><Label for="filter-description">Description</Label><Textarea id="filter-description" v-model="form.description" maxlength="4096" rows="2" /></div>
@@ -105,7 +153,7 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
 
         <section class="space-y-2" :aria-disabled="!expressionEditable">
           <div><h3 class="font-medium">Match conditions</h3><p class="text-sm text-muted-foreground">Groups add parentheses. Choose whether all or any conditions inside a group must match.</p></div>
-          <RuleGroupEditor :group="form.rules" />
+          <RuleGroupEditor :group="form.rules" :fields="availableFields" />
           <p class="text-xs text-muted-foreground">Live byte limits count bytes as they arrive. HTTP counts body bytes per request; other TCP profiles count each stream direction, and UDP counts each datagram. Use Block transfer to stop the upload immediately.</p>
         </section>
 
@@ -119,6 +167,8 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
         <p v-if="ruleError || error" role="alert" class="text-sm text-destructive">{{ ruleError || error }}</p>
         <DialogFooter><Button type="button" variant="outline" :disabled="busy" @click="isOpen = false">Cancel</Button><Button type="submit" :disabled="busy || !form.service_id || !expressionEditable">{{ busy ? 'Saving…' : 'Save filter' }}</Button></DialogFooter>
       </form>
+      <FilterStreamWorkspace v-if="open && initialFlowIds?.length" :flow-ids="initialFlowIds" :protocol-id="streamProtocol" :results="previewRows" :busy="previewBusy" :error="previewError" :enabled="form.enabled" :mode="form.mode" />
+      </div>
     </DialogContent>
   </Dialog>
 </template>

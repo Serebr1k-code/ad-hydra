@@ -148,6 +148,8 @@ pub fn router(view: SharedView, modules: Modules) -> Router {
         settings,
     } = modules;
     let concurrency = Arc::new(tokio::sync::Semaphore::new(32));
+    let preview_control = control.clone();
+    let preview_socket = protocols.socket_path().to_path_buf();
     let audit_auth = auth.clone();
     Router::new()
         .route("/api/v1/system/proxy", get(proxy))
@@ -159,6 +161,10 @@ pub fn router(view: SharedView, modules: Modules) -> Router {
         .merge(crate::modules::settings::router(settings))
         .merge(crate::modules::auth::router(auth))
         .merge(crate::modules::services::router(control))
+        .merge(crate::modules::filters::preview_router(
+            preview_control,
+            preview_socket,
+        ))
         .merge(crate::modules::traffic::router(traffic))
         .merge(crate::modules::traffic::diagnostics::router(diagnostics))
         .merge(crate::modules::protocols::router(protocols))

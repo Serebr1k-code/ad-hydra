@@ -1,4 +1,5 @@
-use crate::{DecodeError, Direction, ParsedMessage, Value};
+use crate::{DecodeError, Direction, ParsedMessage, ProtocolDecoder, Value};
+use hydra_protocol_sdk::{FieldSchema, FieldType};
 use std::collections::BTreeMap;
 /// Complete request bytes, suitable for a decision BEFORE forwarding any bytes.
 pub struct HttpRequest {
@@ -198,5 +199,39 @@ impl HttpDecoder {
     }
     pub fn has_pending(&self) -> bool {
         !self.buffer.is_empty()
+    }
+}
+
+impl ProtocolDecoder for HttpDecoder {
+    fn feed(
+        &mut self,
+        direction: Direction,
+        bytes: &[u8],
+    ) -> Result<Vec<ParsedMessage>, DecodeError> {
+        Ok(HttpDecoder::feed(self, direction, bytes)?
+            .into_iter()
+            .map(|frame| frame.message)
+            .collect())
+    }
+    fn field_schema(&self) -> Vec<FieldSchema> {
+        [
+            ("http.method", FieldType::String),
+            ("http.path", FieldType::String),
+            ("http.user_agent", FieldType::String),
+            ("http.headers", FieldType::List),
+            ("http.trailers", FieldType::List),
+            ("http.body_length", FieldType::Unsigned),
+            ("http.status_code", FieldType::Unsigned),
+            ("http.reason", FieldType::String),
+            ("http.content_type", FieldType::String),
+            ("http.body_text", FieldType::String),
+            ("http.body_preview_truncated", FieldType::Bool),
+        ]
+        .into_iter()
+        .map(|(path, field_type)| FieldSchema {
+            path: path.into(),
+            field_type,
+        })
+        .collect()
     }
 }

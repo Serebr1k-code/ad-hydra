@@ -1,5 +1,5 @@
-use crate::{DecodeError, Direction, ParsedMessage};
-use hydra_protocol_sdk::{DecodeInput, DecodeOutput, MAX_INPUT, MAX_OUTPUT};
+use crate::{DecodeError, Direction, ParsedMessage, ProtocolDecoder};
+use hydra_protocol_sdk::{DecodeInput, DecodeOutput, FieldSchema, MAX_INPUT, MAX_OUTPUT};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -254,6 +254,23 @@ impl WasmSession {
         }
         self.state[index] = output.state;
         Ok(output.messages)
+    }
+}
+
+impl ProtocolDecoder for WasmSession {
+    fn feed(
+        &mut self,
+        direction: Direction,
+        bytes: &[u8],
+    ) -> Result<Vec<ParsedMessage>, DecodeError> {
+        WasmSession::feed(self, direction, bytes)
+    }
+    fn field_schema(&self) -> Vec<FieldSchema> {
+        self.version
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.fields.clone())
+            .unwrap_or_default()
     }
 }
 

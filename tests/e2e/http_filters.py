@@ -117,14 +117,26 @@ class Filters(unittest.TestCase):
                 self.assertEqual(proxied('/large-response'), (200, b'x' * 100_000))
                 for _ in range(100):
                     response_found = False
+                    normal_flow_id = None
                     for flow in good('GET', '/traffic/flows', token=alice)['items']:
                         messages = good('GET', f"/traffic/flows/{flow['flow_id']}/messages", token=alice)['items']
                         if any(m['direction'] == 2 and m['fields'].get('http.body_text', {}).get('value') == 'backend:/normal' for m in messages):
                             response_found = True
+                            normal_flow_id = flow['flow_id']
                             break
                     if response_found: break
                     time.sleep(.05)
                 self.assertTrue(response_found, 'HTTP server response was not indexed')
+                preview = {'service_id': sid, 'flow_ids': [normal_flow_id], 'name': 'preview-only', 'description': '', 'enabled': True, 'mode': 'enforce', 'priority': 10, 'expression': {'field': 'http.path', 'op': 'eq', 'value': {'type': 'string', 'value': '/normal'}}, 'action': {'type': 'block', 'http_status': 403}, 'backend': 'userspace', 'expires_at_ms': None}
+                preview_result = None
+                for _ in range(100):
+                    preview_result = good('POST', '/filters/preview', preview, alice)['results'][0]
+                    if preview_result['state'] not in ('active',):
+                        break
+                    time.sleep(.05)
+                self.assertIn(preview_result['state'], ('ready', 'partial'))
+                self.assertTrue(preview_result['matched'], preview_result)
+                self.assertTrue(preview_result['would_block'], preview_result)
                 rule = {'expected_revision': 1, 'service_id': sid, 'name': 'path-and-agent', 'description': 'real test', 'enabled': True, 'mode': 'shadow', 'priority': 10, 'expression': {'all': [{'field': 'http.path', 'op': 'eq', 'value': {'type': 'string', 'value': '/blocked'}}, {'field': 'http.user_agent', 'op': 'contains', 'value': {'type': 'string', 'value': 'test-agent'}}]}, 'action': {'type': 'block', 'http_status': 403}, 'backend': 'userspace', 'expires_at_ms': None}
                 made = good('POST', '/filters', rule, alice)
                 rid = made['rules']['rules'][0]['id']

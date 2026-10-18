@@ -12,6 +12,7 @@ export type Exploit = { "enabled": boolean; "id": string; "interval_seconds"?: n
 export type FarmService = { "enabled"?: boolean; "id": string; "name": string; "port": number; "revision"?: number; "transport"?: string };
 export type FarmTeam = { "enabled"?: boolean; "host": string; "id": string; "name": string; "revision"?: number };
 export type FilterInput = { "action": Record<string, unknown>; "backend": string; "description": string; "enabled": boolean; "expected_revision": number; "expires_at_ms"?: number | null; "expression": Record<string, unknown>; "mode": string; "name": string; "priority": number; "service_id": string };
+export type FilterPreviewInput = { "action": Record<string, unknown>; "backend": string; "description": string; "enabled": boolean; "expires_at_ms"?: number | null; "expression": Record<string, unknown>; "flow_ids": Array<string>; "mode": string; "name": string; "priority": number; "service_id": string };
 export type FlagCreated = { "id": string };
 export type FlagPage = { "items": Array<FlagView>; "limit": number; "offset": number; "total": number };
 export type FlagView = { "category": string; "created_at": string; "digest": string; "id": string; "initiated_by": string; "run_id"?: string | null; "service_id"?: string | null; "state"?: string | null; "target_id"?: string | null; "triage"?: string | null; "value"?: string | null };
