@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import type { SubmitterConfig, SubmitterView } from '@/generated/contracts'
 import { api, errorMessage } from '@/shared/api/client'
+import DisclosureSection from '@/components/DisclosureSection.vue'
 import SubmissionBatches from './SubmissionBatches.vue'
 import { pythonPackages, submitterDto } from './submitterDto'
 import { Button } from '@/components/ui/button'
@@ -105,6 +106,6 @@ onUnmounted(() => { mounted = false; if (timer) clearInterval(timer) })
       <p v-if="overview?.manual_request" role="status" class="w-full text-sm">Manual run: {{overview.manual_request.status}} · requested {{overview.manual_request.count}} · attempted {{overview.manual_request.flag_count}}</p>
     </form>
     <p v-if="error" role="alert" class="text-destructive">{{ error }}</p><p v-if="notice" role="status">{{ notice }}</p>
-    <SubmissionBatches />
+    <DisclosureSection title="Submission attempts"><SubmissionBatches /></DisclosureSection>
   </section>
 </template>

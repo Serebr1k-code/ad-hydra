@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import type { ListResponse, ServiceInput } from '@/generated/contracts'
 import { api, errorMessage } from '@/shared/api/client'
 import { Button } from '@/components/ui/button'
@@ -7,9 +7,11 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import DataTable from '@/components/DataTable.vue'
 import ServiceForm from './ServiceForm.vue'
 import {decoderLabel,type DecoderCatalog} from './decoders'
+import ServiceColorDialog from './ServiceColorDialog.vue'
+import { resolveServiceColors } from './colors'
 const catalog=ref<DecoderCatalog>({items:[],activations:[]})
 
-type Service = Omit<ServiceInput, 'expected_revision'> & { id: string; applied_enabled: boolean | null }
+type Service = Omit<ServiceInput, 'expected_revision'> & { id: string; applied_enabled: boolean | null; color?: string | null }
 type Services = Omit<ListResponse, 'items'> & { items: Service[] }
 const data = ref<Services | null>(null)
 const busy = ref(false)
@@ -17,9 +19,11 @@ const error = ref('')
 const formOpen = ref(false)
 const formBusy = ref(false)
 const editing = ref<Service>()
+const coloring = ref<Service>()
+const colors = computed(() => resolveServiceColors(data.value?.items ?? []))
 const formRevision = ref(0)
 const formGeneration = ref(0)
-const columns = [{ key: 'transport', label: 'Transport' }, { key: 'listen_address', label: 'Public listener' }, { key: 'upstream_address', label: 'Application backend' }, { key: 'protocol_id', label: 'Decoder' }, { key: 'enabled', label: 'Desired' }, { key: 'applied_enabled', label: 'Applied' }, { key: 'actions', label: 'Actions' }]
+const columns = [{ key: 'color', label: 'Color' }, { key: 'transport', label: 'Transport' }, { key: 'listen_address', label: 'Public listener' }, { key: 'upstream_address', label: 'Application backend' }, { key: 'protocol_id', label: 'Decoder' }, { key: 'enabled', label: 'Desired' }, { key: 'applied_enabled', label: 'Applied' }, { key: 'actions', label: 'Actions' }]
 async function load() {
   busy.value = true
   error.value = ''
@@ -54,6 +58,7 @@ onMounted(load)
 
 <template>
   <section class="space-y-4">
+    <ServiceColorDialog :service="coloring" :color="coloring ? colors[coloring.id] ?? '#4dabf7' : '#4dabf7'" @close="coloring=undefined" @saved="load" />
     <h1 class="text-2xl font-semibold">Services</h1>
     <p class="text-sm text-muted-foreground">Keep each service's original public port on Hydra and move its application to a separate private backend port. The application sees Hydra's source address.</p>
     <div class="flex flex-wrap items-center gap-3">
@@ -65,6 +70,7 @@ onMounted(load)
     <p v-if="busy" role="status">Loading services…</p>
     <p v-else-if="data && !data.items.length" class="text-muted-foreground">No services configured. Add a listener and its defended upstream.</p>
     <DataTable v-if="data?.items.length" :columns="columns" :rows="data.items">
+      <template #cell-color="{row}"><Button variant="ghost" size="sm" :aria-label="'Set color for ' + row.id" @click="coloring=row"><span class="size-4 rounded-sm" :style="{backgroundColor:colors[row.id]}" aria-hidden="true"></span>Color</Button></template>
       <template #cell-protocol_id="{row}">{{decoderLabel(row,catalog)}}</template>
       <template #cell-enabled="{ row }">{{ row.enabled ? 'On' : 'Off' }}</template>
       <template #cell-applied_enabled="{ row }">{{ row.applied_enabled === null ? 'Pending' : row.applied_enabled ? 'On' : 'Off' }}</template>

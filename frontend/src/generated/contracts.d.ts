@@ -38,6 +38,7 @@ export type RunRequest = { "actor_id": string; "count": number; "created_at": nu
 export type Sample = { "data": Array<number>; "expires_at": string; "truncated": boolean };
 export type SandboxSettings = { "bwrap": string; "delegated_cgroup": string; "ip": string; "runtime_dir": string; "uv"?: string };
 export type SecretUpdate = ({ "mode": "keep" } | { "mode": "replace"; "value"?: string | null });
+export type ServiceColorInput = { "color"?: string | null };
 export type ServiceInput = { "enabled": boolean; "expected_revision": number; "listen_address": string; "protocol_id": string; "retain_history"?: boolean; "transport": string; "upstream_address": string };
 export type ServiceProbeInput = { "payload": Array<number>; "service_id": string; "timeout_ms": number; "transport": string };
 export type Session = { "expires_at": string; "id": string; "revoked": boolean };

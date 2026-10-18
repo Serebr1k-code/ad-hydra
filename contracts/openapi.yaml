@@ -1269,6 +1269,34 @@ paths:
                 type: object
         '409':
           description: ''
+  /api/v1/services/{id}/color:
+    put:
+      tags:
+      - services
+      operationId: service_color
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceColorInput'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceColorInput'
+        '400':
+          description: ''
+        '401':
+          description: ''
   /api/v1/services/{id}/probe:
     post:
       tags:
@@ -2965,6 +2993,15 @@ components:
             type:
             - string
             - 'null'
+    ServiceColorInput:
+      type: object
+      properties:
+        color:
+          type:
+          - string
+          - 'null'
+          description: 'Hex #RRGGBB, or null to restore the default palette color.'
+      additionalProperties: false
     ServiceInput:
       type: object
       required:

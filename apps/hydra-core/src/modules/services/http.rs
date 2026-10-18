@@ -135,6 +135,11 @@ pub(crate) async fn list(
 ) -> anyhow::Result<ListResponse> {
     let desired = control.desired().await?;
     let records = control.attribution().await?;
+    let colors = if kind == "service" {
+        control.service_colors().await?
+    } else {
+        Default::default()
+    };
     let mut items = Vec::new();
     let revision = desired.services.revision;
     let applied = if kind == "service" {
@@ -161,6 +166,9 @@ pub(crate) async fn list(
     };
     for mut value in values {
         let id = value["id"].as_str().unwrap_or_default().to_owned();
+        if kind == "service" {
+            value["color"] = colors.get(&id).cloned().into();
+        }
         if id <= query.after || (!q.is_empty() && !value.to_string().contains(&q)) {
             continue;
         }
@@ -244,6 +252,26 @@ pub async fn services(
         .await
         .map(Json)
         .map_err(Error::from)
+}
+
+#[derive(Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceColorInput {
+    /// Hex #RRGGBB, or null to restore the default palette color.
+    color: Option<String>,
+}
+#[utoipa::path(put,path="/api/v1/services/{id}/color",params(("id"=String,Path)),request_body=ServiceColorInput,responses((status=200,body=ServiceColorInput),(status=400),(status=401)),tag="services")]
+pub async fn service_color(
+    State(c): State<Control>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<ServiceColorInput>,
+) -> Result<Json<ServiceColorInput>, Error> {
+    let actor = actor(&c, &headers).await?;
+    c.set_service_color(actor, id, input.color.clone(), request())
+        .await
+        .map_err(Error::from)?;
+    Ok(Json(input))
 }
 #[derive(Serialize)]
 struct CreatedServiceResponse {
@@ -343,11 +371,12 @@ async fn export_configuration(
     paths(
         services,
         create_service,
+        service_color,
         update_service,
         delete_service,
         export_configuration
     ),
-    components(schemas(ServiceInput, ListResponse))
+    components(schemas(ServiceInput, ServiceColorInput, ListResponse))
 )]
 struct ServiceApi;
 pub struct ControlApi;
@@ -362,6 +391,10 @@ pub fn router(control: Control) -> Router {
     Router::new()
         .route("/api/v1/config/export", get(export_configuration))
         .route("/api/v1/services", get(services).post(create_service))
+        .route(
+            "/api/v1/services/{id}/color",
+            axum::routing::put(service_color),
+        )
         .route(
             "/api/v1/services/{id}",
             axum::routing::patch(update_service).delete(delete_service),

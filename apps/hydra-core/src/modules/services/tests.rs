@@ -52,6 +52,86 @@ fn rule() -> Rule {
     }
 }
 #[tokio::test]
+async fn colors_are_persistent_audited_and_independent_of_proxy_revisions() {
+    let (c, path) = setup().await;
+    c.put_service(actor("alice"), 0, service(), true, "create".into())
+        .await
+        .unwrap();
+    c.set_service_color(
+        actor("bob"),
+        "service".into(),
+        Some("#AB12CD".into()),
+        "color".into(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.service_colors().await.unwrap()["service"], "#ab12cd");
+    assert_eq!(c.desired().await.unwrap().services.revision, 1);
+    let reopened = Control::open(c.auth.clone()).await.unwrap();
+    assert_eq!(
+        reopened.service_colors().await.unwrap()["service"],
+        "#ab12cd"
+    );
+    for invalid in ["red", "#123", "#12345g", "url(example)"] {
+        assert!(
+            c.set_service_color(
+                actor("bob"),
+                "service".into(),
+                Some(invalid.into()),
+                "invalid".into()
+            )
+            .await
+            .is_err()
+        );
+    }
+    assert!(
+        c.set_service_color(
+            actor("bob"),
+            "missing".into(),
+            Some("#123456".into()),
+            "missing".into()
+        )
+        .await
+        .is_err()
+    );
+    let audited =
+        c.db.run(|db| {
+            Ok(db.query_row(
+                "SELECT actor_id FROM audit WHERE action='service.color'",
+                [],
+                |r| r.get::<_, String>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(audited, "bob");
+    c.set_service_color(actor("bob"), "service".into(), None, "reset".into())
+        .await
+        .unwrap();
+    assert!(c.service_colors().await.unwrap().is_empty());
+    c.set_service_color(
+        actor("bob"),
+        "service".into(),
+        Some("#123456".into()),
+        "color".into(),
+    )
+    .await
+    .unwrap();
+    c.delete(
+        actor("alice"),
+        1,
+        "service",
+        "service".into(),
+        "delete".into(),
+    )
+    .await
+    .unwrap();
+    assert!(c.service_colors().await.unwrap().is_empty());
+    drop(reopened);
+    drop(c);
+    std::fs::remove_dir_all(path).unwrap();
+}
+#[tokio::test]
 async fn revision_conflicts_atomic_reference_validation_and_real_ack() {
     let (c, path) = setup().await;
     c.put_service(actor("alice"), 0, service(), true, "test".into())

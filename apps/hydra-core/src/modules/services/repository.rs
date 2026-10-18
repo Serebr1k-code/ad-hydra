@@ -146,6 +146,11 @@ impl Control {
             include_str!("../../../../../migrations/0002_services_filters.sql"),
         )
         .await?;
+        db.migrate(
+            22,
+            include_str!("../../../../../migrations/0022_service_colors.sql"),
+        )
+        .await?;
         Ok(Self {
             db,
             auth,

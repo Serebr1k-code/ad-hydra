@@ -88,11 +88,7 @@ export function visibleFlows(rows: Flow[], showBlocked: boolean): Flow[] {
  return showBlocked ? rows : rows.filter(flow=>!flow.blocked)
 }
 /** Stable across service ordering, pagination, sessions and reloads. */
-export function serviceColor(id: string): string {
- let hash=2166136261
- for(const character of id)hash=Math.imul(hash ^ character.charCodeAt(0),16777619)>>>0
- return `hsl(${(hash%36000)/100} 65% 55%)`
-}
+export { defaultServiceColor as serviceColor } from '@/features/services/colors'
 export function isBlockedHit(event: Record<string,unknown>): boolean {
  return event.kind==='rule_hit'&&event.mode===2&&(event.blocked===true||[3,4,5].includes(Number(event.action)))
 }

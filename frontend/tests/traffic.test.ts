@@ -63,7 +63,7 @@ test('blocked streams are hidden by default and service colors are stable',()=>{
  expect(traffic.visibleFlows(rows,true)).toHaveLength(2)
  expect(traffic.serviceColor('docs')).toBe(traffic.serviceColor('docs'))
  expect(new Set(['docs','ark','crypter','aquarius'].map(traffic.serviceColor)).size).toBe(4)
- expect(traffic.serviceColor('untrusted; color:red')).toMatch(/^hsl\(\d+(?:\.\d+)? 65% 55%\)$/)
+ expect(traffic.serviceColor('untrusted; color:red')).toMatch(/^#[0-9a-f]{6}$/)
 })
 
 test('activated WASM overrides raw fallback when opening the decoded conversation',()=>{

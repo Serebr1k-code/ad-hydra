@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import {identityMetadata} from '@/shared/users/directory'
-import { onMounted, onUnmounted, reactive, ref } from 'vue'
+import { onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import type { Exploit, FarmService, FarmTeam } from '@/generated/contracts'
 import type { FarmPage, FarmRun, FarmRunDetail } from './types'
 import { api, errorMessage } from '@/shared/api/client'
 import { catalog } from './farmApi'
 import { exploitDto } from './farmDto'
+import DisclosureSection from '@/components/DisclosureSection.vue'
 import DataTable from '@/components/DataTable.vue'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
@@ -19,6 +20,7 @@ import {Dialog,DialogContent,DialogHeader,DialogTitle,DialogDescription} from '@
 const empty = <T,>(): FarmPage<T> => ({ items: [], next_cursor: null })
 const services = ref<FarmService[]>([]), teams = ref<FarmTeam[]>([])
 const exploits = ref(empty<Exploit>()), runs = ref(empty<FarmRun>())
+const runsOpen=ref(false)
 const selectedExploit = ref<Exploit | null>(null), selectedTeams = reactive<Record<string, string>>({})
 const cursors = reactive({ exploits: '', runs: '' })
 const busy = ref(false), loading = ref(true), error = ref(''), notice = ref('')
@@ -55,7 +57,7 @@ async function idempotent(operation: string, path: string, body: unknown = null,
     keys.set(operation, key)
     await api(path, 'POST', body, true, { 'Idempotency-Key': key })
     keys.delete(operation)
-    if (firstRuns) cursors.runs = ''
+    if (firstRuns) { cursors.runs = ''; runsOpen.value=true }
   })
 }
 function retry(run: FarmRun) { void idempotent(`retry:${run.id}`, `/farm/runs/${encodeURIComponent(run.id)}/retry`, null, true) }
@@ -90,7 +92,7 @@ function cleanup() {
   })
 }
 async function poll() {
-  if (!mounted || polling || busy.value) return
+  if (!mounted || polling || busy.value || (!runsOpen.value && !requestedDetail.value)) return
   polling = true
   try {
     const cursor = cursors.runs
@@ -101,6 +103,7 @@ async function poll() {
   } catch (e) { if (mounted) error.value = errorMessage(e) }
   finally { polling = false }
 }
+watch(runsOpen,open=>{if(open)void action(load,false)})
 onMounted(() => { void action(load, false); timer = setInterval(() => { void poll() }, 2000) })
 onUnmounted(() => { mounted = false; if (timer) clearInterval(timer) })
 </script>
@@ -122,9 +125,11 @@ onUnmounted(() => { mounted = false; if (timer) clearInterval(timer) })
       </DataTable>
       <div class="flex gap-2"><Button v-if="cursors.exploits" variant="outline" :disabled="busy" @click="first('exploits')">First exploits</Button><Button v-if="exploits.items.length === 100 && exploits.next_cursor" variant="outline" :disabled="busy" @click="next('exploits')">Next exploits</Button></div>
     </section>
+    <DisclosureSection v-model:open="runsOpen" title="Run history" :description="`${runs.items.length} runs on this page`">
     <FarmRuns :runs="runs.items" :busy="busy" @refresh="action(load, false)" @logs="showLogs" @cancel="cancel" @retry="retry" />
     <p class="text-sm text-muted-foreground">Runs refresh every 2 seconds, newest first. Gzip compressed logs are retained for 7 days, with at most 1,000 completed runs, paged output with no 1 MiB capture cap, and a total compressed disk budget of 64 MiB. Older output rotates when the shared budget is full. New/existing counts are distinct flag values per target process; * marks partial historical counts.</p>
     <div class="flex flex-wrap gap-2"><Button v-if="cursors.runs" variant="outline" :disabled="busy" @click="first('runs')">Newest runs</Button><Button v-if="runs.items.length === 100 && runs.next_cursor" variant="outline" :disabled="busy" @click="next('runs')">Older runs</Button><Button variant="outline" :disabled="busy" @click="cleanup">Apply log retention policy</Button></div>
+    </DisclosureSection>
     <Dialog :open="Boolean(requestedDetail)" @update:open="open=>{if(!open)closeLogs()}">
       <DialogContent class="max-h-[90vh] w-[calc(100%_-_2rem)] max-w-5xl overflow-y-auto" @close-auto-focus="restoreLogFocus">
         <DialogHeader><DialogTitle>Run logs</DialogTitle><DialogDescription>Live stdout and stderr, run details, and flag counts.</DialogDescription></DialogHeader>

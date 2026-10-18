@@ -69,7 +69,7 @@ onMounted(()=>{void load()})
 onUnmounted(()=>{disposed=true;request++})
 </script>
 <template>
- <section id="traffic-stream" aria-label="Session stream" class="flex min-h-0 min-w-0 flex-col">
+ <section id="traffic-stream" aria-label="Session stream" class="@container flex min-h-0 min-w-0 flex-col">
   <header class="space-y-3 border-b p-4">
    <div class="flex items-start justify-between gap-3"><div class="min-w-0"><h2 class="!m-0 text-base">Follow TCP stream</h2><p class="truncate font-mono text-xs text-muted-foreground">{{detail?.client}} ↔ {{detail?.destination}}</p></div><Button variant="ghost" size="sm" :disabled="loading" @click="load()">Refresh</Button></div>
    <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{{detail?.service_id}}</span><span v-if="flow?.has_flag||detail?.has_flag" class="rounded border border-amber-500/60 bg-amber-500/10 px-2 py-1 font-medium text-amber-500">Flag detected</span><span v-if="flow?.blocked||detail?.blocked" class="text-destructive">Blocked</span><span>· {{detail?.state??'Loading'}}</span><span v-if="detail?.bytesUp">· {{detail.bytesUp}} B sent / {{detail.bytesDown}} B received</span><span>· {{messages.length}} decoded messages</span></div>
@@ -89,7 +89,7 @@ onUnmounted(()=>{disposed=true;request++})
      <p class="text-xs text-muted-foreground">{{history.segments.reduce((n,s)=>n+s.data.length,0)}} retained bytes · {{history.bytes_client_to_server}} client → server / {{history.bytes_server_to_client}} server → client</p>
      <Alert v-if="history.history_truncated||history.truncated_client_to_server||history.truncated_server_to_client"><AlertDescription>History is truncated. Only the latest bounded bytes are retained; some data may have been lost.</AlertDescription></Alert>
      <p v-if="!history.segments.length" class="text-sm text-muted-foreground">The flow closed without any retained payload bytes.</p>
-     <article v-for="(segment,index) in historySegments(history,side)" :key="index" class="space-y-1 border-l-2 pl-3" :class="segment.direction===1?'border-red-400/60':'border-blue-400/60'">
+     <article v-for="(segment,index) in historySegments(history,side)" :key="index"  :data-direction="segment.direction" class="space-y-1 rounded-sm border-l-2 p-3 @3xl:w-[78%]" :class="segment.direction===1?'border-red-400/60 bg-red-500/5 @3xl:mr-auto':'border-blue-400/60 bg-blue-500/5 @3xl:ml-auto'">
       <div class="text-[11px] text-muted-foreground">{{direction(segment.direction)}} · {{segment.data.length}} bytes<span v-if="segment.truncated"> · direction tail truncated</span></div>
       <pre class="!max-h-none !rounded-none !border-0 !bg-transparent !p-0 font-mono !text-[13px] !leading-6">{{historyPreview(segment,byteMode)||'(empty)'}}</pre>
      </article>
@@ -101,13 +101,13 @@ onUnmounted(()=>{disposed=true;request++})
     <p v-if="loading&&!messages.length" role="status">Loading conversation…</p>
     <template v-if="hasHistoryTextFallback&&history">
      <p class="text-xs text-muted-foreground">No parser messages were retained. Showing saved stream bytes as UTF-8, grouped by direction; packet timing and protocol fields are unavailable. Switch to Captured bytes for the default hex view.</p>
-     <article v-for="(segment,index) in historyTextSegments(history,side)" :key="index" class="space-y-1 border-l-2 pl-3" :class="segment.direction===1?'border-red-400/60':'border-blue-400/60'">
+     <article v-for="(segment,index) in historyTextSegments(history,side)" :key="index"  :data-direction="segment.direction" class="space-y-1 rounded-sm border-l-2 p-3 @3xl:w-[78%]" :class="segment.direction===1?'border-red-400/60 bg-red-500/5 @3xl:mr-auto':'border-blue-400/60 bg-blue-500/5 @3xl:ml-auto'">
       <div class="text-[11px] text-muted-foreground">{{direction(segment.direction)}} · {{segment.data.length}} retained bytes<span v-if="segment.truncated"> · direction tail truncated</span></div>
       <pre class="!max-h-none !rounded-none !border-0 !bg-transparent !p-0 font-mono !text-[13px] !leading-6">{{historyPreview(segment,'utf8')||'(empty)'}}</pre>
      </article>
     </template>
     <p v-else-if="!loading&&!messages.length" class="py-8 text-sm text-muted-foreground">No decoded messages were retained for this session. Unknown and encrypted protocols still have session metadata. Closed streams appear here as UTF-8 when saved history is available; use Captured bytes to inspect the next chunk on a live session.</p>
-    <article v-for="message in visible" :key="message.message_id" :data-message-id="message.message_id" :data-direction="message.direction" class="border-l-2 pl-3" :class="message.direction===1?'border-red-400/60':message.direction===2?'border-blue-400/60':'border-border'">
+    <article v-for="message in visible" :key="message.message_id" :data-message-id="message.message_id" :data-direction="message.direction" class="rounded-sm border-l-2 p-3 @3xl:w-[78%]" :class="message.direction===1?'border-red-400/60 bg-red-500/5 @3xl:mr-auto':message.direction===2?'border-blue-400/60 bg-blue-500/5 @3xl:ml-auto':'border-border'">
      <div class="mb-1 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground"><span :class="message.direction===1?'text-red-300':message.direction===2?'text-blue-300':''">{{direction(message.direction)}}</span><span>{{timestamp(message.occurred_ms)}}</span><span>{{message.message_type||message.protocol_id}}</span><span v-if="message.truncated">Truncated</span></div>
      <pre class="!max-h-none !rounded-none !border-0 !bg-transparent !p-0 font-mono !text-[13px] !leading-6">{{streamText(message)}}</pre>
      <div class="flex gap-2"><Button size="sm" variant="ghost" @click="inspect=inspect?.message_id===message.message_id?undefined:message">{{inspect?.message_id===message.message_id?'Hide fields':'Inspect fields'}}</Button><Button size="sm" variant="ghost" @click="compare(message)">Compare</Button></div>

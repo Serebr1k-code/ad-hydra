@@ -1,3 +1,4 @@
+mod appearance;
 mod repository;
 pub use repository::{Conflict, Control, Desired, Record};
 pub(crate) mod http;

@@ -220,6 +220,10 @@ export const operations = {
     "method": "GET",
     "path": "/api/v1/traffic/samples/{id}"
   },
+  "service_color": {
+    "method": "PUT",
+    "path": "/api/v1/services/{id}/color"
+  },
   "services": {
     "method": "GET",
     "path": "/api/v1/services"

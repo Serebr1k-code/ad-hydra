@@ -4,6 +4,8 @@ import type { ListResponse,Page } from '@/generated/contracts'
 import { api,errorMessage,events,type LiveState } from '@/shared/api/client'
 import { Button } from '@/components/ui/button'
 import { Alert,AlertDescription } from '@/components/ui/alert'
+import TrafficWorkspace from './TrafficWorkspace.vue'
+import { useScrollLock } from '@vueuse/core'
 import TrafficQuery from './TrafficQuery.vue'
 import FlowConversation from './FlowConversation.vue'
 import SessionList from './SessionList.vue'
@@ -12,11 +14,15 @@ import { trafficEvent,updateFlows } from './live'
 import { parseEventFrame } from '@/shared/api/sse'
 import { useRouter } from 'vue-router'
 import { toggleStream, type StreamSelection } from './streamSelection'
-const rows=ref<Flow[]>([]),services=ref<{id:string;name:string;protocol_id:string}[]>([]),service=ref('all'),selected=ref<Flow>()
+const rows=ref<Flow[]>([]),services=ref<{id:string;name:string;protocol_id:string;color?:string|null}[]>([]),service=ref('all'),selected=ref<Flow>()
 const cursor=ref<number|null>(),query=ref(''),loading=ref(false),error=ref(''),serviceError=ref(''),advanced=ref(false)
 const liveState=ref<LiveState>('connecting'),liveNotice=ref(''),conversation=ref<InstanceType<typeof FlowConversation>>()
 const router=useRouter(),filterSelection=ref<StreamSelection|null>(null)
 const selectedProtocol=computed(()=>services.value.find(s=>s.id===selected.value?.service_id)?.protocol_id??'raw')
+const expanded=ref(false)
+const scrollLocked=useScrollLock(document.body)
+watch(expanded,value=>{scrollLocked.value=value})
+function escapeExpanded(event:KeyboardEvent){if(event.key==='Escape'&&!event.defaultPrevented&&!document.querySelector('[role=dialog],[role=listbox]'))expanded.value=false}
 const showBlocked=ref(false)
 const visible=computed(()=>visibleFlows(rows.value,showBlocked.value))
 const controller=new AbortController()
@@ -74,12 +80,13 @@ function createFilterFromStreams(){if(!filterSelection.value)return;sessionStora
 watch(showBlocked,()=>{selectVisible();void load()})
 watch(service,()=>{selected.value=undefined;rows.value=[];void load()})
 onMounted(async()=>{
+ document.addEventListener('keydown',escapeExpanded)
  try {
   let after=''
   do {
    const page=await api<ListResponse>('/services?limit=100'+(after?'&after='+encodeURIComponent(after):''))
    if(disposed)return
-   services.value.push(...page.items.map(s=>({id:text(s.id),name:text(s.name)||text(s.id),protocol_id:text(s.protocol_id)||'raw'})))
+   services.value.push(...page.items.map(s=>({id:text(s.id),name:text(s.name)||text(s.id),protocol_id:text(s.protocol_id)||'raw',color:typeof s.color==='string'?s.color:null})))
    after=page.next_cursor??''
   }while(after&&services.value.length<128)
  }catch(e){serviceError.value=errorMessage(e)}
@@ -92,18 +99,18 @@ onMounted(async()=>{
  await load()
  if(!disposed)void events(receive,controller.signal,state=>{liveState.value=state;if(state==='live')reconcile()})
 })
-onUnmounted(()=>{disposed=true;request++;controller.abort();clearTimeout(catchup)})
+onUnmounted(()=>{scrollLocked.value=false;document.removeEventListener('keydown',escapeExpanded);disposed=true;request++;controller.abort();clearTimeout(catchup)})
 </script>
 <template>
- <section class="space-y-3">
-  <div class="flex items-center justify-between"><div><h1 class="!mb-0">Traffic</h1><p id="traffic-live-status" role="status" class="text-xs text-muted-foreground">{{liveState==='live'?'Live':liveState==='retrying'?'Reconnecting live traffic…':'Connecting live traffic…'}}</p></div><div class="flex gap-2"><Button v-if="filterSelection" variant="outline" size="sm" @click="filterSelection=null">Clear {{filterSelection.flow_ids.length }} selected</Button><Button v-if="filterSelection" size="sm" @click="createFilterFromStreams">Create filter from {{filterSelection.flow_ids.length }} streams</Button><Button variant="ghost" size="sm" :aria-expanded="advanced" @click="advanced=!advanced">{{advanced?'Hide filters':'Filters'}}</Button></div></div>
+ <section id="traffic-workspace" :class="expanded?'fixed inset-0 z-40 flex flex-col gap-3 bg-background p-3':'space-y-3'">
+  <div class="flex items-center justify-between"><div><h1 class="!mb-0">Traffic</h1><p id="traffic-live-status" role="status" class="text-xs text-muted-foreground">{{liveState==='live'?'Live':liveState==='retrying'?'Reconnecting live traffic…':'Connecting live traffic…'}}</p></div><div class="flex flex-wrap justify-end gap-2"><Button id="traffic-expand" variant="outline" size="sm" :aria-pressed="expanded" @click="expanded=!expanded">{{expanded?'Exit expanded view':'Expand traffic'}}</Button><Button v-if="filterSelection" variant="outline" size="sm" @click="filterSelection=null">Clear {{filterSelection.flow_ids.length }} selected</Button><Button v-if="filterSelection" size="sm" @click="createFilterFromStreams">Create filter from {{filterSelection.flow_ids.length }} streams</Button><Button variant="ghost" size="sm" :aria-expanded="advanced" @click="advanced=!advanced">{{advanced?'Hide filters':'Filters'}}</Button></div></div>
   <p v-if="liveNotice" role="status" class="text-xs text-muted-foreground">{{liveNotice}}</p>
   <TrafficQuery v-if="advanced" @search="search" />
   <Alert v-if="error||serviceError" variant="destructive"><AlertDescription>{{error||serviceError}}</AlertDescription></Alert>
-  <div class="grid min-h-[640px] overflow-hidden rounded-md border bg-card md:h-[calc(100dvh-230px)] md:min-h-[480px] md:grid-cols-[300px_minmax(0,1fr)] lg:grid-cols-[330px_minmax(0,1fr)]">
+  <div class="overflow-hidden rounded-md border bg-card" :class="expanded?'min-h-0 flex-1':'h-[calc(100dvh-230px)] min-h-[640px] md:min-h-[480px]'"><TrafficWorkspace><template #sessions>
    <SessionList :rows="visible" :show-blocked="showBlocked" @show-blocked="showBlocked=$event" :services="services" :service="service" :selected="selected?.flow_id??''" :loading="loading" :more="Boolean(cursor)" :filter-selection="filterSelection?.flow_ids??[]" :filter-selection-service="filterSelection?.service_id??''" @service="service=$event" @select="selected=$event" @toggle-filter="toggleFilter" @refresh="load()" @more="load(true)" />
-   <FlowConversation ref="conversation" v-if="selected" :key="selected.flow_id+':'+selectedProtocol" :flow-id="selected.flow_id" :flow="selected" :protocol-id="selectedProtocol" :show-blocked="showBlocked" />
+   </template><FlowConversation class="flex-1" ref="conversation" v-if="selected" :key="selected.flow_id+':'+selectedProtocol" :flow-id="selected.flow_id" :flow="selected" :protocol-id="selectedProtocol" :show-blocked="showBlocked" />
    <section v-else id="traffic-stream" class="flex min-h-80 items-center justify-center p-8 text-center"><div><h2 class="!mt-0">Follow TCP stream</h2><p class="text-sm text-muted-foreground">Choose a service and select a session to inspect its conversation.</p></div></section>
-  </div>
+  </TrafficWorkspace></div>
  </section>
 </template>
