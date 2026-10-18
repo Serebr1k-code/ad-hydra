@@ -40,3 +40,9 @@ quota from a permitted request and remain unclassified. Upgrade both binaries to
 classify new rate-limit events accurately. No storage migration is needed;
 classification reads retained rule events and indexed flag provenance. Indicators
 last as long as their underlying bounded event retention.
+
+## Saved TCP history limits
+
+Enabled services retain a gzip-compressed tail of64KiB per direction after a stream closes. History expires after24hours, or earlier when the100MiB compressed-payload quota or65,536-stream limit evicts the oldest records. Metadata and filesystem allocation add disk overhead. The nonblocking writer queue holds64 completed streams; overload reports capture loss instead of delaying forwarding.
+
+The writer indexes completed files once at startup; appending and expiry do not rescan the history directory. Its private directory must not be edited while Proxy runs. Restart rebuilds the index; on-demand reads still validate permissions and bounded decompression. See [performance measurements](PERFORMANCE.md).

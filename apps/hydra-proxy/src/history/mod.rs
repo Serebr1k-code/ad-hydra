@@ -1,13 +1,11 @@
 //! Bounded, gzip-compressed tails of completed TCP flows. Capture never writes
 //! to disk on the relay task; one bounded worker owns persistence and cleanup.
-use flate2::{Compression, read::GzDecoder, write::GzEncoder};
+mod storage;
 use hydra_domain::Service;
 use hydra_protocol_sdk::Direction;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, OpenOptions},
-    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, Weak,
@@ -15,6 +13,7 @@ use std::{
     },
     time::Duration,
 };
+use storage::read_record;
 use tokio::sync::mpsc;
 
 pub const MAX_DIRECTION_BYTES: usize = 64 * 1024;
@@ -116,85 +115,62 @@ fn now_ms() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
-fn paths(directory: &Path, id: &str) -> (PathBuf, PathBuf) {
-    let stem = format!("{FILE_PREFIX}{id}");
-    (
-        directory.join(format!("{stem}.gz")),
-        directory.join(format!("{stem}.json")),
-    )
-}
-
-fn safe_file(path: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let metadata = fs::symlink_metadata(path)?;
-    anyhow::ensure!(
-        metadata.is_file()
-            && metadata.nlink() == 1
-            && metadata.uid() == fs::metadata("/proc/self")?.uid()
-            && metadata.permissions().mode() & 0o077 == 0,
-        "history file is not private"
-    );
-    Ok(())
-}
-
-fn safe_directory(path: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    for ancestor in path.ancestors().filter(|p| !p.as_os_str().is_empty()) {
-        anyhow::ensure!(
-            !fs::symlink_metadata(ancestor)?.file_type().is_symlink(),
-            "history directory contains symlink"
-        );
-    }
-    let metadata = fs::symlink_metadata(path)?;
-    anyhow::ensure!(
-        metadata.is_dir()
-            && metadata.uid() == fs::metadata("/proc/self")?.uid()
-            && metadata.permissions().mode() & 0o077 == 0,
-        "history directory must be private"
-    );
-    Ok(())
-}
-
 impl HistoryStore {
     /// Open a private history directory and resume completed, unexpired records.
     pub async fn open(directory: impl AsRef<Path>) -> anyhow::Result<Arc<Self>> {
         let directory = directory.as_ref().to_owned();
         let checked = directory.clone();
-        tokio::task::spawn_blocking(move || {
-            safe_directory(&checked)?;
-            cleanup(&checked, now_ms())
-        })
-        .await??;
+        let mut disk =
+            tokio::task::spawn_blocking(move || storage::Disk::open(checked, now_ms())).await??;
         let (writer, mut reader) = mpsc::channel::<FlowHistory>(WRITE_QUEUE);
         let dropped = Arc::new(AtomicU64::new(0));
         let worker_dropped = dropped.clone();
         let pending = Arc::new(Mutex::new(HashSet::new()));
         let worker_pending = pending.clone();
-        let worker_directory = directory.clone();
         tokio::spawn(async move {
-            let mut reap = tokio::time::interval(Duration::from_secs(60));
+            let interval = Duration::from_secs(60);
+            let mut reap =
+                tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+            reap.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                tokio::select! {
-                    item = reader.recv() => match item {
-                        Some(history) => {
-                            let flow_id = history.flow_id.clone();
-                            let path = worker_directory.clone();
-                            let result = tokio::task::spawn_blocking(move || persist(&path, history)).await;
-                            if !matches!(result, Ok(Ok(()))) {
-                                worker_dropped.fetch_add(1, Ordering::Relaxed);
-                                tracing::warn!("flow history persistence failed");
-                            }
-                            worker_pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&flow_id);
-                        }
-                        None => break,
-                    },
-                    _ = reap.tick() => {
-                        let path = worker_directory.clone();
-                        let result = tokio::task::spawn_blocking(move || cleanup(&path, now_ms())).await;
-                        if !matches!(result, Ok(Ok(()))) {
-                            tracing::warn!("flow history cleanup failed");
-                        }
+                let item = tokio::select! {
+                    item = reader.recv() => match item { Some(item) => Some(item), None => break },
+                    _ = reap.tick() => None,
+                };
+                let flow_id = item.as_ref().map(|history| history.flow_id.clone());
+                let completed = tokio::task::spawn_blocking(move || {
+                    let result = match item {
+                        Some(history) => disk.persist(history),
+                        None => disk.reap(now_ms()),
+                    };
+                    (disk, result)
+                })
+                .await;
+                let result;
+                match completed {
+                    Ok((updated, outcome)) => {
+                        disk = updated;
+                        result = outcome;
                     }
+                    Err(_) => {
+                        worker_dropped.fetch_add(1, Ordering::Relaxed);
+                        worker_pending
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clear();
+                        tracing::warn!("flow history worker stopped");
+                        break;
+                    }
+                }
+                if result.is_err() {
+                    worker_dropped.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!("flow history persistence or cleanup failed");
+                }
+                if let Some(flow_id) = flow_id {
+                    worker_pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&flow_id);
                 }
             }
         });
@@ -411,241 +387,18 @@ fn append_tail(target: &mut Vec<u8>, truncated: &mut bool, bytes: &[u8]) {
     target.extend_from_slice(bytes);
 }
 
-fn gzip_payload(history: &FlowHistory) -> anyhow::Result<Vec<u8>> {
-    let mut payload =
-        Vec::with_capacity(history.client_to_server.len() + history.server_to_client.len());
-    payload.extend_from_slice(&history.client_to_server);
-    payload.extend_from_slice(&history.server_to_client);
-    anyhow::ensure!(
-        payload.len() <= MAX_HISTORY_BYTES,
-        "history exceeds payload bound"
-    );
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&payload)?;
-    Ok(encoder.finish()?)
-}
-
-fn metadata(history: &FlowHistory) -> Metadata {
-    Metadata {
-        flow_id: history.flow_id.clone(),
-        service_id: history.service_id.clone(),
-        protocol_id: history.protocol_id.clone(),
-        opened_at_ms: history.opened_at_ms,
-        closed_at_ms: history.closed_at_ms,
-        bytes_client_to_server: history.bytes_client_to_server,
-        bytes_server_to_client: history.bytes_server_to_client,
-        client_len: history.client_to_server.len(),
-        server_len: history.server_to_client.len(),
-        truncated_client_to_server: history.truncated_client_to_server,
-        truncated_server_to_client: history.truncated_server_to_client,
-        history_truncated: history.history_truncated,
-    }
-}
-
-fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-
-fn persist(directory: &Path, history: FlowHistory) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        uuid::Uuid::parse_str(&history.flow_id).is_ok(),
-        "invalid history flow id"
-    );
-    let payload = gzip_payload(&history)?;
-    let details = serde_json::to_vec(&metadata(&history))?;
-    let (payload_path, metadata_path) = paths(directory, &history.flow_id);
-    cleanup_for(directory, history.closed_at_ms, payload.len() as u64)?;
-    let nonce = uuid::Uuid::new_v4();
-    let payload_tmp = directory.join(format!("{FILE_PREFIX}{nonce}.tmp.gz"));
-    let metadata_tmp = directory.join(format!("{FILE_PREFIX}{nonce}.tmp.json"));
-    let result = (|| -> anyhow::Result<()> {
-        write_private(&payload_tmp, &payload)?;
-        write_private(&metadata_tmp, &details)?;
-        fs::rename(&payload_tmp, &payload_path)?;
-        fs::rename(&metadata_tmp, &metadata_path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(payload_tmp);
-        let _ = fs::remove_file(metadata_tmp);
-        let _ = fs::remove_file(payload_path);
-    }
-    result
-}
-
-fn read_record(directory: &Path, id: &str) -> anyhow::Result<Option<FlowHistory>> {
-    let (payload_path, metadata_path) = paths(directory, id);
-    if !metadata_path.exists() || !payload_path.exists() {
-        return Ok(None);
-    }
-    safe_file(&metadata_path)?;
-    safe_file(&payload_path)?;
-    anyhow::ensure!(
-        fs::metadata(&metadata_path)?.len() <= 4096,
-        "history metadata exceeds bound"
-    );
-    let details: Metadata = serde_json::from_slice(&fs::read(&metadata_path)?)?;
-    if details.flow_id != id || details.closed_at_ms < now_ms() - TTL_SECONDS * 1000 {
-        return Ok(None);
-    }
-    anyhow::ensure!(
-        details.client_len <= MAX_DIRECTION_BYTES && details.server_len <= MAX_DIRECTION_BYTES,
-        "history metadata exceeds bounds"
-    );
-    let file = fs::File::open(payload_path)?;
-    let mut decoder = GzDecoder::new(file).take((MAX_HISTORY_BYTES + 1) as u64);
-    let mut payload = Vec::with_capacity(MAX_HISTORY_BYTES);
-    decoder.read_to_end(&mut payload)?;
-    anyhow::ensure!(
-        payload.len() <= MAX_HISTORY_BYTES,
-        "decompressed history exceeds bound"
-    );
-    anyhow::ensure!(
-        payload.len() == details.client_len + details.server_len,
-        "history payload length mismatch"
-    );
-    let server = payload.split_off(details.client_len);
-    Ok(Some(FlowHistory {
-        flow_id: details.flow_id,
-        service_id: details.service_id,
-        protocol_id: details.protocol_id,
-        opened_at_ms: details.opened_at_ms,
-        closed_at_ms: details.closed_at_ms,
-        bytes_client_to_server: details.bytes_client_to_server,
-        bytes_server_to_client: details.bytes_server_to_client,
-        client_to_server: payload,
-        server_to_client: server,
-        truncated_client_to_server: details.truncated_client_to_server,
-        truncated_server_to_client: details.truncated_server_to_client,
-        history_truncated: details.history_truncated,
-    }))
-}
-
-fn cleanup(directory: &Path, now: i64) -> anyhow::Result<()> {
-    let mut records = Vec::new();
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if name.starts_with(FILE_PREFIX) && name.contains(".tmp.") {
-            let _ = fs::remove_file(entry.path());
-            continue;
-        }
-        if let Some(id) = name
-            .strip_prefix(FILE_PREFIX)
-            .and_then(|s| s.strip_suffix(".gz"))
-        {
-            if uuid::Uuid::parse_str(id).is_ok()
-                && !directory.join(format!("{FILE_PREFIX}{id}.json")).exists()
-                && entry.path().exists()
-            {
-                safe_file(&entry.path())?;
-                fs::remove_file(entry.path())?;
-            }
-            continue;
-        }
-        let Some(id) = name
-            .strip_prefix(FILE_PREFIX)
-            .and_then(|s| s.strip_suffix(".json"))
-        else {
-            continue;
-        };
-        if uuid::Uuid::parse_str(id).is_err() {
-            continue;
-        }
-        safe_file(&entry.path())?;
-        let detail: Metadata = serde_json::from_slice(&fs::read(entry.path())?)?;
-        let (payload, metadata) = paths(directory, id);
-        if detail.flow_id != id || detail.closed_at_ms < now - TTL_SECONDS * 1000 {
-            let _ = fs::remove_file(payload);
-            let _ = fs::remove_file(metadata);
-            continue;
-        }
-        safe_file(&payload)?;
-        records.push((
-            detail.closed_at_ms,
-            payload.metadata()?.len(),
-            payload,
-            metadata,
-        ));
-    }
-    let mut total: u64 = records.iter().map(|record| record.1).sum();
-    records.sort_by_key(|record| record.0);
-    for (_, size, payload, metadata) in records {
-        if total <= DISK_QUOTA {
-            break;
-        }
-        fs::remove_file(payload)?;
-        fs::remove_file(metadata)?;
-        total = total.saturating_sub(size);
-    }
-    Ok(())
-}
-
-fn cleanup_for(directory: &Path, now: i64, needed: u64) -> anyhow::Result<()> {
-    cleanup_for_quota(directory, now, needed, DISK_QUOTA)
-}
-
-fn cleanup_for_quota(directory: &Path, now: i64, needed: u64, quota: u64) -> anyhow::Result<()> {
-    anyhow::ensure!(needed <= quota, "history record exceeds disk quota");
-    cleanup(directory, now)?;
-    let mut records = Vec::new();
-    let mut total = 0u64;
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let Some(id) = name
-            .strip_prefix(FILE_PREFIX)
-            .and_then(|s| s.strip_suffix(".json"))
-        else {
-            continue;
-        };
-        if uuid::Uuid::parse_str(id).is_err() {
-            continue;
-        }
-        let metadata_path = entry.path();
-        let detail: Metadata = serde_json::from_slice(&fs::read(&metadata_path)?)?;
-        let (payload, sidecar) = paths(directory, id);
-        safe_file(&payload)?;
-        let size = payload.metadata()?.len();
-        total = total.saturating_add(size);
-        records.push((detail.closed_at_ms, size, payload, sidecar));
-    }
-    records.sort_by_key(|record| record.0);
-    for (_, size, payload, metadata) in records {
-        if total.saturating_add(needed) <= quota {
-            break;
-        }
-        fs::remove_file(payload)?;
-        fs::remove_file(metadata)?;
-        total = total.saturating_sub(size);
-    }
-    anyhow::ensure!(
-        total.saturating_add(needed) <= quota,
-        "history disk quota exhausted"
-    );
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
+    use super::storage::{cleanup, cleanup_for_quota, paths, persist, write_private};
     use super::*;
+    use flate2::{Compression, write::GzEncoder};
     use hydra_domain::Transport;
+    use std::{fs, io::Write};
     use std::{net::SocketAddr, path::PathBuf};
 
-    struct Directory(PathBuf);
+    pub(super) struct Directory(pub(super) PathBuf);
     impl Directory {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let path = std::env::temp_dir().join(format!("hydra-history-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir(&path).unwrap();
             #[cfg(unix)]
@@ -680,6 +433,30 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("history was not persisted")
+    }
+
+    #[tokio::test]
+    async fn appending_history_does_not_reopen_unrelated_metadata() {
+        let dir = Directory::new();
+        let store = HistoryStore::open(&dir.0).await.unwrap();
+        store.apply_services(&[service(true)]);
+        let first = uuid::Uuid::new_v4().to_string();
+        store
+            .begin(first.clone(), "svc".into(), "raw".into())
+            .unwrap()
+            .finish(now_ms(), 0, 0);
+        stored(&store, &first).await;
+        // Corrupt an unrelated sidecar after indexing. Appending must touch only
+        // the new record, not enumerate and reopen every retained history.
+        let (_, metadata) = paths(&dir.0, &first);
+        fs::write(metadata, b"unrelated unreadable metadata").unwrap();
+        let second = uuid::Uuid::new_v4().to_string();
+        store
+            .begin(second.clone(), "svc".into(), "raw".into())
+            .unwrap()
+            .finish(now_ms(), 0, 0);
+        stored(&store, &second).await;
+        assert!(store.get(&first).await.is_err());
     }
 
     #[tokio::test]

@@ -1,0 +1,35 @@
+{
+  "conditions": "Synthetic loopback; 10,000 valid gzip histories; 20 completed raw TCP flows; 3,328-byte echo; 50ms between flows; Proxy affinity two CPUs; no Core; no cgroup RAM limit; process CPU excludes seeding, startup scan and generator. CPU resolution 10ms.",
+  "before": {
+    "binary": "target/release/hydra-proxy",
+    "seeded_records": 10000,
+    "completed_flows": 20,
+    "affinity": [
+      0,
+      1
+    ],
+    "elapsed_seconds": 2.121421173971612,
+    "proxy_cpu_seconds": 2.0399999999999996,
+    "proxy_cpu_percent_one_core": 96.16195147995153,
+    "proxy_cpu_ms_per_flow": 101.99999999999997,
+    "proxy_rss_bytes": 9515008,
+    "byte_integrity_verified": true,
+    "all_histories_persisted": true
+  },
+  "after": {
+    "binary": "target/release/hydra-proxy",
+    "seeded_records": 10000,
+    "completed_flows": 20,
+    "affinity": [
+      0,
+      1
+    ],
+    "elapsed_seconds": 1.0629228280158713,
+    "proxy_cpu_seconds": 0.020000000000000004,
+    "proxy_cpu_percent_one_core": 1.8816041459315962,
+    "proxy_cpu_ms_per_flow": 1.0000000000000002,
+    "proxy_rss_bytes": 10108928,
+    "byte_integrity_verified": true,
+    "all_histories_persisted": true
+  }
+}

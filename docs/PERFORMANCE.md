@@ -103,3 +103,27 @@ After the Vue migration, the rebuilt binaries passed the same owned-loopback wor
 | Proxy normal telemetry losses | 0 |
 
 Parsed HTTP storage was verified. A separate real HTTPS Chromium check fetched the Vue assets and exercised login, refresh-on-reload, service creation, all pages and logout while `frontend/dist` was absent. This benchmark measures server traffic, not browser memory or maximum throughput. Fifteen seconds cannot establish long-term stability. [Raw Vue-release samples](benchmarks/vue-console-release-2026-10-16.json).
+
+## Populated history directory regression — 2026-10-18
+
+Reproduce the isolated regression with synthetic data only:
+
+```sh
+cargo build --locked --release -p hydra-proxy
+python3 tests/performance/history.py --records 10000 --flows 20 \
+  --output /tmp/hydra-history.json
+```
+
+The script creates valid private gzip/JSON histories, starts the actual release Proxy pinned to two CPUs, then verifies20 completed binary-safe loopback echoes and waits for all histories to persist. Each echo is3,328bytes; the generator pauses50ms between flows. Measurement excludes fixture seeding and startup index recovery. Process CPU/RSS exclude the generator, backend and Core; this fixture does not impose a2GiB cgroup limit. `/proc` CPU resolution is10ms on this host.
+
+| Metric | Before | Indexed writer |
+| --- | ---: | ---: |
+| Proxy CPU seconds for20 streams |2.04|0.02|
+| Proxy CPU milliseconds per stream |102|1|
+| Measured elapsed seconds, including pacing/drain |2.12|1.06|
+| Average Proxy CPU, percent of one core |96.16|1.88|
+| Proxy RSS |9,515,008bytes|10,108,928bytes|
+| Relay byte integrity / all histories persisted |yes / yes|yes / yes|
+
+This is approximately99% less CPU for this history-heavy workload, not a claim about maximum network throughput or parity with nginx. Parsing/WASM/filtering/gzip remain enabled as configured. The bounded in-memory index trades modest RAM for avoiding repeated filesystem scans; it caps retained files at65,536 records in addition to the existing24-hour TTL and100MiB compressed-payload quota. Startup still scans existing records once. [Raw before/after results](benchmarks/history-index-release-2026-10-18.json).
+
