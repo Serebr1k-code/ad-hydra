@@ -127,3 +127,14 @@ The script creates valid private gzip/JSON histories, starts the actual release 
 
 This is approximately99% less CPU for this history-heavy workload, not a claim about maximum network throughput or parity with nginx. Parsing/WASM/filtering/gzip remain enabled as configured. The bounded in-memory index trades modest RAM for avoiding repeated filesystem scans; it caps retained files at65,536 records in addition to the existing24-hour TTL and100MiB compressed-payload quota. Startup still scans existing records once. [Raw before/after results](benchmarks/history-index-release-2026-10-18.json).
 
+## CPU-aware shared pools
+
+Proxy creates one Tokio async worker per CPU reported by Rust `available_parallelism` at startup (respecting the process's available CPU budget), instead of hardcoding two workers. Concurrent sessions are async tasks on the work-stealing pool. Disk operations share a separate blocking pool capped at `min(available CPUs, 4)`; the critical spool has its existing single worker. There is no OS thread per connection or per submitted job. The startup log records the actual `async_workers` and `blocking_workers_limit`. CPU allocation changes take effect after a Proxy restart.
+
+The history catalog remains single-owner to preserve quota/expiry accounting, and each connection's decoder remains ordered. These guarantees do not cap independent connections to one core. CPU use grows with real work; idle cores are not kept busy artificially. On hosts larger than the target two-vCPU machine, systemd `TasksMax` must allow at least async workers + blocking workers + two housekeeping threads (the supplied limit is64).
+
+```sh
+HYDRA_BUILD_PROFILE=release python3 tests/e2e/proxy_runtime.py
+```
+
+This Linux-only benign loopback check runs Proxy under one-CPU and up-to-three-CPU affinity, opens128 simultaneous TCP sessions, verifies8,192 binary exchanges per case and checks that total OS threads fit the shared-pool budget. It is also part of CI. A debug run observed one async worker/four total OS threads with one CPU, and three async workers/seven total OS threads with three CPUs. This is a concurrency/resource regression check, not a maximum-throughput benchmark.
