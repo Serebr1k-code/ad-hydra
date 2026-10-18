@@ -169,3 +169,8 @@ Release `CARGO_BUILD_JOBS=2 cargo build --locked --release -p hydra-core -p hydr
 
 Changed plugin build/schema files/Cargo lock, bounded session decoder and real-WASM tests, operator/plugin documentation, real browser typed-response/CLI-hotload test, and `scripts/deploy-protocol-remote.py`. The module deploy helper keeps credentials on the VM, checks installation/activation, and restores the prior confirmed activation on failure. Verification and live deployment evidence follows.
 
+## GitHub Actions diagnostics regression — 2026-10-18
+
+Run39100264600 failed in tests/e2e/diagnostics.py before static binary packaging: the test still required a stored own_exposed flag, despite defensive value storage having been removed by the product requirement. Reproduced the obsolete assertion locally. Updated the real two-process crash/spool/restart test to require retained traffic flag-presence metadata, NULL flag references and empty flags/submissions instead. No production code or deployment artifact changed.
+
+Verification: HYDRA_BUILD_PROFILE=release python3 tests/e2e/diagnostics.py passes (0.518s); git diff --check passes. The test needs localhost sockets and was run outside the restricted sandbox. CI rerun result will be recorded separately.

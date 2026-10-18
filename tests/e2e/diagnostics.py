@@ -1,5 +1,5 @@
 """Real parsed/critical telemetry and explicitly requested sample across two processes."""
-import hashlib
+import sqlite3
 import http.client
 import json
 import pathlib
@@ -88,14 +88,17 @@ class Diagnostics(unittest.TestCase):
                 wait(spooled);time.sleep(.2)
                 pp.terminate();pp.wait(timeout=5);client.close();client=None
                 proxy();core();token=wait(login)
-                flags=wait(lambda:request('GET','/flags',token=token)[1])
-                self.assertEqual(len(flags),1);self.assertEqual(flags[0]['category'],'own_exposed')
-                self.assertEqual(flags[0]['digest'],hashlib.sha256(b'FLAG{abcd1234}').hexdigest())
-                self.assertNotIn('FLAG{',json.dumps(flags))
+                replayed=wait(lambda:(result if (result:=request('GET',f'/traffic/flows/{flow}',token=token))[0]==200 and result[1].get('has_flag') else None))
+                self.assertTrue(replayed[1]['has_flag'])
+                self.assertEqual(request('GET','/flags',token=token)[1],[])
                 self.assertEqual(request('GET','/submissions',token=token)[1],[])
-                self.assertEqual(request('POST','/flags/'+flags[0]['id']+'/submit',token=token)[0],400)
+                with sqlite3.connect(root/'db') as database:
+                    self.assertEqual(database.execute('SELECT count(*) FROM flags').fetchone()[0],0)
+                    findings=database.execute('SELECT flag_id FROM flag_events WHERE flow_id=?',[flow]).fetchall()
+                    self.assertTrue(findings,'Critical spool replay must retain flag-presence metadata')
+                    self.assertTrue(all(row[0] is None for row in findings),'Defensive findings must not reference stored flag values')
                 self.assertEqual(request('GET','/traffic/samples/'+capture['sample_id'],token=token)[0],410)
-                print('On-demand raw sample, configured probe, cross-chunk own_exposed spool replay and restart: OK')
+                print('On-demand raw sample, configured probe, cross-chunk flag-presence spool replay without flag storage and restart: OK')
             finally:
                 if client:client.close()
                 for p in reversed(processes):
