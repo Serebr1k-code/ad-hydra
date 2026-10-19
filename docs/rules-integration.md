@@ -1,5 +1,7 @@
 # Rule engine integration
 
+Each rule appears in a card with the same service-color stripe as Traffic. Its switch saves enablement immediately through the revision-checked API. Desired enabled/disabled uses green/red text and icons; applied state remains pending until Proxy acknowledges the change. Pending status refreshes automatically without clearing editor drafts or stream selection. Bulk switches, sorting, search and pagination remain available.
+
 The Vue Filters page uses a visual rule builder instead of an expression JSON
 editor. Add conditions or nested groups, choose `all (AND)` or `any (OR)` for
 each group, and select the comparison from the field type. String operators

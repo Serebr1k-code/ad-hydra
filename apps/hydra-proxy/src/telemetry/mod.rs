@@ -282,19 +282,22 @@ impl Telemetry {
         permit: OwnedSemaphorePermit,
     ) -> Flow {
         let id = uuid::Uuid::new_v4().to_string();
-        let history = if service.retain_history && service.transport == Transport::Tcp {
+        let history = if service.retain_history {
             self.history
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
                 .and_then(|store| {
-                    store.begin(id.clone(), service.id.clone(), service.protocol_id.clone())
+                    if service.transport == Transport::Udp {
+                        store.begin_udp(id.clone(), service.id.clone(), service.protocol_id.clone())
+                    } else {
+                        store.begin(id.clone(), service.id.clone(), service.protocol_id.clone())
+                    }
                 })
         } else {
             None
         };
-        let history_truncated =
-            service.retain_history && service.transport == Transport::Tcp && history.is_none();
+        let history_truncated = service.retain_history && history.is_none();
         let flow = Flow {
             scanner: std::sync::Mutex::new(
                 self.scanner

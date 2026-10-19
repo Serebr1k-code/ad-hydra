@@ -22,3 +22,16 @@ test('raw UTF-8 fallback groups retained chunks by direction before decoding', (
  expect(historyTextSegments(history,'both').map(segment=>[segment.direction,historyPreview(segment,'utf8')])).toEqual([[1,'é'],[2,'B']])
  expect(historyTextSegments(history,'1').map(segment=>[segment.direction,historyPreview(segment,'utf8')])).toEqual([[1,'é']])
 })
+
+
+test('UDP text keeps binary and empty datagrams in captured order', () => {
+ const history={segments:[
+  {direction:1,data:[0xc3],datagram:true,sequence:1,occurred_at_ms:10},
+  {direction:2,data:[],datagram:true,sequence:2,occurred_at_ms:11},
+  {direction:1,data:[0xa9,0],datagram:true,sequence:3,occurred_at_ms:12},
+ ],truncated_client_to_server:false,truncated_server_to_client:false}
+ const segments=historyTextSegments(history,'both')
+ expect(segments.map(s=>[s.direction,s.sequence,s.occurred_at_ms,s.data])).toEqual([[1,1,10,[0xc3]],[2,2,11,[]],[1,3,12,[0xa9,0]]])
+ expect(segments.map(s=>historyPreview(s,'utf8'))).toEqual(['�','','�\0'])
+ expect(historySegments(history,'1').map(s=>s.sequence)).toEqual([1,3])
+})

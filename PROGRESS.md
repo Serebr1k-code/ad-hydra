@@ -195,3 +195,5 @@ Changed apps/hydra-proxy/src/main.rs, added tests/e2e/proxy_runtime.py to CI, an
 
 Validation: Proxy Clippy all-targets with -D warnings, formatting, dependency boundaries, Python syntax and diff checks pass. `cargo build --locked -p hydra-proxy` and `CARGO_BUILD_JOBS=2 cargo build --locked --release -p hydra-proxy` pass(release46.75s). Release CPU-aware runtime, TCP/UDP/retained-history restart, diagnostics crash replay and HTTP/filter/WASM lifecycle scripts all pass. Socket integration runs require execution outside the restricted sandbox.
 
+## 2026-10-19 — effectiveness matrix, UDP retained history, filter cards
+

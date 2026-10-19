@@ -58,15 +58,20 @@ export function bytePreview(data:number[]) {
  for(let offset=0;offset<bytes.length;offset+=16){const row=bytes.slice(offset,offset+16);lines.push(`${offset.toString(16).padStart(8,'0')}  ${row.map(b=>b.toString(16).padStart(2,'0')).join(' ').padEnd(47,' ')}  ${row.map(b=>b>=32&&b<127?String.fromCharCode(b):'.').join('')}`)}
  return {ascii,hex:lines.join('\n'),utf8}
 }
-export type HistoryDisplaySegment = HistorySegment & { truncated: boolean }
+// Optional fields remain compatible with histories produced before UDP framing.
+export type SavedHistorySegment = Pick<HistorySegment,'direction'|'data'> & { datagram?: boolean; occurred_at_ms?: number; sequence?: number }
+export type HistoryDisplaySegment = SavedHistorySegment & { truncated: boolean }
 /** Preserves arrival order while optionally limiting a saved stream to one direction. */
-export function historySegments(history: Pick<FlowHistory,'segments'|'truncated_client_to_server'|'truncated_server_to_client'>, side: 'both'|'1'|'2'): HistoryDisplaySegment[] {
- return history.segments.filter(segment=>side==='both'||String(segment.direction)===side).map(segment=>({...segment,truncated:segment.direction===1?history.truncated_client_to_server:history.truncated_server_to_client}))
+export function historySegments(history: Pick<FlowHistory,'truncated_client_to_server'|'truncated_server_to_client'> & { segments: SavedHistorySegment[] }, side: 'both'|'1'|'2'): HistoryDisplaySegment[] {
+ return (history.segments as SavedHistorySegment[]).filter(segment=>side==='both'||String(segment.direction)===side).map(segment=>({...segment,truncated:segment.direction===1?history.truncated_client_to_server:history.truncated_server_to_client}))
 }
 /** Combine saved chunks per direction so split UTF-8 code points decode correctly. */
-export function historyTextSegments(history: Pick<FlowHistory,'segments'|'truncated_client_to_server'|'truncated_server_to_client'>, side: 'both'|'1'|'2'): HistoryDisplaySegment[] {
+export function historyTextSegments(history: Pick<FlowHistory,'truncated_client_to_server'|'truncated_server_to_client'> & { segments: SavedHistorySegment[] }, side: 'both'|'1'|'2'): HistoryDisplaySegment[] {
+ const segments=historySegments(history,side)
+ // Datagram text must never combine adjacent packets or split UTF-8 between packets.
+ if(segments.some(segment=>segment.datagram))return segments
  const grouped=new Map<number,HistoryDisplaySegment>()
- for(const segment of historySegments(history,side)) {
+ for(const segment of segments) {
   const existing=grouped.get(segment.direction)
   if(existing){existing.data.push(...segment.data);existing.truncated ||= segment.truncated}
   else grouped.set(segment.direction,{...segment,data:[...segment.data]})

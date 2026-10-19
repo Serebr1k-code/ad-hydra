@@ -1,11 +1,11 @@
-//! Bounded, gzip-compressed tails of completed TCP flows. Capture never writes
+//! Bounded, gzip-compressed tails of completed TCP and UDP flows. Capture never writes
 //! to disk on the relay task; one bounded worker owns persistence and cleanup.
 mod storage;
 use hydra_domain::Service;
 use hydra_protocol_sdk::Direction;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, Weak,
@@ -18,13 +18,34 @@ use tokio::sync::{mpsc, oneshot};
 
 pub const MAX_DIRECTION_BYTES: usize = 64 * 1024;
 pub const MAX_HISTORY_BYTES: usize = MAX_DIRECTION_BYTES * 2;
+pub const MAX_DATAGRAMS: usize = 1024;
+pub const MAX_ENCODED_BYTES: usize = MAX_HISTORY_BYTES + MAX_DATAGRAMS * 21;
 const MAX_ACTIVE: usize = 256;
+fn tcp_transport() -> String {
+    "tcp".into()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Datagram {
+    pub direction: u8,
+    pub occurred_at_ms: i64,
+    pub sequence: u64,
+    pub data: Vec<u8>,
+}
 const WRITE_QUEUE: usize = 64;
 const TTL_SECONDS: i64 = 24 * 60 * 60;
 const FILE_PREFIX: &str = "hydra-history-";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FlowHistory {
+    #[serde(default = "tcp_transport")]
+    pub transport: String,
+    #[serde(default)]
+    pub datagrams: Vec<Datagram>,
+    #[serde(default)]
+    pub datagrams_client_to_server: u64,
+    #[serde(default)]
+    pub datagrams_server_to_client: u64,
     pub flow_id: String,
     pub service_id: String,
     pub protocol_id: String,
@@ -41,6 +62,14 @@ pub struct FlowHistory {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Metadata {
+    #[serde(default = "tcp_transport")]
+    transport: String,
+    #[serde(default)]
+    datagram_count: usize,
+    #[serde(default)]
+    datagrams_client_to_server: u64,
+    #[serde(default)]
+    datagrams_server_to_client: u64,
     flow_id: String,
     service_id: String,
     protocol_id: String,
@@ -65,10 +94,14 @@ struct Buffer {
     truncated_client: bool,
     truncated_server: bool,
     discarded: bool,
+    udp: bool,
+    datagrams: VecDeque<Datagram>,
+    datagram_bytes: [usize; 2],
+    datagram_totals: [u64; 2],
 }
 
 enum WriteCommand {
-    Persist(FlowHistory),
+    Persist(Box<FlowHistory>),
     SetQuota {
         bytes: u64,
         reply: oneshot::Sender<Result<(), String>>,
@@ -154,7 +187,7 @@ impl HistoryStore {
                 let applied_quota = worker_quota.clone();
                 let completed = tokio::task::spawn_blocking(move || {
                     let result = match item {
-                        Some(WriteCommand::Persist(history)) => disk.persist(history),
+                        Some(WriteCommand::Persist(history)) => disk.persist(*history),
                         Some(WriteCommand::SetQuota { bytes, reply }) => {
                             let result = disk.set_quota(bytes);
                             if result.is_ok() {
@@ -217,9 +250,7 @@ impl HistoryStore {
     pub fn apply_services(&self, services: &[Service]) {
         let enabled: HashSet<String> = services
             .iter()
-            .filter(|service| {
-                service.transport == hydra_domain::Transport::Tcp && service.retain_history
-            })
+            .filter(|service| service.retain_history)
             .map(|service| service.id.clone())
             .collect();
         *self
@@ -257,6 +288,7 @@ impl HistoryStore {
         }
         let mut active = self.0.active.lock().unwrap_or_else(|e| e.into_inner());
         if active.len() >= MAX_ACTIVE || active.contains_key(&flow_id) {
+            self.0.dropped.fetch_add(1, Ordering::Relaxed);
             return None;
         }
         let buffer = Arc::new(Mutex::new(Buffer {
@@ -271,6 +303,17 @@ impl HistoryStore {
             buffer,
             store: Arc::downgrade(&self.0),
         })
+    }
+
+    pub fn begin_udp(
+        &self,
+        flow_id: String,
+        service_id: String,
+        protocol_id: String,
+    ) -> Option<HistoryWriter> {
+        let writer = self.begin(flow_id, service_id, protocol_id)?;
+        writer.buffer.lock().unwrap_or_else(|e| e.into_inner()).udp = true;
+        Some(writer)
     }
 
     pub fn quota(&self) -> u64 {
@@ -346,7 +389,47 @@ impl HistoryStore {
 impl HistoryWriter {
     pub fn record(&mut self, direction: Direction, bytes: &[u8]) {
         let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
-        if buffer.discarded || bytes.is_empty() {
+        if buffer.discarded {
+            return;
+        }
+        if buffer.udp {
+            let index = usize::from(direction == Direction::ServerToClient);
+            buffer.datagram_totals[index] = buffer.datagram_totals[index].saturating_add(1);
+            let sequence = buffer.datagram_totals[0].saturating_add(buffer.datagram_totals[1]);
+            // Evict whole oldest datagrams only. Empty datagrams consume record
+            // capacity, so zero-byte traffic cannot grow memory without bound.
+            while buffer.datagrams.len() >= MAX_DATAGRAMS
+                || buffer.datagram_bytes[index].saturating_add(bytes.len()) > MAX_DIRECTION_BYTES
+            {
+                let Some(old) = buffer.datagrams.pop_front() else {
+                    break;
+                };
+                let old_index = usize::from(old.direction == 2);
+                buffer.datagram_bytes[old_index] -= old.data.len();
+                if old_index == 0 {
+                    buffer.truncated_client = true;
+                } else {
+                    buffer.truncated_server = true;
+                }
+            }
+            if bytes.len() > MAX_DIRECTION_BYTES {
+                if index == 0 {
+                    buffer.truncated_client = true;
+                } else {
+                    buffer.truncated_server = true;
+                }
+                return;
+            }
+            buffer.datagram_bytes[index] += bytes.len();
+            buffer.datagrams.push_back(Datagram {
+                direction: if index == 0 { 1 } else { 2 },
+                occurred_at_ms: now_ms(),
+                sequence,
+                data: bytes.to_vec(),
+            });
+            return;
+        }
+        if bytes.is_empty() {
             return;
         }
         let Buffer {
@@ -362,7 +445,7 @@ impl HistoryWriter {
         }
     }
 
-    /// Returns true if history was intentionally discarded or could not be queued.
+    /// Returns true if the retained history is incomplete or could not be queued.
     pub fn finish(
         self,
         closed_at_ms: i64,
@@ -382,6 +465,10 @@ impl HistoryWriter {
             return false;
         }
         let history = FlowHistory {
+            transport: if buffer.udp { "udp" } else { "tcp" }.into(),
+            datagrams: buffer.datagrams.iter().cloned().collect(),
+            datagrams_client_to_server: buffer.datagram_totals[0],
+            datagrams_server_to_client: buffer.datagram_totals[1],
             flow_id: self.flow_id.clone(),
             service_id: buffer.service_id.clone(),
             protocol_id: buffer.protocol_id.clone(),
@@ -392,21 +479,25 @@ impl HistoryWriter {
             client_to_server: buffer.client.clone(),
             server_to_client: buffer.server.clone(),
             truncated_client_to_server: buffer.truncated_client
-                || bytes_client_to_server > buffer.client.len() as u64,
+                || (!buffer.udp && bytes_client_to_server > buffer.client.len() as u64),
             truncated_server_to_client: buffer.truncated_server
-                || bytes_server_to_client > buffer.server.len() as u64,
+                || (!buffer.udp && bytes_server_to_client > buffer.server.len() as u64),
             history_truncated: buffer.truncated_client
                 || buffer.truncated_server
-                || bytes_client_to_server > buffer.client.len() as u64
-                || bytes_server_to_client > buffer.server.len() as u64,
+                || (!buffer.udp && bytes_client_to_server > buffer.client.len() as u64)
+                || (!buffer.udp && bytes_server_to_client > buffer.server.len() as u64),
         };
         store
             .pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(self.flow_id.clone());
-        match store.writer.try_send(WriteCommand::Persist(history)) {
-            Ok(()) => false,
+        let truncated = history.history_truncated;
+        match store
+            .writer
+            .try_send(WriteCommand::Persist(Box::new(history)))
+        {
+            Ok(()) => truncated,
             Err(_) => {
                 store
                     .pending
@@ -487,6 +578,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn udp_history_retention_is_enabled_for_configured_udp_services() {
+        let dir = Directory::new();
+        let store = HistoryStore::open(&dir.0).await.unwrap();
+        let mut udp = service(true);
+        udp.transport = Transport::Udp;
+        store.apply_services(&[udp]);
+        assert!(
+            store
+                .begin(uuid::Uuid::new_v4().to_string(), "svc".into(), "raw".into())
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_history_roundtrips_empty_binary_direction_order_and_timestamps() {
+        let dir = Directory::new();
+        let store = HistoryStore::open(&dir.0).await.unwrap();
+        store.apply_services(&[service(true)]);
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut writer = store
+            .begin_udp(id.clone(), "svc".into(), "utf8".into())
+            .unwrap();
+        writer.record(Direction::ClientToServer, &[0, 255, 1]);
+        writer.record(Direction::ServerToClient, &[]);
+        writer.record(Direction::ClientToServer, &[]);
+        writer.record(Direction::ServerToClient, &[255, 0]);
+        assert!(!writer.finish(now_ms(), 3, 2));
+        let saved = stored(&store, &id).await;
+        assert_eq!(saved.transport, "udp");
+        assert_eq!(
+            saved
+                .datagrams
+                .iter()
+                .map(|d| (d.direction, d.sequence, d.data.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, 1, vec![0, 255, 1]),
+                (2, 2, vec![]),
+                (1, 3, vec![]),
+                (2, 4, vec![255, 0])
+            ]
+        );
+        assert!(
+            saved
+                .datagrams
+                .windows(2)
+                .all(|d| d[0].occurred_at_ms <= d[1].occurred_at_ms)
+        );
+        assert!(
+            saved
+                .datagrams
+                .iter()
+                .all(|d| d.occurred_at_ms >= saved.opened_at_ms
+                    && d.occurred_at_ms <= saved.closed_at_ms)
+        );
+        assert_eq!(
+            (
+                saved.datagrams_client_to_server,
+                saved.datagrams_server_to_client
+            ),
+            (2, 2)
+        );
+        assert!(!saved.history_truncated);
+        assert!(saved.client_to_server.is_empty() && saved.server_to_client.is_empty());
+        drop(store);
+        let reopened = HistoryStore::open(&dir.0).await.unwrap();
+        assert_eq!(reopened.get(&id).await.unwrap().unwrap(), saved);
+    }
+
+    #[tokio::test]
+    async fn udp_tail_evicts_whole_datagrams_and_bounds_empty_datagram_count() {
+        let dir = Directory::new();
+        let store = HistoryStore::open(&dir.0).await.unwrap();
+        store.apply_services(&[service(true)]);
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut writer = store
+            .begin_udp(id.clone(), "svc".into(), "raw".into())
+            .unwrap();
+        for byte in [1, 2, 3] {
+            writer.record(Direction::ClientToServer, &vec![byte; 32_768]);
+        }
+        writer.record(Direction::ServerToClient, &[9]);
+        assert!(writer.finish(now_ms(), 98_304, 1));
+        let saved = stored(&store, &id).await;
+        assert_eq!(saved.datagrams.len(), 3);
+        assert_eq!(saved.datagrams[0].sequence, 2);
+        assert_eq!(saved.datagrams[0].data, vec![2; 32_768]);
+        assert_eq!(saved.datagrams[1].data, vec![3; 32_768]);
+        assert!(saved.truncated_client_to_server);
+        assert!(!saved.truncated_server_to_client);
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut writer = store
+            .begin_udp(id.clone(), "svc".into(), "raw".into())
+            .unwrap();
+        for _ in 0..MAX_DATAGRAMS + 9 {
+            writer.record(Direction::ClientToServer, &[]);
+        }
+        assert!(writer.finish(now_ms(), 0, 0));
+        let saved = stored(&store, &id).await;
+        assert_eq!(saved.datagrams.len(), MAX_DATAGRAMS);
+        assert_eq!(saved.datagrams[0].sequence, 10);
+        assert_eq!(saved.datagrams_client_to_server, (MAX_DATAGRAMS + 9) as u64);
+        assert!(saved.history_truncated && saved.truncated_client_to_server);
+    }
+
+    #[tokio::test]
+    async fn asynchronous_persistence_failure_counts_writer_loss() {
+        let dir = Directory::new();
+        let store = HistoryStore::open(&dir.0).await.unwrap();
+        store.apply_services(&[service(true)]);
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut writer = store
+            .begin_udp(id.clone(), "svc".into(), "raw".into())
+            .unwrap();
+        writer.record(Direction::ClientToServer, b"observed");
+        // The worker must refuse to overwrite an existing file and report loss.
+        write_private(&paths(&dir.0, &id).0, b"existing file").unwrap();
+        assert!(!writer.finish(now_ms(), 8, 0));
+        for _ in 0..100 {
+            if store.dropped() > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(store.dropped(), 1);
+        assert!(store.get(&id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn quota_is_applied_by_worker_and_persisted_without_restarting_relays() {
         let dir = Directory::new();
         let store = HistoryStore::open(&dir.0).await.unwrap();
@@ -536,7 +756,7 @@ mod tests {
         writer.record(Direction::ClientToServer, &vec![1; 70_000]);
         writer.record(Direction::ClientToServer, &[2, 3]);
         writer.record(Direction::ServerToClient, &[9, 8]);
-        assert!(!writer.finish(now_ms(), 70_002, 2));
+        assert!(writer.finish(now_ms(), 70_002, 2));
         let first = store.get(&flow_id).await.unwrap().unwrap();
         assert_eq!(first.client_to_server.len(), 65_536);
         assert_eq!(
@@ -648,6 +868,10 @@ mod tests {
 
         let oversized_id = uuid::Uuid::new_v4().to_string();
         let details = Metadata {
+            transport: "tcp".into(),
+            datagram_count: 0,
+            datagrams_client_to_server: 0,
+            datagrams_server_to_client: 0,
             flow_id: oversized_id.clone(),
             service_id: "svc".into(),
             protocol_id: "raw".into(),
@@ -678,6 +902,10 @@ mod tests {
             persist(
                 &dir.0,
                 FlowHistory {
+                    transport: "tcp".into(),
+                    datagrams: vec![],
+                    datagrams_client_to_server: 0,
+                    datagrams_server_to_client: 0,
                     flow_id: id,
                     service_id: "svc".into(),
                     protocol_id: "raw".into(),
@@ -716,6 +944,10 @@ mod tests {
         persist(
             &dir.0,
             FlowHistory {
+                transport: "tcp".into(),
+                datagrams: vec![],
+                datagrams_client_to_server: 0,
+                datagrams_server_to_client: 0,
                 flow_id: id.clone(),
                 service_id: "svc".into(),
                 protocol_id: "raw".into(),

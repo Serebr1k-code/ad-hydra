@@ -40,7 +40,7 @@ async function load(more=false) {
   if(disposed)return
   const received=flowRows({items:[flow],next_cursor:null})[0]
   if(!detail.value?.closed||received?.closed)detail.value=received
-  if(received?.closed&&received.transport!==2)void loadHistory()
+  if(received?.closed)void loadHistory()
   const page=await api<Page>(`${path}/messages?limit=100&include_blocked=${props.showBlocked===true}&newest_first=true${more&&cursor.value?'&after='+cursor.value:''}`)
   if(disposed||current!==request)return
   const initial=!messages.value.length
@@ -82,17 +82,17 @@ onUnmounted(()=>{disposed=true;request++})
    <Alert v-if="notice"><AlertDescription>{{notice}}</AlertDescription></Alert>
    <FlowCapture v-if="mode==='bytes'&&detail?.state!=='Closed'" :flow-id="flowId" :live="true" :auto-capture="rawProfile" />
    <section v-if="mode==='bytes'&&detail?.state==='Closed'" class="space-y-3">
-    <Alert v-if="udp"><AlertDescription>Saved gzip byte history is currently available for TCP only. UDP decoded messages are retained in Traffic Explorer; raw UDP samples require a live capture.</AlertDescription></Alert>
-    <p v-else-if="historyState==='loading'" role="status" class="text-sm text-muted-foreground">Loading saved stream history…</p>
+    <p v-if="historyState==='loading'" role="status" class="text-sm text-muted-foreground">Loading saved stream history…</p>
     <Alert v-else-if="historyState==='missing'" :variant="closureHistoryLost?'destructive':'default'"><AlertDescription>{{closureHistoryLost?'No history record was saved; capture capacity or storage limits caused history loss.':'No saved history is available. Retention may have been disabled, or the record may have expired or been evicted.'}}</AlertDescription></Alert>
     <Alert v-else-if="historyState==='active'"><AlertDescription>The stream is still active; refresh after it closes to load its saved history.</AlertDescription></Alert>
     <Alert v-else-if="historyState==='unavailable'" variant="destructive"><AlertDescription>Saved stream history is temporarily unavailable. Refresh to retry.</AlertDescription></Alert>
     <template v-if="historyState==='ready'&&history">
-     <p class="text-xs text-muted-foreground">{{history.segments.reduce((n,s)=>n+s.data.length,0)}} retained bytes · {{history.bytes_client_to_server}} client → server / {{history.bytes_server_to_client}} server → client</p>
+     <p class="text-xs text-muted-foreground">{{history.segments.reduce((n,s)=>n+s.data.length,0)}} retained bytes<span v-if="udp"> in {{history.segments.length}} datagrams</span> · {{history.bytes_client_to_server}} bytes forwarded client → server / {{history.bytes_server_to_client}} server → client</p>
+     <p class="text-xs text-muted-foreground">Captured before rule enforcement; retained bytes may include blocked traffic. Forwarded byte totals exclude blocked traffic.</p>
      <Alert v-if="history.history_truncated||history.truncated_client_to_server||history.truncated_server_to_client"><AlertDescription>History is truncated. Only the latest bounded bytes are retained; some data may have been lost.</AlertDescription></Alert>
      <p v-if="!history.segments.length" class="text-sm text-muted-foreground">The flow closed without any retained payload bytes.</p>
      <article v-for="(segment,index) in historySegments(history,side)" :key="index"  :data-direction="segment.direction" class="space-y-1 rounded-sm border-l-2 p-3 @3xl:w-[78%]" :class="segment.direction===1?'border-red-400/60 bg-red-500/5 @3xl:mr-auto':'border-blue-400/60 bg-blue-500/5 @3xl:ml-auto'">
-      <div class="text-[11px] text-muted-foreground">{{direction(segment.direction)}} · {{segment.data.length}} bytes<span v-if="segment.truncated"> · direction tail truncated</span></div>
+      <div class="text-[11px] text-muted-foreground">{{direction(segment.direction)}} · {{segment.data.length}} bytes<span v-if="segment.datagram"> · datagram #{{segment.sequence}} · {{timestamp(segment.occurred_at_ms)}}</span><span v-if="segment.truncated"> · direction tail truncated</span></div>
       <pre class="!max-h-none !rounded-none !border-0 !bg-transparent !p-0 font-mono !text-[13px] !leading-6">{{historyPreview(segment,byteMode)||'(empty)'}}</pre>
      </article>
     </template>
@@ -102,13 +102,13 @@ onUnmounted(()=>{disposed=true;request++})
     <p class="text-xs text-muted-foreground">Decoded fields in session order. Client traffic is red; server traffic is blue. Byte samples are available under Captured bytes.</p>
     <p v-if="loading&&!messages.length" role="status">Loading conversation…</p>
     <template v-if="hasHistoryTextFallback&&history">
-     <p class="text-xs text-muted-foreground">No parser messages were retained. Showing saved stream bytes as UTF-8, grouped by direction; packet timing and protocol fields are unavailable. Switch to Captured bytes for the default hex view.</p>
+     <p class="text-xs text-muted-foreground">No parser messages were retained. Showing saved bytes as UTF-8. UDP datagrams retain their boundaries and arrival order; TCP bytes are grouped by direction. Switch to Captured bytes for the default hex view.</p>
      <article v-for="(segment,index) in historyTextSegments(history,side)" :key="index"  :data-direction="segment.direction" class="space-y-1 rounded-sm border-l-2 p-3 @3xl:w-[78%]" :class="segment.direction===1?'border-red-400/60 bg-red-500/5 @3xl:mr-auto':'border-blue-400/60 bg-blue-500/5 @3xl:ml-auto'">
-      <div class="text-[11px] text-muted-foreground">{{direction(segment.direction)}} · {{segment.data.length}} retained bytes<span v-if="segment.truncated"> · direction tail truncated</span></div>
+      <div class="text-[11px] text-muted-foreground">{{direction(segment.direction)}} · {{segment.data.length}} retained bytes<span v-if="segment.datagram"> · datagram #{{segment.sequence}} · {{timestamp(segment.occurred_at_ms)}}</span><span v-if="segment.truncated"> · direction tail truncated</span></div>
       <pre class="!max-h-none !rounded-none !border-0 !bg-transparent !p-0 font-mono !text-[13px] !leading-6">{{historyPreview(segment,'utf8')||'(empty)'}}</pre>
      </article>
     </template>
-    <p v-else-if="!loading&&!messages.length" class="py-8 text-sm text-muted-foreground">{{udp?'No decoded UDP messages were retained. Raw UDP bytes require a live capture; closed UDP sessions do not have saved gzip byte history.':'No decoded messages were retained for this session. Unknown and encrypted protocols still have session metadata. Closed streams appear here as UTF-8 when saved history is available; use Captured bytes to inspect the next chunk on a live session.'}}</p>
+    <p v-else-if="!loading&&!messages.length" class="py-8 text-sm text-muted-foreground">No decoded messages were retained for this session. Unknown and encrypted protocols still have session metadata. Closed conversations appear here as UTF-8 when saved history is available; use Captured bytes for hex or to inspect the next chunk on a live session.</p>
     <article v-for="message in visible" :key="message.message_id" :data-message-id="message.message_id" :data-direction="message.direction" class="rounded-sm border-l-2 p-3 @3xl:w-[78%]" :class="message.direction===1?'border-red-400/60 bg-red-500/5 @3xl:mr-auto':message.direction===2?'border-blue-400/60 bg-blue-500/5 @3xl:ml-auto':'border-border'">
      <div class="mb-1 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground"><span :class="message.direction===1?'text-red-300':message.direction===2?'text-blue-300':''">{{direction(message.direction)}}</span><span>{{timestamp(message.occurred_ms)}}</span><span>{{message.message_type||message.protocol_id}}</span><span v-if="message.truncated">Truncated</span></div>
      <pre class="!max-h-none !rounded-none !border-0 !bg-transparent !p-0 font-mono !text-[13px] !leading-6">{{streamText(message)}}</pre>

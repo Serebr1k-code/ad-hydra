@@ -32,9 +32,15 @@ pub struct Sample {
 pub struct HistorySegment {
     pub direction: i32,
     pub data: Vec<u8>,
+    pub datagram: bool,
+    pub occurred_at_ms: i64,
+    pub sequence: u64,
 }
 #[derive(Serialize, ToSchema)]
 pub struct FlowHistory {
+    pub transport: i32,
+    pub datagrams_client_to_server: u64,
+    pub datagrams_server_to_client: u64,
     pub flow_id: String,
     pub service_id: String,
     pub protocol_id: String,
@@ -248,6 +254,9 @@ async fn flow_history(
     .await?;
     let history = result.map_err(map_history_status)?;
     Ok(Json(FlowHistory {
+        transport: history.transport,
+        datagrams_client_to_server: history.datagrams_client_to_server,
+        datagrams_server_to_client: history.datagrams_server_to_client,
         flow_id: history.flow_id,
         service_id: history.service_id,
         protocol_id: history.protocol_id,
@@ -261,6 +270,9 @@ async fn flow_history(
             .map(|segment| HistorySegment {
                 direction: segment.direction,
                 data: segment.data,
+                datagram: segment.datagram,
+                occurred_at_ms: segment.occurred_at_ms,
+                sequence: segment.sequence,
             })
             .collect(),
         truncated_client_to_server: history.truncated_client_to_server,

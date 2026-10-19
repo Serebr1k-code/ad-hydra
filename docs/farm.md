@@ -143,3 +143,46 @@ exploit is on another editor page. Removed catalog entries fall back to IDs.
 **Logs** opens a modal with run details, live stdout/stderr, paged retained output
 and per-target flag counts. Close with Close logs, Escape or the close icon; focus
 returns to the invoking button. Polling stops for log panels when the modal closes.
+
+## Exploit effectiveness matrix
+
+The Farm page includes a real exploit × team table, with independently paginated
+20-row exploit/service and 10-column team axes. Filter by Farm service and runs
+created in the last hour, 24 hours, seven days, or all retained history. Service
+filtering happens before pagination. A deleted exploit remains represented while
+its runs remain retained. Team identities distinguish legacy targets from the new
+team catalog; deleted teams fall back to their captured names and IPs. Current
+catalog names and hosts label headers; run logs retain the original endpoint.
+A changed exploit service creates a separate row for its historical service.
+
+Every populated cell shows run and recorded target-attempt counts, latest target
+outcome and duration when available, distinct new/duplicate flag counts, accepted
+flags, and a Logs action opening the existing run modal. A cell with no selected
+runs says **No runs**; a run that produced no flags shows zero counts. The matrix
+refreshes on demand, so it does not query SQLite while the page is hidden.
+
+Actual target attempts are stored separately from aggregate runs. New per-target
+host and sandbox executions record their start, end, state and exit code, with
+millisecond timestamps. Sandbox attempt duration includes setup. Batch execution
+records one shared process with an empty target identity: its result is never
+presented as an individual team's result. Old runs without recorded attempts show
+**Target outcome unknown**. Cancellation, shutdown and restart finish outstanding
+recorded attempts with an appropriate terminal state. These outcome rows cascade
+with run retention; migration0023 adds them without inventing historical outcomes.
+
+Accepted credit uses the captured flag's original run and target plus its real
+submission state. Seeing the same flag again does not give another cell credit,
+and an exploit exiting successfully never implies checker acceptance. **Last
+accepted capture** is the original capture timestamp of a flag now accepted, not
+the time the checker answered. Captures in an older run stay outside a selected
+run-creation window even if submitted recently. New/duplicate counts retain the
+existing partial-history marker. Values and digests are absent from the matrix
+response; opening the existing Logs modal remains an explicit diagnostic action.
+
+`GET /api/v1/farm/effectiveness` accepts `service_id` (empty for legacy targets),
+`window=1h|24h|7d|retained`, `row_offset` and `team_offset`. Omitting service selects
+all services, and the default window is24h. Page offsets are bounded to20,000;
+responses contain at most200 cells and next offsets. Reads authenticate and audit
+the real requesting actor and selected filters. The API exposes aggregate run
+fields separately from optional actual target-attempt fields; run timestamps are
+seconds and target-attempt timestamps are milliseconds since the Unix epoch.

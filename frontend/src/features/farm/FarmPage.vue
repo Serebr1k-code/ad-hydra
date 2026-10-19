@@ -15,6 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import FarmCatalog from './FarmCatalog.vue'
 import ExploitForm from './ExploitForm.vue'
 import FarmRuns from './FarmRuns.vue'
+import FarmEffectiveness from './FarmEffectiveness.vue'
 import FarmRunDetailView from './FarmRunDetail.vue'
 import {Dialog,DialogContent,DialogHeader,DialogTitle,DialogDescription} from '@/components/ui/dialog'
 const empty = <T,>(): FarmPage<T> => ({ items: [], next_cursor: null })
@@ -72,7 +73,7 @@ async function readDetail(id: string) {
     }
   } finally { detailLoading.value = false }
 }
-function showLogs(run: FarmRun) { logTrigger=document.activeElement instanceof HTMLElement?document.activeElement:null;detail.value=null;detailRefreshUntil = Date.now() + 10000; requestedDetail.value = run.id; void action(() => readDetail(run.id), false) }
+function showLogs(run: Pick<FarmRun, 'id'>) { logTrigger=document.activeElement instanceof HTMLElement?document.activeElement:null;detail.value=null;detailRefreshUntil = Date.now() + 10000; requestedDetail.value = run.id; void action(() => readDetail(run.id), false) }
 function closeLogs() { requestedDetail.value = ''; detail.value = null }
 function restoreLogFocus(event:Event){if(logTrigger?.isConnected){event.preventDefault();logTrigger.focus()}}
 function showVersions(e: Exploit) {
@@ -125,6 +126,7 @@ onUnmounted(() => { mounted = false; if (timer) clearInterval(timer) })
       </DataTable>
       <div class="flex gap-2"><Button v-if="cursors.exploits" variant="outline" :disabled="busy" @click="first('exploits')">First exploits</Button><Button v-if="exploits.items.length === 100 && exploits.next_cursor" variant="outline" :disabled="busy" @click="next('exploits')">Next exploits</Button></div>
     </section>
+    <FarmEffectiveness :services="services" @logs="id=>showLogs({id})" />
     <DisclosureSection v-model:open="runsOpen" title="Run history" :description="`${runs.items.length} runs on this page`">
     <FarmRuns :runs="runs.items" :busy="busy" @refresh="action(load, false)" @logs="showLogs" @cancel="cancel" @retry="retry" />
     <p class="text-sm text-muted-foreground">Runs refresh every 2 seconds, newest first. Gzip compressed logs are retained for 7 days, with at most 1,000 completed runs, paged output with no 1 MiB capture cap, and a total compressed disk budget of 64 MiB. Older output rotates when the shared budget is full. New/existing counts are distinct flag values per target process; * marks partial historical counts.</p>

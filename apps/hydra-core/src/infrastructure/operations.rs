@@ -337,6 +337,12 @@ impl farm::Runner for Runner {
                 }
                 append_bounded(&mut output.stdout, label.as_bytes());
                 append_bounded(&mut output.stderr, label.as_bytes());
+                let (result_target, scope) = if job.manifest.mode == "batch" {
+                    ("", "batch")
+                } else {
+                    (target_id.as_str(), "per_target")
+                };
+                farm::process_results::started(&db, &job.run_id, result_target, scope).await?;
                 let result = sandbox
                     .run(
                         sandbox::Job {
@@ -358,7 +364,29 @@ impl farm::Runner for Runner {
                         },
                         cancel.clone(),
                     )
-                    .await?;
+                    .await;
+                let result = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        farm::process_results::finished(
+                            &db,
+                            &job.run_id,
+                            result_target,
+                            "failed",
+                            None,
+                        )
+                        .await?;
+                        return Err(error.into());
+                    }
+                };
+                farm::process_results::finished(
+                    &db,
+                    &job.run_id,
+                    result_target,
+                    sandbox_outcome_state(&result),
+                    result.exit_code,
+                )
+                .await?;
                 persist_worker_output(
                     &db,
                     &job.run_id,
@@ -413,6 +441,17 @@ impl farm::Runner for Runner {
             }
             Ok(output)
         })
+    }
+}
+fn sandbox_outcome_state(result: &sandbox::RunOutcome) -> &'static str {
+    if result.cancelled {
+        "cancelled"
+    } else if result.timed_out {
+        "timeout"
+    } else if result.success {
+        "succeeded"
+    } else {
+        "failed"
     }
 }
 async fn persist_worker_output(
@@ -492,6 +531,27 @@ pub(crate) fn batch_captures(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sandbox_attempt_state_uses_its_actual_result() {
+        let mut result = sandbox::RunOutcome {
+            success: true,
+            exit_code: Some(0),
+            timed_out: false,
+            cancelled: false,
+            stdout: vec![],
+            stderr: vec![],
+            stdout_lost_bytes: 0,
+            stderr_lost_bytes: 0,
+        };
+        assert_eq!(sandbox_outcome_state(&result), "succeeded");
+        result.success = false;
+        result.exit_code = Some(7);
+        assert_eq!(sandbox_outcome_state(&result), "failed");
+        result.timed_out = true;
+        assert_eq!(sandbox_outcome_state(&result), "timeout");
+        result.cancelled = true;
+        assert_eq!(sandbox_outcome_state(&result), "cancelled");
+    }
     #[tokio::test]
     async fn batch_flags_require_full_match_and_selected_target() {
         use crate::{

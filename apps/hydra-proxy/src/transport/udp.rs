@@ -53,6 +53,8 @@ impl Context {
             .store(self.start.elapsed().as_millis() as u64, Ordering::Relaxed);
     }
     fn inspect(&self, direction: Direction, bytes: &[u8]) -> bool {
+        // Retain observed bytes before enforcement, matching TCP history.
+        self.flow.record_history(direction, bytes);
         let size_fields = self
             .flow
             .body_sizes
@@ -141,17 +143,13 @@ impl Context {
                     &self.config,
                     &self.flow.id,
                     &{
-                        let mut fields =
-                            self.network_fields(if direction == Direction::ClientToServer {
-                                "client_to_server"
-                            } else {
-                                "server_to_client"
-                            });
-                        fields.insert(
+                        // The fallback still has complete datagram byte metadata,
+                        // even when a stateful decoder emits no parsed message.
+                        live_fields.insert(
                             "packet.size".into(),
                             hydra_domain::FieldValue::Uint(bytes.len() as u64),
                         );
-                        fields
+                        live_fields
                     },
                     false,
                     ""

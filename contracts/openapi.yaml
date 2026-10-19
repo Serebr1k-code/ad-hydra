@@ -154,6 +154,49 @@ paths:
           description: ''
         '503':
           description: ''
+  /api/v1/farm/effectiveness:
+    get:
+      tags:
+      - farm
+      operationId: effectiveness
+      parameters:
+      - name: service_id
+        in: query
+        description: Farm service ID; empty selects legacy targets
+        required: false
+        schema:
+          type: string
+      - name: window
+        in: query
+        description: 1h, 24h (default), 7d, or retained; filters run creation time
+        required: false
+        schema:
+          type: string
+      - name: row_offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: team_offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EffectivenessMatrix'
+        '400':
+          description: ''
+        '401':
+          description: ''
   /api/v1/farm/exploits:
     get:
       tags:
@@ -2226,6 +2269,190 @@ components:
           format: int32
           minimum: 0
       additionalProperties: false
+    EffectivenessCell:
+      type: object
+      required:
+      - exploit_id
+      - team_key
+      - runs
+      - target_attempts
+      - new_flags
+      - duplicate_flags
+      - accepted_flags
+      - flag_counts_complete
+      properties:
+        accepted_flags:
+          type: integer
+          format: int32
+          description: Accepted flags credited exclusively to their original run and target.
+          minimum: 0
+        duplicate_flags:
+          type: integer
+          format: int32
+          minimum: 0
+        exploit_id:
+          type: string
+        flag_counts_complete:
+          type: boolean
+        last_accepted_capture_at:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Capture time of the most recent originally captured flag now accepted.
+        latest:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/EffectivenessLatestRun'
+        new_flags:
+          type: integer
+          format: int32
+          minimum: 0
+        runs:
+          type: integer
+          format: int32
+          minimum: 0
+        service_id:
+          type:
+          - string
+          - 'null'
+        target_attempts:
+          type: integer
+          format: int32
+          description: Recorded target attempts; excludes shared batch processes and unknown legacy attempts.
+          minimum: 0
+        team_key:
+          type: string
+    EffectivenessLatestRun:
+      type: object
+      required:
+      - id
+      - status
+      - mode
+      - created_at
+      properties:
+        created_at:
+          type: integer
+          format: int64
+        exit_code:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        finished_at:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        id:
+          type: string
+        mode:
+          type: string
+        process_exit_code:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        process_finished_at:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        process_started_at:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Milliseconds since Unix epoch; sandbox attempts include setup.
+        process_status:
+          type:
+          - string
+          - 'null'
+        started_at:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        status:
+          type: string
+    EffectivenessMatrix:
+      type: object
+      required:
+      - rows
+      - teams
+      - cells
+      - window
+      - generated_at
+      properties:
+        cells:
+          type: array
+          items:
+            $ref: '#/components/schemas/EffectivenessCell'
+        generated_at:
+          type: integer
+          format: int64
+        next_row_offset:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        next_team_offset:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/EffectivenessRow'
+        since:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        teams:
+          type: array
+          items:
+            $ref: '#/components/schemas/EffectivenessTeam'
+        window:
+          type: string
+    EffectivenessRow:
+      type: object
+      required:
+      - exploit_id
+      - name
+      - service_name
+      properties:
+        exploit_id:
+          type: string
+        name:
+          type: string
+        service_id:
+          type:
+          - string
+          - 'null'
+        service_name:
+          type: string
+    EffectivenessTeam:
+      type: object
+      required:
+      - key
+      - id
+      - name
+      properties:
+        host:
+          type:
+          - string
+          - 'null'
+        id:
+          type: string
+        key:
+          type: string
+          description: Namespaced catalog identity; legacy targets and teams remain distinct.
+        name:
+          type: string
     ExecutionMode:
       type: string
       enum:
@@ -2482,6 +2709,9 @@ components:
     FlowHistory:
       type: object
       required:
+      - transport
+      - datagrams_client_to_server
+      - datagrams_server_to_client
       - flow_id
       - service_id
       - protocol_id
@@ -2505,6 +2735,14 @@ components:
         closed_at_ms:
           type: integer
           format: int64
+        datagrams_client_to_server:
+          type: integer
+          format: int64
+          minimum: 0
+        datagrams_server_to_client:
+          type: integer
+          format: int64
+          minimum: 0
         flow_id:
           type: string
         history_truncated:
@@ -2520,6 +2758,9 @@ components:
             $ref: '#/components/schemas/HistorySegment'
         service_id:
           type: string
+        transport:
+          type: integer
+          format: int32
         truncated_client_to_server:
           type: boolean
         truncated_server_to_client:
@@ -2622,6 +2863,9 @@ components:
       required:
       - direction
       - data
+      - datagram
+      - occurred_at_ms
+      - sequence
       properties:
         data:
           type: array
@@ -2629,9 +2873,18 @@ components:
             type: integer
             format: int32
             minimum: 0
+        datagram:
+          type: boolean
         direction:
           type: integer
           format: int32
+        occurred_at_ms:
+          type: integer
+          format: int64
+        sequence:
+          type: integer
+          format: int64
+          minimum: 0
     HostRuntimeSettings:
       type: object
       required:
@@ -2837,6 +3090,7 @@ components:
       required:
       - connected
       - history_per_service_bytes
+      - history_dropped
       - proxy_epoch_id
       - active_flows
       - applied_services_revision
@@ -2877,6 +3131,10 @@ components:
           format: int64
           minimum: 0
         events_received:
+          type: integer
+          format: int64
+          minimum: 0
+        history_dropped:
           type: integer
           format: int64
           minimum: 0

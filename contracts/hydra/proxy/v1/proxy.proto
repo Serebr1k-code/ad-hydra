@@ -181,6 +181,7 @@ message ProxyStatus {
   uint64 critical_dropped = 12;
   uint64 sample_dropped = 13;
   uint64 history_per_service_bytes = 14;
+  uint64 history_dropped = 15;
 }
 message ApplyServiceSnapshotRequest {
   uint64 revision = 1;
@@ -277,6 +278,10 @@ message FlowClosed {
 message HistorySegment {
   Direction direction = 1;
   bytes data = 2;
+  // UDP records preserve whole datagrams, including zero-byte datagrams.
+  bool datagram = 3;
+  int64 occurred_at_ms = 4;
+  uint64 sequence = 5;
 }
 message GetFlowHistoryRequest { string flow_id = 1; }
 message GetFlowHistoryReply {
@@ -291,6 +296,10 @@ message GetFlowHistoryReply {
   bool truncated_client_to_server = 9;
   bool truncated_server_to_client = 10;
   bool history_truncated = 11;
+  Transport transport = 12;
+  // Observed datagrams, including blocked traffic; byte totals above are forwarded bytes.
+  uint64 datagrams_client_to_server = 13;
+  uint64 datagrams_server_to_client = 14;
 }
 message FilterPreviewTarget {
   string flow_id = 1;

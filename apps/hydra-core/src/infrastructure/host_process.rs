@@ -160,7 +160,20 @@ pub(crate) async fn run(
         if job.manifest.mode == "batch" {
             command.env("HYDRA_TARGETS_FILE", &targets_file);
         }
-        let mut child = command.spawn()?;
+        let (result_target, scope) = if job.manifest.mode == "batch" {
+            ("", "batch")
+        } else {
+            (target.id.as_str(), "per_target")
+        };
+        farm::process_results::started(&db, &job.run_id, result_target, scope).await?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                farm::process_results::finished(&db, &job.run_id, result_target, "failed", None)
+                    .await?;
+                return Err(error.into());
+            }
+        };
         let group = ProcessGroup(
             child
                 .id()
@@ -177,15 +190,18 @@ pub(crate) async fn run(
         let mut out_chunk = [0u8; 8192];
         let mut err_chunk = [0u8; 8192];
         let mut interval = tokio::time::interval(Duration::from_millis(300));
+        let mut interruption = None;
         let status = loop {
             tokio::select! {
                 status = child.wait() => break status?,
                 _ = cancel.cancelled() => {
+                    interruption = Some("cancelled");
                     output.status = "cancelled".into();
                     let _ = killpg(Pid::from_raw(group.0), Signal::SIGKILL);
                     break child.wait().await?;
                 }
                 _ = tokio::time::sleep_until(deadline) => {
+                    interruption = Some("timeout");
                     output.status = "timeout".into();
                     let _ = killpg(Pid::from_raw(group.0), Signal::SIGKILL);
                     break child.wait().await?;
@@ -209,6 +225,19 @@ pub(crate) async fn run(
                 },
             }
         };
+        let target_status = interruption.unwrap_or(if status.success() {
+            "succeeded"
+        } else {
+            "failed"
+        });
+        farm::process_results::finished(
+            &db,
+            &job.run_id,
+            result_target,
+            target_status,
+            status.code(),
+        )
+        .await?;
         // A script may leave background children holding its pipes after it exits.
         drop(group);
         let drain = async {
@@ -396,6 +425,12 @@ mod tests {
         )
         .await
         .unwrap();
+        db.migrate(
+            23,
+            include_str!("../../../../migrations/0023_farm_process_results.sql"),
+        )
+        .await
+        .unwrap();
         // Minimal row, using the same durable stream columns as the scheduler.
         db.run(|connection| {
             connection.execute("INSERT INTO farm_targets VALUES('team','Team one','127.0.0.1',9000,'tcp',1,1,0,0,'actor')", [])?;
@@ -448,6 +483,69 @@ mod tests {
             work_dir: directory.join("runtime"),
         };
         (Directory(directory), settings, job, flags, db)
+    }
+
+    #[tokio::test]
+    async fn per_target_attempts_keep_each_exit_status_and_batch_has_one_outcome() {
+        for batch in [false, true] {
+            let (_directory, settings, mut job, flags, db) =
+                fixture(b"if [ \"$1\" = 127.0.0.1 ]; then exit 7; fi; exit 0\n").await;
+            let mut second = job.targets[0].clone();
+            second.id = "team-two".into();
+            second.host = "127.0.0.2".into();
+            job.targets.push(second);
+            if batch {
+                job.manifest.mode = "batch".into();
+            }
+            let output = run(settings, job, CancellationToken::new(), flags, db.clone())
+                .await
+                .unwrap();
+            assert_eq!(output.status, "failed");
+            let results = db.run(|connection| {
+                Ok(connection.prepare("SELECT target_id,scope,status,exit_code,started_at,finished_at FROM farm_process_results WHERE run_id='run' ORDER BY target_id")?
+                    .query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,Option<i32>>(3)?,row.get::<_,i64>(4)?,row.get::<_,Option<i64>>(5)?)))?
+                    .collect::<Result<Vec<_>,_>>()?)
+            }).await.unwrap();
+            if batch {
+                assert_eq!(results.len(), 1);
+                assert_eq!(
+                    (&*results[0].0, &*results[0].1, &*results[0].2, results[0].3),
+                    ("", "batch", "failed", Some(7))
+                );
+            } else {
+                assert_eq!(results.len(), 2);
+                assert_eq!(
+                    (&*results[0].0, &*results[0].2, results[0].3),
+                    ("team", "failed", Some(7))
+                );
+                assert_eq!(
+                    (&*results[1].0, &*results[1].2, results[1].3),
+                    ("team-two", "succeeded", Some(0))
+                );
+            }
+            assert!(
+                results
+                    .iter()
+                    .all(|row| row.5.is_some_and(|finished| finished >= row.4))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_spawn_records_terminal_target_attempt() {
+        let (_directory, mut settings, mut job, flags, db) = fixture(b"unused").await;
+        job.manifest.runtime = "python".into();
+        settings.uv = settings.work_dir.join("missing-uv-executable");
+        assert!(
+            run(settings, job, CancellationToken::new(), flags, db.clone())
+                .await
+                .is_err()
+        );
+        db.run(|connection| {
+            let (status,code,end):(String,Option<i32>,Option<i64>)=connection.query_row("SELECT status,exit_code,finished_at FROM farm_process_results WHERE run_id='run' AND target_id='team'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+            assert_eq!(status,"failed");assert!(code.is_none());assert!(end.is_some());
+            Ok(())
+        }).await.unwrap();
     }
 
     #[tokio::test]
@@ -654,6 +752,10 @@ printf 'error-output' >&2
             .unwrap()
             .unwrap();
         assert_eq!(output.status, "cancelled");
+        db.run(|db| {
+            let (state,finished):(String,Option<i64>)=db.query_row("SELECT status,finished_at FROM farm_process_results WHERE run_id='run' AND target_id='team'",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            assert_eq!(state,"cancelled"); assert!(finished.is_some()); Ok(())
+        }).await.unwrap();
         assert!(output.stdout.ends_with(b"before-cancel\n"));
         let bytes = db
             .run(|connection| {
@@ -675,11 +777,15 @@ printf 'error-output' >&2
         job.manifest.timeout_seconds = 1;
         let output = tokio::time::timeout(
             Duration::from_secs(3),
-            run(settings, job, CancellationToken::new(), flags, db),
+            run(settings, job, CancellationToken::new(), flags, db.clone()),
         )
         .await
         .unwrap()
         .unwrap();
+        db.run(|db| {
+            let (state,finished):(String,Option<i64>)=db.query_row("SELECT status,finished_at FROM farm_process_results WHERE run_id='run' AND target_id='team'",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            assert_eq!(state,"timeout"); assert!(finished.is_some()); Ok(())
+        }).await.unwrap();
         assert_eq!(output.status, "timeout");
         assert!(output.stdout.ends_with(b"started"));
         assert_eq!(output.exit_code, None);

@@ -68,6 +68,10 @@ export const operations = {
     "method": "POST",
     "path": "/api/v1/diagnostics/probe"
   },
+  "effectiveness": {
+    "method": "GET",
+    "path": "/api/v1/farm/effectiveness"
+  },
   "exploit": {
     "method": "PUT",
     "path": "/api/v1/farm/exploits"

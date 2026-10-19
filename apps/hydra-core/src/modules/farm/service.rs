@@ -183,6 +183,12 @@ impl Farm {
             )
             .await?;
         auth.db
+            .migrate(
+                23,
+                include_str!("../../../../../migrations/0023_farm_process_results.sql"),
+            )
+            .await?;
+        auth.db
             .run(|db| {
                 let tx = db.transaction()?;
                 tx.execute("UPDATE farm_runs SET logs_complete=1 WHERE status NOT IN ('queued','running')",[])?;
@@ -190,6 +196,7 @@ impl Farm {
                     .prepare("SELECT id,initiated_by FROM farm_runs WHERE status='running'")?
                     .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
                     .collect::<Result<Vec<_>, _>>()?;
+                tx.execute("UPDATE farm_process_results SET status='interrupted',finished_at=?1 WHERE status='running'",[super::process_results::timestamp_millis()])?;
                 for (id, user) in rows {
                     tx.execute(
                         "UPDATE farm_runs SET logs_complete=1,status='interrupted',finished_at=?2 WHERE id=?1",

@@ -23,6 +23,7 @@ scripts/check-contracts.sh
 python3 -m pip install -r scripts/requirements.txt
 python3 scripts/generate-frontend.py --check
 python3 tests/e2e/relay.py
+python3 tests/e2e/udp_history.py
 python3 tests/e2e/http_filters.py
 python3 tests/e2e/operations.py
 python3 tests/e2e/diagnostics.py
@@ -106,6 +107,6 @@ Only Core opens SQLite; WAL, private files, a bounded database size and traffic 
 
 For backups, stop Core and copy its entire private state directory, including SQLite sidecars, signing key, immutable protocol/exploit files; preserve ownership/modes. Copy Proxy state separately. Treat both backups as secrets. Do not copy a live SQLite database file alone.
 
-The console includes bulk filter toggles, saved-field rule creation, protocol framing profiles/schema inspection, traffic field/rule/flag search and comparison, paginated flags and submissions, triage, run retry, and an audited settings/configuration export. Filter changes display desired and applied revisions separately. Configuration export covers services and rules; use the backup procedure for full recovery.
+The console includes service-colored filter cards with per-rule switches and explicit applied status, bulk filter toggles, saved-field rule creation, protocol framing profiles/schema inspection, traffic field/rule/flag search and comparison, paginated flags and submissions, triage, run retry, and an audited settings/configuration export. Filter changes display desired and applied revisions separately. Farm includes an exploit × team effectiveness matrix with latest logs, per-target outcomes and attributed flag counts; see [Farm](docs/farm.md). TCP and UDP both retain bounded gzip traffic history and support saved-history filter preview; see [Traffic](docs/traffic-view.md). Configuration export covers services and rules; use the backup procedure for full recovery.
 
 See [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for the reproducible bounded loopback load measurement and its limits. Production systemd setup uses separate Core/Proxy users: [deploy/README.md](deploy/README.md).

@@ -13,6 +13,7 @@ python3 -m pip install -r scripts/requirements.txt
 python3 scripts/generate-frontend.py --check
 find frontend/src -name '*.js' -exec node --check {} \;
 python3 tests/e2e/relay.py
+python3 tests/e2e/udp_history.py
 python3 tests/e2e/browser.py
 cargo build --release --locked --workspace
 ```
@@ -23,8 +24,9 @@ Resource smoke command, if systemd user scopes are available:
 
 ```sh
 systemd-run --user --scope --quiet -p MemoryMax=2G -p CPUQuota=200% /usr/bin/python3 tests/e2e/relay.py
+python3 tests/e2e/udp_history.py
 ```
 
-Both binaries set two Tokio runtime workers. The relay test additionally sets two CPU affinity slots. Results and limitations belong in PROGRESS.md. Do not infer sustained performance from this short check.
+Proxy sizes Tokio workers from available CPUs and bounds its blocking pool; Core uses its configured two workers. The relay test additionally sets two CPU affinity slots. Results and limitations belong in PROGRESS.md. Do not infer sustained performance from this short check.
 
 `tests/sandbox/run-linux.py` and `tests/e2e/farm_execution.py` are explicit opt-in execution fixtures. They are excluded from ordinary CI. The former performs provisioning only within its own transient delegated test scope. They are not run when the operator requests no exploit-execution testing.

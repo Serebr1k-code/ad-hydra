@@ -10,7 +10,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-pub(super) struct Error(StatusCode, String);
+pub(super) struct Error(pub(super) StatusCode, pub(super) String);
 impl From<anyhow::Error> for Error {
     fn from(e: anyhow::Error) -> Self {
         Self(StatusCode::BAD_REQUEST, e.to_string())
@@ -273,6 +273,7 @@ async fn rotate(
         delete_exploit,
         versions,
         rotate,
+        super::effectiveness_http::effectiveness,
         super::catalog_http::services,
         super::catalog_http::service,
         super::catalog_http::teams,
@@ -280,11 +281,27 @@ async fn rotate(
         super::catalog_http::delete_service,
         super::catalog_http::delete_team
     ),
-    components(schemas(Target, Exploit, Manifest, RunRequest, FarmService, FarmTeam))
+    components(schemas(
+        Target,
+        Exploit,
+        Manifest,
+        RunRequest,
+        FarmService,
+        FarmTeam,
+        super::effectiveness_dto::EffectivenessMatrix,
+        super::effectiveness_dto::EffectivenessRow,
+        super::effectiveness_dto::EffectivenessTeam,
+        super::effectiveness_dto::EffectivenessCell,
+        super::effectiveness_dto::EffectivenessLatestRun
+    ))
 )]
 pub struct FarmApi;
 pub fn router(s: Farm) -> Router {
     Router::new()
+        .route(
+            "/api/v1/farm/effectiveness",
+            get(super::effectiveness_http::effectiveness),
+        )
         .route("/api/v1/farm/exploits/{id}/versions", get(versions))
         .route(
             "/api/v1/farm/targets/{id}",

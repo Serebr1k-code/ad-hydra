@@ -1,7 +1,8 @@
 //! Single-owner bounded index of retained gzip files. Scan once at startup;
 //! completed flows and expiry touch only new or evicted records.
 use super::{
-    FILE_PREFIX, FlowHistory, MAX_DIRECTION_BYTES, MAX_HISTORY_BYTES, Metadata, TTL_SECONDS, now_ms,
+    Datagram, FILE_PREFIX, FlowHistory, MAX_DATAGRAMS, MAX_DIRECTION_BYTES, MAX_ENCODED_BYTES,
+    MAX_HISTORY_BYTES, Metadata, TTL_SECONDS, now_ms,
 };
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use std::{
@@ -126,7 +127,7 @@ impl Disk {
             safe_file(&payload)?;
             let size = payload.metadata()?.len();
             anyhow::ensure!(
-                size <= MAX_HISTORY_BYTES as u64 + 1024,
+                size <= MAX_ENCODED_BYTES as u64 + 1024,
                 "compressed history exceeds bound"
             );
             disk.index_record(
@@ -333,21 +334,92 @@ pub(super) fn safe_directory(path: &Path) -> anyhow::Result<()> {
 }
 
 fn gzip_payload(history: &FlowHistory) -> anyhow::Result<Vec<u8>> {
-    let mut payload =
-        Vec::with_capacity(history.client_to_server.len() + history.server_to_client.len());
-    payload.extend_from_slice(&history.client_to_server);
-    payload.extend_from_slice(&history.server_to_client);
+    let mut payload = Vec::new();
+    if history.transport == "udp" {
+        anyhow::ensure!(
+            history.datagrams.len() <= MAX_DATAGRAMS,
+            "history datagram bound"
+        );
+        let mut totals = [0usize; 2];
+        let mut previous = 0;
+        for datagram in &history.datagrams {
+            anyhow::ensure!(
+                (1..=2).contains(&datagram.direction) && datagram.sequence > previous,
+                "invalid datagram metadata"
+            );
+            previous = datagram.sequence;
+            totals[usize::from(datagram.direction == 2)] += datagram.data.len();
+            payload.push(datagram.direction);
+            payload.extend_from_slice(&datagram.occurred_at_ms.to_le_bytes());
+            payload.extend_from_slice(&datagram.sequence.to_le_bytes());
+            payload.extend_from_slice(&(datagram.data.len() as u32).to_le_bytes());
+            payload.extend_from_slice(&datagram.data);
+        }
+        anyhow::ensure!(
+            totals.iter().all(|n| *n <= MAX_DIRECTION_BYTES),
+            "history direction bound"
+        );
+    } else {
+        payload.extend_from_slice(&history.client_to_server);
+        payload.extend_from_slice(&history.server_to_client);
+        anyhow::ensure!(
+            payload.len() <= MAX_HISTORY_BYTES,
+            "history exceeds payload bound"
+        );
+    }
     anyhow::ensure!(
-        payload.len() <= MAX_HISTORY_BYTES,
-        "history exceeds payload bound"
+        payload.len() <= MAX_ENCODED_BYTES,
+        "history exceeds encoded bound"
     );
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&payload)?;
     Ok(encoder.finish()?)
 }
 
+fn decode_datagrams(payload: &[u8], count: usize) -> anyhow::Result<Vec<Datagram>> {
+    anyhow::ensure!(count <= MAX_DATAGRAMS, "history datagram bound");
+    let mut datagrams = Vec::with_capacity(count);
+    let mut offset = 0usize;
+    let mut totals = [0usize; 2];
+    let mut previous = 0;
+    for _ in 0..count {
+        anyhow::ensure!(
+            payload.len().saturating_sub(offset) >= 21,
+            "incomplete datagram header"
+        );
+        let direction = payload[offset];
+        let occurred_at_ms = i64::from_le_bytes(payload[offset + 1..offset + 9].try_into()?);
+        let sequence = u64::from_le_bytes(payload[offset + 9..offset + 17].try_into()?);
+        let len = u32::from_le_bytes(payload[offset + 17..offset + 21].try_into()?) as usize;
+        offset += 21;
+        anyhow::ensure!(
+            (1..=2).contains(&direction) && sequence > previous && len <= payload.len() - offset,
+            "invalid datagram framing"
+        );
+        previous = sequence;
+        totals[usize::from(direction == 2)] += len;
+        anyhow::ensure!(
+            totals.iter().all(|n| *n <= MAX_DIRECTION_BYTES),
+            "history direction bound"
+        );
+        datagrams.push(Datagram {
+            direction,
+            occurred_at_ms,
+            sequence,
+            data: payload[offset..offset + len].to_vec(),
+        });
+        offset += len;
+    }
+    anyhow::ensure!(offset == payload.len(), "history payload length mismatch");
+    Ok(datagrams)
+}
+
 fn metadata(history: &FlowHistory) -> Metadata {
     Metadata {
+        transport: history.transport.clone(),
+        datagram_count: history.datagrams.len(),
+        datagrams_client_to_server: history.datagrams_client_to_server,
+        datagrams_server_to_client: history.datagrams_server_to_client,
         flow_id: history.flow_id.clone(),
         service_id: history.service_id.clone(),
         protocol_id: history.protocol_id.clone(),
@@ -394,20 +466,45 @@ pub(super) fn read_record(directory: &Path, id: &str) -> anyhow::Result<Option<F
         details.client_len <= MAX_DIRECTION_BYTES && details.server_len <= MAX_DIRECTION_BYTES,
         "history metadata exceeds bounds"
     );
+    anyhow::ensure!(
+        details.transport == "tcp" || details.transport == "udp",
+        "invalid history transport"
+    );
+    let bound = if details.transport == "udp" {
+        MAX_ENCODED_BYTES
+    } else {
+        MAX_HISTORY_BYTES
+    };
     let file = fs::File::open(payload_path)?;
-    let mut decoder = GzDecoder::new(file).take((MAX_HISTORY_BYTES + 1) as u64);
+    let mut decoder = GzDecoder::new(file).take((bound + 1) as u64);
     let mut payload = Vec::with_capacity(MAX_HISTORY_BYTES);
     decoder.read_to_end(&mut payload)?;
-    anyhow::ensure!(
-        payload.len() <= MAX_HISTORY_BYTES,
-        "decompressed history exceeds bound"
-    );
-    anyhow::ensure!(
-        payload.len() == details.client_len + details.server_len,
-        "history payload length mismatch"
-    );
-    let server = payload.split_off(details.client_len);
+    anyhow::ensure!(payload.len() <= bound, "decompressed history exceeds bound");
+    let (client, server, datagrams) = if details.transport == "udp" {
+        let datagrams = decode_datagrams(&payload, details.datagram_count)?;
+        let mut counts = [0u64; 2];
+        for datagram in &datagrams {
+            counts[usize::from(datagram.direction == 2)] += 1;
+        }
+        anyhow::ensure!(
+            counts[0] <= details.datagrams_client_to_server
+                && counts[1] <= details.datagrams_server_to_client,
+            "history datagram count mismatch"
+        );
+        (vec![], vec![], datagrams)
+    } else {
+        anyhow::ensure!(
+            payload.len() == details.client_len + details.server_len,
+            "history payload length mismatch"
+        );
+        let server = payload.split_off(details.client_len);
+        (payload, server, vec![])
+    };
     Ok(Some(FlowHistory {
+        transport: details.transport,
+        datagrams,
+        datagrams_client_to_server: details.datagrams_client_to_server,
+        datagrams_server_to_client: details.datagrams_server_to_client,
         flow_id: details.flow_id,
         service_id: details.service_id,
         protocol_id: details.protocol_id,
@@ -415,7 +512,7 @@ pub(super) fn read_record(directory: &Path, id: &str) -> anyhow::Result<Option<F
         closed_at_ms: details.closed_at_ms,
         bytes_client_to_server: details.bytes_client_to_server,
         bytes_server_to_client: details.bytes_server_to_client,
-        client_to_server: payload,
+        client_to_server: client,
         server_to_client: server,
         truncated_client_to_server: details.truncated_client_to_server,
         truncated_server_to_client: details.truncated_server_to_client,
@@ -448,6 +545,10 @@ mod tests {
 
     fn history(closed_at_ms: i64) -> FlowHistory {
         FlowHistory {
+            transport: "tcp".into(),
+            datagrams: vec![],
+            datagrams_client_to_server: 0,
+            datagrams_server_to_client: 0,
             flow_id: uuid::Uuid::new_v4().to_string(),
             service_id: "svc".into(),
             protocol_id: "raw".into(),
@@ -461,6 +562,48 @@ mod tests {
             truncated_server_to_client: false,
             history_truncated: false,
         }
+    }
+
+    #[test]
+    fn imports_legacy_tcp_metadata_without_transport_or_datagram_fields() {
+        let dir = super::super::tests::Directory::new();
+        let record = history(now_ms());
+        let mut detail = serde_json::to_value(metadata(&record)).unwrap();
+        for key in [
+            "transport",
+            "datagram_count",
+            "datagrams_client_to_server",
+            "datagrams_server_to_client",
+        ] {
+            detail.as_object_mut().unwrap().remove(key);
+        }
+        let (payload, sidecar) = paths(&dir.0, &record.flow_id);
+        write_private(&payload, &gzip_payload(&record).unwrap()).unwrap();
+        write_private(&sidecar, &serde_json::to_vec(&detail).unwrap()).unwrap();
+        assert_eq!(
+            Disk::open(dir.0.clone(), now_ms()).unwrap().records.len(),
+            1
+        );
+        assert_eq!(
+            read_record(&dir.0, &record.flow_id).unwrap().unwrap(),
+            record
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_udp_lengths_direction_order_and_excess_empty_records() {
+        assert!(decode_datagrams(&[0; 20], 1).is_err());
+        assert!(decode_datagrams(&[0; 21], 1).is_err());
+        assert!(decode_datagrams(&[], MAX_DATAGRAMS + 1).is_err());
+        let mut header = vec![1u8];
+        header.extend_from_slice(&0i64.to_le_bytes());
+        header.extend_from_slice(&1u64.to_le_bytes());
+        header.extend_from_slice(&1u32.to_le_bytes());
+        assert!(decode_datagrams(&header, 1).is_err());
+        header[17..21].copy_from_slice(&0u32.to_le_bytes());
+        assert!(decode_datagrams(&header, 1).unwrap()[0].data.is_empty());
+        let duplicate = [header.clone(), header].concat();
+        assert!(decode_datagrams(&duplicate, 2).is_err());
     }
 
     #[test]

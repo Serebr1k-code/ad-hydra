@@ -36,6 +36,8 @@ pub(super) async fn finish(
         let out=runtimes::encode_log(bounded_text(&out).as_bytes())?;
         let err=runtimes::encode_log(bounded_text(&err).as_bytes())?;
         tx.execute("UPDATE farm_runs SET logs_complete=1,status=?2,stdout='',stderr='',stdout_gzip=?3,stderr_gzip=?4,exit_code=?5,finished_at=COALESCE(finished_at,?6) WHERE id=?1",params![id,status,out,err,code,now()])?;
+        // A cancelled/dropped runner cannot leave its recorded children live forever.
+        tx.execute("UPDATE farm_process_results SET status=?2,finished_at=?3 WHERE run_id=?1 AND status='running'",params![id,if status=="succeeded" {"interrupted"} else {status.as_str()},super::process_results::timestamp_millis()])?;
         runtimes::chunks::enforce_quota(&tx)?;
         audit::append_change(&tx,&Actor{kind:"system".into(),id:"farm-scheduler".into()},"farm.run.finish",&id,&id,true,now(),&serde_json::json!({"initiated_by":initiated_by,"status":status}))?;
         tx.commit()?;Ok(())

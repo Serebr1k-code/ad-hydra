@@ -90,25 +90,48 @@ async fn preview_history(
         .map_err(|_| Status::failed_precondition("decoder unavailable"))?;
     let mut sizes = crate::inspection::body_size::BodySizes::default();
     sizes.set_http(decoder.http_mut().is_some());
-    let directions = [
-        (
-            hydra_protocol_sdk::Direction::ClientToServer,
-            history.client_to_server,
-        ),
-        (
-            hydra_protocol_sdk::Direction::ServerToClient,
-            history.server_to_client,
-        ),
-    ];
-    for (direction, bytes) in directions {
+    if (history.transport == "udp") != (service.transport == Transport::Udp) {
+        result.state = "decoder_error".into();
+        return Ok(result);
+    }
+    let udp = history.transport == "udp";
+    let mut frames = Vec::new();
+    if udp {
+        frames.extend(history.datagrams.iter().map(|d| {
+            (
+                if d.direction == 1 {
+                    hydra_protocol_sdk::Direction::ClientToServer
+                } else {
+                    hydra_protocol_sdk::Direction::ServerToClient
+                },
+                d.data.as_slice(),
+            )
+        }));
+    } else {
+        for (direction, bytes) in [
+            (
+                hydra_protocol_sdk::Direction::ClientToServer,
+                &history.client_to_server,
+            ),
+            (
+                hydra_protocol_sdk::Direction::ServerToClient,
+                &history.server_to_client,
+            ),
+        ] {
+            frames.extend(bytes.chunks(16_384).map(|chunk| (direction, chunk)));
+        }
+    }
+    for (direction, chunk) in frames {
+        let matched_before = result.matched_messages;
+        let mut size_blocked = false;
         let direction_name = if direction == hydra_protocol_sdk::Direction::ClientToServer {
             "client_to_server"
         } else {
             "server_to_client"
         };
-        for chunk in bytes.chunks(16_384) {
-            let mut base_fields = preview_fields(target, direction_name)?;
-            let size_eval = sizes.feed(direction, chunk, |size_fields| {
+        let mut base_fields = preview_fields(target, direction_name)?;
+        let mut check_size =
+            |size_fields: &std::collections::BTreeMap<String, hydra_domain::FieldValue>| {
                 let mut all = base_fields.clone();
                 all.extend(size_fields.clone());
                 let eval = compiled.evaluate_stream_sizes(&hydra_domain::EvaluationContext {
@@ -116,65 +139,97 @@ async fn preview_history(
                     transport: service.transport,
                     fields: &all,
                     now_ms: crate::state::now().saturating_mul(1000),
-                    safe_http: service.protocol_id == "http"
+                    safe_http: service.transport == Transport::Tcp
+                        && service.protocol_id == "http"
                         && direction == hydra_protocol_sdk::Direction::ClientToServer,
                 });
+                size_blocked |= matches!(eval.action, Some(hydra_domain::Action::DropDatagram));
                 if !eval.hits.is_empty() {
                     result.matched = true;
                     result.matched_messages = result.matched_messages.saturating_add(1);
                     result.would_block |= eval.hits.iter().any(|hit| hit.blocked);
                 }
                 false
-            });
-            let _ = size_eval;
-            let messages = match decoder.feed(direction, chunk) {
-                Ok(messages) => messages,
-                Err(_) => {
-                    result.state = "decoder_error".into();
-                    return Ok(result);
-                }
             };
-            for mut message in messages {
-                sizes.annotate(
-                    &mut message,
-                    if service.transport == Transport::Udp {
-                        "datagram"
-                    } else {
-                        "stream"
-                    },
-                );
-                let direction_name =
-                    if message.direction == hydra_protocol_sdk::Direction::ClientToServer {
-                        "client_to_server"
-                    } else {
-                        "server_to_client"
-                    };
-                base_fields = preview_fields(target, direction_name)?;
-                base_fields.insert(
-                    "packet.size".into(),
-                    hydra_domain::FieldValue::Uint(chunk.len() as u64),
-                );
-                base_fields.extend(
-                    message
-                        .fields
-                        .iter()
-                        .map(|(key, value)| (key.clone(), crate::inspection::domain_value(value))),
-                );
-                let safe_http = service.protocol_id == "http"
-                    && message.direction == hydra_protocol_sdk::Direction::ClientToServer;
-                let eval = compiled.evaluate(&hydra_domain::EvaluationContext {
-                    service_id: &service.id,
-                    transport: service.transport,
-                    fields: &base_fields,
-                    now_ms: crate::state::now().saturating_mul(1000),
-                    safe_http,
-                });
-                if !eval.hits.is_empty() {
-                    result.matched = true;
-                    result.matched_messages = result.matched_messages.saturating_add(1);
-                    result.would_block |= eval.hits.iter().any(|hit| hit.blocked);
-                }
+        if udp {
+            check_size(&sizes.datagram(direction, chunk.len()));
+        } else {
+            sizes.feed(direction, chunk, check_size);
+        }
+        if udp && size_blocked {
+            // Live enforcement drops before advancing the stateful decoder.
+            continue;
+        }
+        let decoded = if udp && !decoder.is_stream_decoder() {
+            // Live UDP does not apply the TCP HTTP parser to datagrams.
+            Ok(Vec::new())
+        } else if udp {
+            decoder.feed_datagram(direction, chunk)
+        } else {
+            decoder.feed(direction, chunk)
+        };
+        let messages = match decoded {
+            Ok(messages) => messages,
+            Err(_) => {
+                result.state = "decoder_error".into();
+                return Ok(result);
             }
+        };
+        let messages = if udp && messages.is_empty() {
+            vec![hydra_protocol_sdk::ParsedMessage {
+                protocol: "raw".into(),
+                message_type: "datagram".into(),
+                direction,
+                fields: Default::default(),
+            }]
+        } else {
+            messages
+        };
+        for mut message in messages {
+            sizes.annotate(
+                &mut message,
+                if service.transport == Transport::Udp {
+                    "datagram"
+                } else {
+                    "stream"
+                },
+            );
+            let direction_name =
+                if message.direction == hydra_protocol_sdk::Direction::ClientToServer {
+                    "client_to_server"
+                } else {
+                    "server_to_client"
+                };
+            base_fields = preview_fields(target, direction_name)?;
+            base_fields.insert(
+                "packet.size".into(),
+                hydra_domain::FieldValue::Uint(chunk.len() as u64),
+            );
+            base_fields.extend(
+                message
+                    .fields
+                    .iter()
+                    .map(|(key, value)| (key.clone(), crate::inspection::domain_value(value))),
+            );
+            let safe_http = service.transport == Transport::Tcp
+                && service.protocol_id == "http"
+                && message.direction == hydra_protocol_sdk::Direction::ClientToServer;
+            let eval = compiled.evaluate(&hydra_domain::EvaluationContext {
+                service_id: &service.id,
+                transport: service.transport,
+                fields: &base_fields,
+                now_ms: crate::state::now().saturating_mul(1000),
+                safe_http,
+            });
+            if !eval.hits.is_empty() {
+                result.matched = true;
+                result.matched_messages = result.matched_messages.saturating_add(1);
+                result.would_block |= eval.hits.iter().any(|hit| hit.blocked);
+            }
+        }
+        if udp && result.matched_messages > matched_before {
+            // One datagram can hit the byte stage and the decoder stage.
+            result.matched_messages = matched_before.saturating_add(1);
         }
     }
     result.state = if history.history_truncated {
@@ -200,6 +255,131 @@ fn history_status(error: crate::history::HistoryReadError) -> Status {
 #[cfg(test)]
 mod history_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn udp_history_preview_preserves_empty_datagrams_sizes_and_raw_boundaries() {
+        use hydra_domain::{
+            Action, Comparison, Expression, FieldValue, Mode, Rule, RuleSnapshot, Service,
+            ServiceSnapshot,
+        };
+        use hydra_protocol_sdk::Direction;
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!("hydra-udp-preview-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let telemetry = crate::telemetry::Telemetry::new(4);
+        let history = crate::history::HistoryStore::open(&dir).await.unwrap();
+        *telemetry.history.write().unwrap() = Some(history.clone());
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let manager = crate::transport::Manager::new(
+            crate::config::Limits::default(),
+            telemetry.clone(),
+            shutdown.clone(),
+        );
+        let state = crate::state::State::start(
+            dir.join("state"),
+            ServiceSnapshot::default(),
+            manager,
+            telemetry,
+        )
+        .await
+        .unwrap();
+        let rpc = Rpc {
+            state,
+            shutdown,
+            diagnostics: Arc::new(tokio::sync::Semaphore::new(1)),
+            protocols: crate::inspection::protocols::Protocols::open(dir.join("plugins"))
+                .await
+                .unwrap(),
+        };
+        let service = Service {
+            id: "udp".into(),
+            transport: Transport::Udp,
+            listen_address: "127.0.0.1:23001".parse().unwrap(),
+            upstream_address: "127.0.0.1:23002".parse().unwrap(),
+            protocol_id: "raw".into(),
+            enabled: true,
+            retain_history: true,
+        };
+        history.apply_services(std::slice::from_ref(&service));
+        let flow_id = uuid::Uuid::new_v4().to_string();
+        let mut writer = history
+            .begin_udp(flow_id.clone(), service.id.clone(), "raw".into())
+            .unwrap();
+        writer.record(Direction::ClientToServer, b"A");
+        writer.record(Direction::ServerToClient, b"");
+        writer.record(Direction::ClientToServer, b"B");
+        writer.finish(i64::MAX, 2, 0);
+        let target = v1::FilterPreviewTarget {
+            flow_id,
+            network_fields: None,
+        };
+        for (field, op, value, expected) in [
+            (
+                "raw.bytes",
+                Comparison::Contains,
+                FieldValue::Bytes(b"AB".to_vec()),
+                false,
+            ),
+            (
+                "raw.bytes",
+                Comparison::Contains,
+                FieldValue::Bytes(b"B".to_vec()),
+                true,
+            ),
+            ("packet.size", Comparison::Eq, FieldValue::Uint(0), true),
+            ("packet.size", Comparison::Eq, FieldValue::Uint(2), false),
+            ("body.size", Comparison::Eq, FieldValue::Uint(1), true),
+            ("body.size", Comparison::Eq, FieldValue::Uint(2), false),
+            ("transfer.bytes", Comparison::Eq, FieldValue::Uint(2), true),
+        ] {
+            let compiled = hydra_filter_engine::CompiledSnapshot::compile(
+                RuleSnapshot {
+                    revision: 1,
+                    rules: vec![Rule {
+                        id: "__preview__".into(),
+                        service_id: service.id.clone(),
+                        name: "test".into(),
+                        description: String::new(),
+                        enabled: true,
+                        mode: Mode::Enforce,
+                        priority: 1,
+                        expression: Expression::Predicate {
+                            field: field.into(),
+                            op,
+                            value,
+                        },
+                        action: Action::DropDatagram,
+                        backend: "userspace".into(),
+                        expires_at_ms: None,
+                    }],
+                },
+                std::slice::from_ref(&service),
+            )
+            .unwrap();
+            let preview = preview_history(&rpc, &service, &target, &compiled)
+                .await
+                .unwrap();
+            assert_eq!(preview.state, "ready", "{field}");
+            assert_eq!(preview.matched, expected, "{field}");
+            assert_eq!(preview.would_block, expected, "{field}");
+            assert_eq!(
+                preview.matched_messages,
+                if !expected {
+                    0
+                } else if field == "body.size" {
+                    2
+                } else {
+                    1
+                },
+                "{field}"
+            );
+        }
+        drop(rpc);
+        drop(history);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn history_store_errors_map_to_bounded_rpc_statuses() {
@@ -424,7 +604,13 @@ impl ProxyDiagnostics for Rpc {
             .await
             .map_err(history_status)?
             .ok_or_else(|| Status::not_found("flow history is unavailable or expired"))?;
-        let total = history.client_to_server.len() + history.server_to_client.len();
+        let total = history.client_to_server.len()
+            + history.server_to_client.len()
+            + history
+                .datagrams
+                .iter()
+                .map(|d| d.data.len())
+                .sum::<usize>();
         if total > crate::history::MAX_HISTORY_BYTES {
             return Err(Status::resource_exhausted("history exceeds response limit"));
         }
@@ -436,16 +622,35 @@ impl ProxyDiagnostics for Rpc {
             closed_at_ms: history.closed_at_ms,
             bytes_client_to_server: history.bytes_client_to_server,
             bytes_server_to_client: history.bytes_server_to_client,
-            segments: vec![
-                v1::HistorySegment {
-                    direction: 1,
-                    data: history.client_to_server,
-                },
-                v1::HistorySegment {
-                    direction: 2,
-                    data: history.server_to_client,
-                },
-            ],
+            transport: if history.transport == "udp" { 2 } else { 1 },
+            datagrams_client_to_server: history.datagrams_client_to_server,
+            datagrams_server_to_client: history.datagrams_server_to_client,
+            segments: if history.transport == "udp" {
+                history
+                    .datagrams
+                    .into_iter()
+                    .map(|d| v1::HistorySegment {
+                        direction: d.direction.into(),
+                        data: d.data,
+                        datagram: true,
+                        occurred_at_ms: d.occurred_at_ms,
+                        sequence: d.sequence,
+                    })
+                    .collect()
+            } else {
+                vec![
+                    v1::HistorySegment {
+                        direction: 1,
+                        data: history.client_to_server,
+                        ..Default::default()
+                    },
+                    v1::HistorySegment {
+                        direction: 2,
+                        data: history.server_to_client,
+                        ..Default::default()
+                    },
+                ]
+            },
             truncated_client_to_server: history.truncated_client_to_server,
             truncated_server_to_client: history.truncated_server_to_client,
             history_truncated: history.history_truncated,

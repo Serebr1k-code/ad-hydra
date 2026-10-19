@@ -43,6 +43,12 @@ impl ProxyControl for Rpc {
                 .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
                 .map_or(0, |s| s.dropped()),
+            history_dropped: t
+                .history
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map_or(0, |store| store.dropped()),
             history_per_service_bytes: t
                 .history
                 .read()

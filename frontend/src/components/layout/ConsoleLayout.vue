@@ -12,9 +12,9 @@ let mounted=true
 let interval: ReturnType<typeof setInterval> | undefined
 async function status() {
  try {
-  const s = await api<{connected:boolean;active_flows:number;telemetry_dropped:number;indexing_dropped:number;applied_services_revision:number;applied_rules_revision:number}>('/system/proxy')
+  const s = await api<{connected:boolean;active_flows:number;history_dropped:number;telemetry_dropped:number;indexing_dropped:number;applied_services_revision:number;applied_rules_revision:number}>('/system/proxy')
   if(!mounted)return
-  emit('status',`Proxy ${s.connected?'connected':'disconnected'} · ${s.active_flows} flows · ${s.telemetry_dropped+s.indexing_dropped} telemetry lost · revision ${s.applied_services_revision}/${s.applied_rules_revision}`,s.connected)
+  emit('status',`Proxy ${s.connected?'connected':'disconnected'} · ${s.active_flows} flows · ${s.telemetry_dropped+s.indexing_dropped} telemetry lost · ${s.history_dropped} history saves lost · revision ${s.applied_services_revision}/${s.applied_rules_revision}`,s.connected)
  } catch (e) { if(mounted){notice.value = errorMessage(e);emit('status','Proxy connection unavailable',false)} }
 }
 onMounted(() => {
