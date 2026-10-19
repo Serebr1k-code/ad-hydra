@@ -1,6 +1,6 @@
 # Traffic view
 
-Select a service above the session list, then select a TCP stream to follow its
+Select a service above the session list, then select a TCP stream or UDP conversation to follow its
 conversation. Each card has a left stripe with its configured service color, with automatic
 palette colors for services without an explicit choice. Set colors in Services.
 The service dropdown uses the same colors. Refreshes and pagination
@@ -41,6 +41,14 @@ quota from a permitted request and remain unclassified. Upgrade both binaries to
 classify new rate-limit events accurately. No storage migration is needed;
 classification reads retained rule events and indexed flag provenance. Indicators
 last as long as their underlying bounded event retention.
+
+## UDP support
+
+The default list includes TCP and UDP; cards identify their transport. UDP groups datagrams by client peer until the idle timeout (30 seconds by default). Incoming and outgoing decoded messages arrive through the same live events as TCP. The stream viewer, service selection, flag indicators and blocked checkbox work with these conversations. Saved-stream filter replay requires TCP byte history; selecting UDP reports history unavailable rather than a match prediction.
+
+Both transports use the same decoder and rule abstractions, including raw bytes, UTF-8 and compatible WASM fields. UDP `body.size`/`packet.size` count each datagram's bytes; `transfer.bytes` accumulates separately per direction within the UDP session. Enforced UDP blocking drops a datagram. TCP connection closing and HTTP-specific response blocking require their respective transports/protocols; unsupported combinations fail validation.
+
+Completed gzip **byte** history currently covers TCP only. Retained parsed UDP messages remain in Explorer after closure, subject to its bounded event retention; live byte capture can sample the next datagram. Raw UDP has no decoded text by definition: choose UTF-8 or a suitable WASM decoder for message text. The viewer explains this when opening a closed UDP byte conversation.
 
 ## Saved TCP history limits
 

@@ -14,6 +14,7 @@ const props=defineProps<{flowId:string;flow?:Flow;protocolId?:string;showBlocked
 const detail=ref<Flow|undefined>(props.flow),messages=ref<Message[]>([]),cursor=ref<number|null>()
 const inspect=ref<Message>(),selected=ref<Message>(),comparison=ref<ReturnType<typeof differences>>([]),comparisonTitle=ref('')
 const streamBody=ref<HTMLElement>()
+const udp=computed(()=>detail.value?.transport===2)
 const rawProfile=computed(()=>props.protocolId==='raw')
 const closureHistoryLost=computed(()=>record(detail.value?.closed).history_truncated===true)
 const hasHistoryTextFallback=computed(()=>detail.value?.state==='Closed'&&messages.value.length===0&&historyState.value==='ready'&&history.value!==undefined)
@@ -39,7 +40,7 @@ async function load(more=false) {
   if(disposed)return
   const received=flowRows({items:[flow],next_cursor:null})[0]
   if(!detail.value?.closed||received?.closed)detail.value=received
-  if(received?.closed)void loadHistory()
+  if(received?.closed&&received.transport!==2)void loadHistory()
   const page=await api<Page>(`${path}/messages?limit=100&include_blocked=${props.showBlocked===true}&newest_first=true${more&&cursor.value?'&after='+cursor.value:''}`)
   if(disposed||current!==request)return
   const initial=!messages.value.length
@@ -71,7 +72,7 @@ onUnmounted(()=>{disposed=true;request++})
 <template>
  <section id="traffic-stream" aria-label="Session stream" class="@container flex min-h-0 min-w-0 flex-col">
   <header class="space-y-3 border-b p-4">
-   <div class="flex items-start justify-between gap-3"><div class="min-w-0"><h2 class="!m-0 text-base">Follow TCP stream</h2><p class="truncate font-mono text-xs text-muted-foreground">{{detail?.client}} ↔ {{detail?.destination}}</p></div><Button variant="ghost" size="sm" :disabled="loading" @click="load()">Refresh</Button></div>
+   <div class="flex items-start justify-between gap-3"><div class="min-w-0"><h2 class="!m-0 text-base">{{udp?'Follow UDP conversation':'Follow TCP stream'}}</h2><p class="truncate font-mono text-xs text-muted-foreground">{{detail?.client}} ↔ {{detail?.destination}}</p></div><Button variant="ghost" size="sm" :disabled="loading" @click="load()">Refresh</Button></div>
    <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{{detail?.service_id}}</span><span v-if="flow?.has_flag||detail?.has_flag" class="rounded border border-amber-500/60 bg-amber-500/10 px-2 py-1 font-medium text-amber-500">Flag detected</span><span v-if="flow?.blocked||detail?.blocked" class="text-destructive">Blocked</span><span>· {{detail?.state??'Loading'}}</span><span v-if="detail?.bytesUp">· {{detail.bytesUp}} B sent / {{detail.bytesDown}} B received</span><span>· {{messages.length}} decoded messages</span></div>
    <div class="flex flex-wrap gap-2"><Select v-model="mode"><SelectTrigger aria-label="Stream view" class="w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="decoded">Decoded conversation</SelectItem><SelectItem value="bytes">Captured bytes</SelectItem></SelectContent></Select><Select v-if="mode==='decoded'||detail?.state==='Closed'" v-model="side"><SelectTrigger aria-label="Stream direction" class="w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="both">Both directions</SelectItem><SelectItem value="1">Client → server</SelectItem><SelectItem value="2">Server → client</SelectItem></SelectContent></Select><Select v-if="mode==='bytes'&&detail?.state==='Closed'" v-model="byteMode"><SelectTrigger aria-label="Raw byte format" class="w-36"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="hex">Hex dump</SelectItem><SelectItem value="utf8">UTF-8</SelectItem><SelectItem value="ascii">ASCII</SelectItem></SelectContent></Select></div>
    <p class="truncate text-[10px] text-muted-foreground" :title="flowId">Session {{flowId}} · {{detail?.started}}</p>
@@ -81,7 +82,8 @@ onUnmounted(()=>{disposed=true;request++})
    <Alert v-if="notice"><AlertDescription>{{notice}}</AlertDescription></Alert>
    <FlowCapture v-if="mode==='bytes'&&detail?.state!=='Closed'" :flow-id="flowId" :live="true" :auto-capture="rawProfile" />
    <section v-if="mode==='bytes'&&detail?.state==='Closed'" class="space-y-3">
-    <p v-if="historyState==='loading'" role="status" class="text-sm text-muted-foreground">Loading saved stream history…</p>
+    <Alert v-if="udp"><AlertDescription>Saved gzip byte history is currently available for TCP only. UDP decoded messages are retained in Traffic Explorer; raw UDP samples require a live capture.</AlertDescription></Alert>
+    <p v-else-if="historyState==='loading'" role="status" class="text-sm text-muted-foreground">Loading saved stream history…</p>
     <Alert v-else-if="historyState==='missing'" :variant="closureHistoryLost?'destructive':'default'"><AlertDescription>{{closureHistoryLost?'No history record was saved; capture capacity or storage limits caused history loss.':'No saved history is available. Retention may have been disabled, or the record may have expired or been evicted.'}}</AlertDescription></Alert>
     <Alert v-else-if="historyState==='active'"><AlertDescription>The stream is still active; refresh after it closes to load its saved history.</AlertDescription></Alert>
     <Alert v-else-if="historyState==='unavailable'" variant="destructive"><AlertDescription>Saved stream history is temporarily unavailable. Refresh to retry.</AlertDescription></Alert>
@@ -106,7 +108,7 @@ onUnmounted(()=>{disposed=true;request++})
       <pre class="!max-h-none !rounded-none !border-0 !bg-transparent !p-0 font-mono !text-[13px] !leading-6">{{historyPreview(segment,'utf8')||'(empty)'}}</pre>
      </article>
     </template>
-    <p v-else-if="!loading&&!messages.length" class="py-8 text-sm text-muted-foreground">No decoded messages were retained for this session. Unknown and encrypted protocols still have session metadata. Closed streams appear here as UTF-8 when saved history is available; use Captured bytes to inspect the next chunk on a live session.</p>
+    <p v-else-if="!loading&&!messages.length" class="py-8 text-sm text-muted-foreground">{{udp?'No decoded UDP messages were retained. Raw UDP bytes require a live capture; closed UDP sessions do not have saved gzip byte history.':'No decoded messages were retained for this session. Unknown and encrypted protocols still have session metadata. Closed streams appear here as UTF-8 when saved history is available; use Captured bytes to inspect the next chunk on a live session.'}}</p>
     <article v-for="message in visible" :key="message.message_id" :data-message-id="message.message_id" :data-direction="message.direction" class="rounded-sm border-l-2 p-3 @3xl:w-[78%]" :class="message.direction===1?'border-red-400/60 bg-red-500/5 @3xl:mr-auto':message.direction===2?'border-blue-400/60 bg-blue-500/5 @3xl:ml-auto':'border-border'">
      <div class="mb-1 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground"><span :class="message.direction===1?'text-red-300':message.direction===2?'text-blue-300':''">{{direction(message.direction)}}</span><span>{{timestamp(message.occurred_ms)}}</span><span>{{message.message_type||message.protocol_id}}</span><span v-if="message.truncated">Truncated</span></div>
      <pre class="!max-h-none !rounded-none !border-0 !bg-transparent !p-0 font-mono !text-[13px] !leading-6">{{streamText(message)}}</pre>

@@ -48,6 +48,7 @@ jobs:
           python3 -m pip install -r scripts/requirements.txt
       - run: cargo fmt --all -- --check
       - run: python3 tests/compatibility/frontend_build.py
+      - run: python3 tests/compatibility/installer.py
       - run: cargo check --locked --workspace --all-targets
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace

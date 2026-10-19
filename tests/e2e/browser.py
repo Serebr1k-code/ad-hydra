@@ -574,6 +574,33 @@ class Browser(unittest.TestCase):
                         cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Next').click()")
                         wait("document.querySelector('#page').innerText.includes('Page 2') && [...document.querySelectorAll('#page table')].find(t=>[...t.querySelectorAll('th')].some(h=>h.textContent==='Flag'))?.querySelectorAll('tbody tr').length===2")
                 self.assertIn('alice',cdp.evaluate("document.querySelector('#page').innerText"))
+                # Real UDP traffic is visible without switching away from the default list.
+                with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as udp_backend:
+                    udp_backend.bind(('127.0.0.1',0));udp_backend.settimeout(10)
+                    def udp_reply():
+                        try:
+                            value,peer=udp_backend.recvfrom(65535)
+                            if value==b'UDP browser request':udp_backend.sendto(b'UDP browser response',peer)
+                        except OSError:pass
+                    cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Services').click()")
+                    wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent==='Add service'&&!b.disabled)")
+                    cdp.click("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add service')")
+                    wait("Boolean(document.querySelector('#service-transport'))")
+                    cdp.click("document.querySelector('#service-transport')")
+                    wait("[...document.querySelectorAll('[role=option]')].some(e=>e.textContent.trim()==='UDP')")
+                    cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='UDP')")
+                    udp_service={**service,'transport':'udp','protocol_id':'utf8','listen_address':f'127.0.0.1:{port()}','upstream_address':f'127.0.0.1:{udp_backend.getsockname()[1]}'}
+                    fill_service(udp_service)
+                    cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Traffic').click()")
+                    wait("document.querySelector('#traffic-live-status')?.textContent==='Live'")
+                    threading.Thread(target=udp_reply,daemon=True).start()
+                    with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as udp_client:
+                        udp_client.settimeout(3);udp_client.sendto(b'UDP browser request',('127.0.0.1',int(udp_service['listen_address'].split(':')[1])))
+                        self.assertEqual(udp_client.recv(65535),b'UDP browser response')
+                    wait("Boolean(document.querySelector('#traffic-sessions [data-transport=\"2\"]'))")
+                    cdp.click("document.querySelector('#traffic-sessions [data-transport=\"2\"]')")
+                    wait("document.querySelector('#traffic-stream').innerText.includes('UDP browser request') && document.querySelector('#traffic-stream').innerText.includes('UDP browser response')")
+                    self.assertIn('Follow UDP conversation',cdp.evaluate("document.querySelector('#traffic-stream h2').innerText"))
                 # Proxy disconnect is a real child-process stop, with Core/UI live.
                 cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Traffic').click()")
                 wait("document.querySelector('#traffic-live-status')?.textContent==='Live'")

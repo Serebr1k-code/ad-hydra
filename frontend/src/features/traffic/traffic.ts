@@ -2,9 +2,10 @@ import type { FlowHistory, HistorySegment, Page } from '@/generated/contracts'
 export function record(value: unknown): Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {} }
 export function text(value: unknown) { return typeof value === 'string' || typeof value === 'number' ? String(value) : '' }
 export function direction(value: unknown) { return value === 1 ? 'Client → server' : value === 2 ? 'Server → client' : 'Unknown direction' }
+export function transportLabel(value:unknown):string { return value===1?'TCP':value===2?'UDP':'Unknown transport' }
 export function timestamp(value: unknown) { return typeof value === 'number' && Number.isFinite(value) ? new Date(value).toISOString() : 'Unknown time' }
 export function endpoint(value: unknown) { const v=record(value), ip=text(v.ip); return ip ? `${ip.includes(':')?'['+ip+']':ip}:${text(v.port)}` : 'Unknown endpoint' }
-export function flowRows(page: Page) { return page.items.map(item => ({ ...item, closed:item.closed, blocked:item.blocked===true, has_flag:item.has_flag===true, flow_id:text(item.flow_id), service_id:text(item.service_id), client:endpoint(item.client), destination:endpoint(item.upstream), started:timestamp(item.occurred_ms), state:item.closed?'Closed':'Open', bytesUp:text(record(item.closed).bytes_client_to_server), bytesDown:text(record(item.closed).bytes_server_to_client) })) }
+export function flowRows(page: Page) { return page.items.map(item => ({ ...item, closed:item.closed, blocked:item.blocked===true, has_flag:item.has_flag===true, flow_id:text(item.flow_id), service_id:text(item.service_id), transport:Number(item.transport??0), client:endpoint(item.client), destination:endpoint(item.upstream), started:timestamp(item.occurred_ms), state:item.closed?'Closed':'Open', bytesUp:text(record(item.closed).bytes_client_to_server), bytesDown:text(record(item.closed).bytes_server_to_client) })) }
 export type Flow = ReturnType<typeof flowRows>[number]
 export function mergeFlows(current: Flow[], incoming: Flow[], older = false): Flow[] {
  const unique = new Map<string, Flow>()

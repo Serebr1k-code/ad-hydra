@@ -45,7 +45,7 @@ function receive(frame:string) {
   if(event.kind==='event_loss'){liveNotice.value='Proxy reported telemetry loss. Some traffic may be unavailable.';reconcile();return}
   if(service.value!=='all'&&event.service_id!==service.value)return
   if(query.value){reconcile()}else if(['flow_opened','flow_closed','rule_hit','flag_detected'].includes(event.kind)) {
-   if(event.kind==='flow_opened'&&event.transport!==1)return
+   if(event.kind==='flow_opened'&&event.transport!==1&&event.transport!==2)return
    rows.value=updateFlows(rows.value,event)
    selectVisible()
    if(event.kind==='flag_detected'&&!rows.value.some(flow=>flow.flow_id===event.flow_id))reconcile()
@@ -56,7 +56,6 @@ function receive(frame:string) {
 async function load(more=false,live=false) {
  const current=++request;loading.value=true;error.value=''
  const parameters=new URLSearchParams(query.value)
- if(!parameters.has('transport'))parameters.set('transport','1')
  parameters.set('limit','100');parameters.set('newest_first','true');parameters.set('include_blocked',String(showBlocked.value))
  if(service.value!=='all')parameters.set('service_id',service.value)
  if(more&&cursor.value)parameters.set('after',String(cursor.value))
@@ -110,7 +109,7 @@ onUnmounted(()=>{scrollLocked.value=false;document.removeEventListener('keydown'
   <div class="overflow-hidden rounded-md border bg-card" :class="expanded?'min-h-0 flex-1':'h-[calc(100dvh-230px)] min-h-[640px] md:min-h-[480px]'"><TrafficWorkspace><template #sessions>
    <SessionList :rows="visible" :show-blocked="showBlocked" @show-blocked="showBlocked=$event" :services="services" :service="service" :selected="selected?.flow_id??''" :loading="loading" :more="Boolean(cursor)" :filter-selection="filterSelection?.flow_ids??[]" :filter-selection-service="filterSelection?.service_id??''" @service="service=$event" @select="selected=$event" @toggle-filter="toggleFilter" @refresh="load()" @more="load(true)" />
    </template><FlowConversation class="flex-1" ref="conversation" v-if="selected" :key="selected.flow_id+':'+selectedProtocol" :flow-id="selected.flow_id" :flow="selected" :protocol-id="selectedProtocol" :show-blocked="showBlocked" />
-   <section v-else id="traffic-stream" class="flex min-h-80 items-center justify-center p-8 text-center"><div><h2 class="!mt-0">Follow TCP stream</h2><p class="text-sm text-muted-foreground">Choose a service and select a session to inspect its conversation.</p></div></section>
+   <section v-else id="traffic-stream" class="flex min-h-80 items-center justify-center p-8 text-center"><div><h2 class="!mt-0">Follow traffic session</h2><p class="text-sm text-muted-foreground">Choose a service and select a session to inspect its conversation.</p></div></section>
   </TrafficWorkspace></div>
  </section>
 </template>

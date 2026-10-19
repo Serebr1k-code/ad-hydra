@@ -40,3 +40,12 @@ test('blocking and flag events update cards without confusing shadow hits with b
  expect(blocked[0]?.blocked).toBe(true)
  expect(updateFlows(blocked,{...opened})[0]).toMatchObject({blocked:true,has_flag:true})
 })
+
+test('UDP conversations participate in the same live list and preserve transport identity',()=>{
+ const udp={...opened,flow_id:'udp',transport:2}
+ const mixed=updateFlows(updateFlows([],opened),udp)
+ expect(mixed.map(row=>row.transport)).toEqual([2,1])
+ const closed=updateFlows(mixed,{...udp,kind:'flow_closed',bytes_client_to_server:'5',bytes_server_to_client:'7'})
+ expect(closed[0]?.transport).toBe(2)
+ expect(closed[0]?.bytesDown).toBe('7')
+})
