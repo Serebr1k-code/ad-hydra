@@ -5,6 +5,8 @@ Hydra is a two-process operations platform for authorized Attack/Defense CTF inf
 Read [PROGRESS.md](PROGRESS.md) for verified scope and limitations, [SPEC.md](SPEC.md) for product requirements, and [DECISIONS.md](DECISIONS.md) for implementation choices. The original handoff README is preserved in `docs/ORIGINAL_HANDOFF_README.md`.
 
 
+Successful main builds also replace the latest Core and Proxy binaries in S3; see [CI releases](docs/CI_RELEASES.md) for the destination, credentials setup and publication checks.
+
 The `Rust verification` GitHub Actions run builds static `x86_64-unknown-linux-musl` Core and Proxy binaries after verification succeeds. Download `hydra-linux-x86_64-musl-<commit-sha>` from that run's **Artifacts** section; the archive includes SHA-256 checksums and build commit metadata.
 
 ## Build and verify

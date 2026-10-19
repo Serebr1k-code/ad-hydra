@@ -109,3 +109,43 @@ jobs:
           path: dist/hydra-linux-x86_64-musl.tar.gz
           if-no-files-found: error
           retention-days: 30
+  publish-s3:
+    name: Publish latest Linux binaries to S3
+    needs: verify
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: hydra-s3-latest
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download this verified build
+        uses: actions/download-artifact@v4
+        with:
+          name: hydra-linux-x86_64-musl-${{ github.sha }}
+          path: ${{ runner.temp }}/example-hydra-bucket-artifact
+      - name: Skip superseded builds
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [[ "$current" == "$GITHUB_SHA" ]]; then
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'Skipping a build superseded on main.'
+          fi
+      - name: Replace Core and Proxy in S3
+        if: steps.latest.outputs.publish == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.HYDRA_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HYDRA_S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: example-region
+          HYDRA_S3_ENDPOINT: https://s3.example.com
+          HYDRA_S3_BUCKET: example-hydra-bucket
+        run: scripts/publish-s3.sh "$RUNNER_TEMP/example-hydra-bucket-artifact/hydra-linux-x86_64-musl.tar.gz"
