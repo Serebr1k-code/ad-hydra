@@ -4,6 +4,24 @@
 
 The final **Publish latest Linux binaries to S3** job depends on successful verification. It runs only for main pushes or manual main dispatches. It downloads the artifact from that exact run, checks the current main SHA, and skips superseded builds. Publication is serialized; an in-progress upload is not canceled by a newer run.
 
+## Build caches
+
+The verification runner is pinned to Ubuntu24.04. Caches cover:
+
+| Cache | Invalidation and behavior |
+| --- | --- |
+| Bun executable | Managed by setup-bun for pinned Bun1.4.3 |
+| Bun package downloads | OS/architecture, Bun version and `frontend/bun.lock`; compatible downloads survive lockfile changes |
+| pip downloads/wheels | OS/architecture, runner release and `scripts/requirements.txt`; pinned packages are still installed normally |
+| Rust toolchain | `rust-toolchain.toml`, including rustfmt, clippy and native/musl/WASM target libraries |
+| Cargo downloads and compiled dependencies | Rust version/environment, Cargo manifests/locks and build configuration; root and standalone length-prefixed plugin workspaces |
+
+Cargo caching includes native debug/release, musl release and WASM sample targets. The cache action removes redundant registry source extraction, incremental state and workspace build outputs to keep the saved dependency cache useful. Main runs can save it even after a later check fails; PRs restore the shared main cache but do not save the Cargo cache. Cache actions are pinned to immutable commits.
+
+The Vue production bundle rebuilds every run before embedding into Core. Tests and validation are never skipped on a cache hit. Runtime SQLite files, credentials, traffic, worker logs and temporary execution environments are not cached. The uv integration test gives child processes private temporary cache directories; setup-uv's global package cache is therefore deliberately disabled. Apt metadata is refreshed normally; protobuf and musl tools are installed together in one step.
+
+The first run populates the new caches; a later run is required to measure warm-cache speed. The previous uncached successful verification took21m51s, including6m28s for native release and5m54s for static musl build. No speedup is claimed before a cache-hit run completes. Inspect **Actions → Caches**, `gh cache list`, or the cache-action log output for hit/miss and size information. Bump the toolchain cache's `v1` key segment to discard it manually when changing its target set.
+
 ## S3 destination
 
 | Setting | Value |
