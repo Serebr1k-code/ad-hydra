@@ -2,8 +2,9 @@
 set -Eeuo pipefail
 umask 077
 
-# EDIT HERE: direct HTTPS .tar.gz/.zip, or the Actions artifacts index below.
-DOWNLOAD_URL="${HYDRA_DOWNLOAD_URL:-https://api.github.com/repos/nrf24l01/ad-hydra/actions/artifacts?per_page=100}"
+# Normal mode prompts for S3 configuration on stdin; no Git or AWS CLI required.
+# Optional legacy HTTPS archive/index mode (not used for S3).
+DOWNLOAD_URL="${HYDRA_DOWNLOAD_URL:-}"
 ARCHIVE_SHA256="${HYDRA_ARCHIVE_SHA256:-}" # Optional trusted checksum of the downloaded archive.
 INITIAL_USER="${HYDRA_INITIAL_USER:-hydra-admin}"
 INSTALL_UV="${HYDRA_INSTALL_UV:-true}"
@@ -22,8 +23,11 @@ while (($#)); do
       cat <<'HELP'
 Usage: sudo bash install-hydra.sh [--archive BUILD.tar.gz|BUILD.zip]
        bash install-hydra.sh --download-only NEW_DIRECTORY [--archive BUILD.tar.gz|BUILD.zip]
-Edit DOWNLOAD_URL at the top, or set HYDRA_DOWNLOAD_URL. Actions URLs require
-HYDRA_GITHUB_TOKEN (or GH_TOKEN/GITHUB_TOKEN) with Actions read access.
+Default: enter S3 endpoint, region, bucket, access key ID, secret key and optional
+session token on stdin (one line each). Credential input is hidden on terminals.
+Downloads use curl; missing prerequisites are installed automatically as root.
+The S3 key needs GetObject access to hydra-core and hydra-proxy. No Git/AWS CLI.
+--archive retains offline installation; HYDRA_DOWNLOAD_URL selects legacy HTTPS mode.
 Installs on x86_64 Linux with systemd; no Rust, Node or Docker is needed.
 Initial credentials are written to /root/hydra-install-credentials.json (0600).
 Existing users, configuration, certificates and database are preserved.
@@ -37,23 +41,23 @@ if [[ "$mode" == install ]]; then
   [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'This build supports x86_64 Linux.' >&2; exit 1; }
   [[ -d /run/systemd/system ]] || { echo 'A running systemd installation is required.' >&2; exit 1; }
   missing=false
-  for command in python3 openssl getent groupadd useradd runuser systemctl; do
+  for command in python3 curl openssl getent groupadd useradd runuser systemctl; do
     command -v "$command" >/dev/null || missing=true
   done
   if [[ "$missing" == true ]]; then
     if command -v apt-get >/dev/null; then
       apt-get update
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 openssl ca-certificates passwd util-linux
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 curl openssl ca-certificates passwd util-linux
     elif command -v dnf >/dev/null; then
-      dnf install -y python3 openssl ca-certificates shadow-utils util-linux
+      dnf install -y python3 curl openssl ca-certificates shadow-utils util-linux
     else
-      echo 'Install python3, openssl, ca-certificates and shadow/util-linux tools first.' >&2; exit 1
+      echo 'Install python3, curl, openssl, ca-certificates and shadow/util-linux tools first.' >&2; exit 1
     fi
   fi
 fi
 command -v python3 >/dev/null || { echo 'python3 is required.' >&2; exit 1; }
-python3 - "$mode" "$archive" "$output" "$DOWNLOAD_URL" "$ARCHIVE_SHA256" "$INITIAL_USER" "$INSTALL_UV" "$UV_URL" "$UV_SHA256" <<'PY'
-import datetime, hashlib, json, os, pathlib, pwd, re, select, shutil, signal, sqlite3, ssl, subprocess, sys, tarfile, tempfile, time, urllib.error, urllib.parse, urllib.request, uuid, zipfile
+python3 - "$mode" "$archive" "$output" "$DOWNLOAD_URL" "$ARCHIVE_SHA256" "$INITIAL_USER" "$INSTALL_UV" "$UV_URL" "$UV_SHA256" 3<&0 <<'PY'
+import datetime, hashlib, json, os, pathlib, pwd, re, resource, select, shutil, signal, sqlite3, ssl, subprocess, sys, tarfile, tempfile, time, urllib.error, urllib.parse, urllib.request, uuid, zipfile
 
 mode, archive, output, source_url, expected_sha, initial_user, install_uv, uv_url, uv_sha = sys.argv[1:]
 CORE='hydra-core-linux-x86_64-musl'
@@ -83,36 +87,115 @@ def valid_url(url):
     return parsed
 
 
-class Redirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self,request,fp,code,message,headers,url):
-        valid_url(url)
-        redirected=super().redirect_request(request,fp,code,message,headers,url)
-        if redirected and urllib.parse.urlsplit(request.full_url).netloc!=urllib.parse.urlsplit(url).netloc:
-            redirected.remove_header('Authorization')
-            redirected.remove_header('Cookie')
-        return redirected
+def curl_quote(value):
+    require(not any(ord(character)<32 or ord(character)==127 for character in value),'Invalid control character in download configuration')
+    return '"'+value.replace('\\','\\\\').replace('"','\\"')+'"'
+
+
+def curl_download(url,target,limit,configuration='',follow=True):
+    valid_url(url)
+    require(shutil.which('curl'),'curl is required for downloads; install curl or run the installer as root')
+    version=run('curl','--version').stdout.splitlines()[0]
+    match=re.match(r'curl (\d+)\.(\d+)\.(\d+)',version)
+    require(match and tuple(map(int,match.groups()))>=(7,75,0),'curl 7.75 or newer is required for S3 signing; update curl using your package manager')
+    arguments=['curl','--disable','--config','-','--silent','--show-error','--fail',
+        '--proto','=https','--proto-redir','=https','--connect-timeout','20','--max-time','300',
+        '--max-filesize',str(limit),'--dump-header','-','--output',str(target)]
+    if follow: arguments+=['--location','--max-redirs','3']
+    environment=os.environ.copy()
+    if environment.get('SSL_CERT_FILE'): environment['CURL_CA_BUNDLE']=environment['SSL_CERT_FILE']
+    def bound_file_size(): resource.setrlimit(resource.RLIMIT_FSIZE,(limit,limit))
+    try:
+        result=subprocess.run(arguments+['--url',url],input=configuration.encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=environment,timeout=305,preexec_fn=bound_file_size)
+    except (OSError,subprocess.TimeoutExpired):
+        target.unlink(missing_ok=True);raise RuntimeError('curl download failed or timed out') from None
+    require(len(result.stdout)<=256*1024,'Download response headers exceed limit')
+    blocks=[part for part in result.stdout.replace(b'\r\n',b'\n').split(b'\n\n') if part.startswith(b'HTTP/')]
+    lines=blocks[-1].decode('iso-8859-1').splitlines() if blocks else []
+    status=int(lines[0].split()[1]) if lines else 0
+    if result.returncode or status!=200:
+        target.unlink(missing_ok=True)
+        if status==403: raise RuntimeError('Download denied (HTTP 403): the S3 key needs GetObject/read access to the release objects')
+        if 300<=status<400: raise RuntimeError('S3 redirect refused; enter the correct HTTPS S3 endpoint')
+        raise RuntimeError('Download failed (HTTP %s, curl exit %s)'%(status,result.returncode))
+    require(target.is_file() and target.stat().st_size<=limit,'Download exceeds size limit')
+    headers={}
+    for line in lines[1:]:
+        name,separator,value=line.partition(':')
+        if separator:
+            name=name.lower().strip()
+            require(name not in headers or not name.startswith('x-amz-meta-'),'Duplicate S3 release metadata')
+            headers[name]=value.strip()
+    return headers
 
 
 def download(url,target):
-    parsed=valid_url(url)
-    headers={'User-Agent':'Hydra-installer'}
+    parsed=valid_url(url);configuration=''
     if parsed.hostname=='api.github.com':
         token=os.environ.get('HYDRA_GITHUB_TOKEN') or os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
-        if token: headers['Authorization']='Bearer '+token
-        headers['X-GitHub-Api-Version']='2022-11-28'
-    opener=urllib.request.build_opener(Redirect(),urllib.request.HTTPSHandler(context=ssl.create_default_context()))
-    try:
-        with opener.open(urllib.request.Request(url,headers=headers),timeout=20) as response,open(target,'xb') as destination:
-            require(int(response.headers.get('Content-Length','0'))<=MAX_DOWNLOAD,'Download exceeds 256 MiB')
-            size=0; deadline=time.monotonic()+300
-            while True:
-                require(time.monotonic()<deadline,'Download timed out')
-                chunk=response.read(65536)
-                if not chunk: break
-                size+=len(chunk);require(size<=MAX_DOWNLOAD,'Download exceeds 256 MiB');destination.write(chunk)
-    except urllib.error.HTTPError as error:
-        code=error.code;error.close()
-        raise RuntimeError('Download failed (HTTP %s). Actions artifacts need an Actions-read GitHub token; expired artifacts need a newer URL.'%code) from None
+        if token: configuration+='header = '+curl_quote('Authorization: Bearer '+token)+'\n'
+        configuration+='header = "X-GitHub-Api-Version: 2022-11-28"\n'
+    curl_download(url,target,MAX_DOWNLOAD,configuration)
+
+
+def read_s3_input():
+    import termios
+    with os.fdopen(3,'r') as stream:
+        def field(label,hidden=False,optional=False):
+            terminal=stream.isatty();previous=None
+            if terminal:
+                if hidden:
+                    previous=termios.tcgetattr(stream.fileno());changed=previous.copy();changed[3]&=~termios.ECHO
+                    termios.tcsetattr(stream.fileno(),termios.TCSANOW,changed)
+                print(label+': ',end='',file=sys.stderr,flush=True)
+            try: value=stream.readline(4098)
+            finally:
+                if previous is not None:
+                    termios.tcsetattr(stream.fileno(),termios.TCSANOW,previous);print(file=sys.stderr)
+            value=value.rstrip('\r\n')
+            require(len(value)<=4096,'S3 input field exceeds 4096 characters')
+            require(optional or bool(value),'Missing S3 '+label+' on stdin')
+            require(not any(ord(character)<32 or ord(character)==127 for character in value),'Invalid control character in S3 input')
+            return value
+        endpoint=field('endpoint URL').strip();region=field('region').strip();bucket=field('bucket').strip()
+        key=field('access key ID',hidden=True);secret=field('secret access key',hidden=True)
+        token=field('session token (optional; Enter to skip)',hidden=True,optional=True)
+    parsed=valid_url(endpoint)
+    require(not parsed.query and not parsed.fragment,'S3 endpoint must not contain a query or fragment')
+    require(re.fullmatch(r'[a-z0-9][a-z0-9-]{0,62}',region),'Invalid S3 region')
+    require(re.fullmatch(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]',bucket),'Invalid S3 bucket name')
+    return endpoint.rstrip('/'),region,bucket,key,secret,token
+
+
+def verify_binaries(directory,checks):
+    for name,checksum in checks.items():
+        require(digest(directory/name)==checksum,'Binary checksum mismatch: '+name)
+        with open(directory/name,'rb') as executable: header=executable.read(20)
+        require(header[:6]==b'\x7fELF\x02\x01' and header[18:20]==b'\x3e\x00','Expected an x86_64 Linux ELF binary: '+name)
+        os.chmod(directory/name,0o755)
+    print('Both Hydra binary checksums verified',flush=True)
+
+
+def fetch_s3(directory):
+    endpoint,region,bucket,key,secret,token=read_s3_input()
+    parsed=valid_url(endpoint)
+    path=urllib.parse.quote(urllib.parse.unquote(parsed.path).rstrip('/')+'/'+bucket,safe='/-_.~')
+    base=urllib.parse.urlunsplit((parsed.scheme,parsed.netloc,path,'',''))
+    configuration='aws-sigv4 = '+curl_quote('aws:amz:'+region+':s3')+'\nuser = '+curl_quote(key+':'+secret)+'\n'
+    if token: configuration+='header = '+curl_quote('x-amz-security-token: '+token)+'\n'
+    configuration+='header = "Cache-Control: no-cache"\n'
+    bundle=directory/'verified';bundle.mkdir(mode=0o700);checks={};commit=None
+    for remote,local in [('hydra-core',CORE),('hydra-proxy',PROXY)]:
+        headers=curl_download(base+'/'+remote,bundle/local,64*1024*1024,configuration,follow=False)
+        sha=headers.get('x-amz-meta-sha256','');current=headers.get('x-amz-meta-commit','');target=headers.get('x-amz-meta-target','')
+        require(re.fullmatch(r'[0-9a-f]{64}',sha) and re.fullmatch(r'[0-9a-f]{40}',current) and target=='x86_64-unknown-linux-musl','Missing or invalid S3 release checksum/commit/target metadata')
+        require(commit is None or commit==current,'S3 release changed during download: Core and Proxy commits differ; retry after publication finishes')
+        commit=current;checks[local]=sha
+    verify_binaries(bundle,checks)
+    (bundle/'SHA256SUMS').write_text(''.join(sha+'  '+name+'\n' for name,sha in checks.items()))
+    (bundle/'BUILD.txt').write_text('commit='+commit+'\ntarget=x86_64-unknown-linux-musl\n')
+    print('S3 release commit:',commit,flush=True)
+    return bundle
 
 
 def fetch_bundle(directory):
@@ -159,12 +242,7 @@ def fetch_bundle(directory):
         require(match and match[2] not in checks,'Invalid binary checksum manifest')
         checks[match[2]]=match[1].lower()
     require(set(checks)=={CORE,PROXY},'Both binary checksums are required')
-    for name,checksum in checks.items():
-        require(digest(unpacked/name)==checksum,'Binary checksum mismatch: '+name)
-        with open(unpacked/name,'rb') as executable: header=executable.read(20)
-        require(header[:6]==b'\x7fELF\x02\x01' and header[18:20]==b'\x3e\x00','Expected an x86_64 Linux ELF binary: '+name)
-        os.chmod(unpacked/name,0o755)
-    print('Both Hydra binary checksums verified',flush=True)
+    verify_binaries(unpacked,checks)
     return unpacked
 
 
@@ -409,7 +487,7 @@ signal.signal(signal.SIGINT,interrupted)
 
 try:
     with tempfile.TemporaryDirectory(prefix='hydra-install-') as temporary:
-        directory=pathlib.Path(temporary);bundle=fetch_bundle(directory)
+        directory=pathlib.Path(temporary);bundle=fetch_bundle(directory) if archive or source_url else fetch_s3(directory)
         if mode=='download':
             destination=pathlib.Path(output)
             require(not destination.exists(),'Download directory must not exist')

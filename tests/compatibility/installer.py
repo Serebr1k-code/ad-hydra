@@ -1,16 +1,23 @@
 """Exercise the standalone installer archive/download path without host mutations."""
+import contextlib
 import hashlib
+import hmac
 import http.server
 import io
 import json
 import os
+import re
+import select
 import pathlib
+import pty
 import ssl
 import subprocess
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
+import urllib.parse
 import zipfile
 
 ROOT=pathlib.Path(__file__).resolve().parents[2]
@@ -38,13 +45,13 @@ class Installer(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(prefix='hydra-install-test-');self.addCleanup(self.temp.cleanup)
         self.directory=pathlib.Path(self.temp.name)
-    def execute(self,source=None,environment=None,target=None):
+    def execute(self,source=None,environment=None,target=None,stdin=None):
         arguments=['bash',str(SCRIPT),'--download-only',str(target or self.directory/'output')]
         if source is not None:
             path=self.directory/'input';path.write_bytes(source);arguments+=['--archive',str(path)]
         env={key:value for key,value in os.environ.items() if key not in {'HYDRA_DOWNLOAD_URL','HYDRA_ARCHIVE_SHA256','HYDRA_GITHUB_TOKEN','GH_TOKEN','GITHUB_TOKEN'}}
         env.update(environment or {})
-        return subprocess.run(arguments,env=env,capture_output=True,text=True,timeout=30)
+        return subprocess.run(arguments,env=env,input=stdin,capture_output=True,text=True,timeout=30)
     def test_tarball_and_outer_checksum(self):
         source=tar_bundle()
         result=self.execute(source,{'HYDRA_ARCHIVE_SHA256':hashlib.sha256(source).hexdigest()})
@@ -94,6 +101,116 @@ class Installer(unittest.TestCase):
             result=self.execute(environment=env,target=self.directory/'insecure-output');self.assertNotEqual(result.returncode,0)
             self.assertFalse((self.directory/'insecure-output').exists())
         finally:server.shutdown();server.server_close();thread.join()
+
+    @contextlib.contextmanager
+    def s3_fixture(self,behavior='ok',token='temporary-session-token'):
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-keyout',str(self.directory/'s3-key'),'-out',str(self.directory/'s3-cert'),'-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1'],check=True,capture_output=True)
+        requests=[];key='INSTALLER_FIXTURE_KEY';secret='installer-fixture-secret';region='ru-test-1';commit='a'*40
+        header=b'\x7fELF\x02\x01'+b'\0'*12+b'\x3e\0'
+        payloads={'hydra-core':header+b'core over signed HTTPS','hydra-proxy':header+b'proxy over signed HTTPS'}
+        prefix='/api%20files' if behavior=='prefix' else ''
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(inner):
+                requests.append(inner.path)
+                authorization=inner.headers.get('Authorization','')
+                match=re.fullmatch(r'AWS4-HMAC-SHA256 Credential=([^/]+)/([0-9]{8})/([^/]+)/s3/aws4_request, ?SignedHeaders=([^,]+), ?Signature=([0-9a-f]{64})',authorization)
+                valid=False
+                if match:
+                    fields=match[4].split(';');canonical=''.join(name+':'+ ' '.join(inner.headers.get(name,'').split())+'\n' for name in fields)
+                    request='GET\n'+inner.path+'\n\n'+canonical+'\n'+match[4]+'\n'+hashlib.sha256(b'').hexdigest()
+                    scope=match[2]+'/'+region+'/s3/aws4_request'
+                    message='AWS4-HMAC-SHA256\n'+inner.headers.get('X-Amz-Date','')+'\n'+scope+'\n'+hashlib.sha256(request.encode()).hexdigest()
+                    signing=('AWS4'+secret).encode()
+                    for piece in [match[2],region,'s3','aws4_request']:signing=hmac.digest(signing,piece.encode(),'sha256')
+                    expected=hmac.new(signing,message.encode(),'sha256').hexdigest()
+                    valid=(match[1]==key and match[3]==region and hmac.compare_digest(expected,match[5]) and inner.headers.get('X-Amz-Security-Token','')==token)
+                if behavior=='denied' or not valid:
+                    inner.send_response(403);inner.end_headers();inner.wfile.write((key+' '+secret+' '+token).encode());return
+                if behavior=='redirect':
+                    inner.send_response(302);inner.send_header('Location','https://localhost:%d/redirected'%server.server_port);inner.end_headers();return
+                name=inner.path.rsplit('/',1)[-1]
+                if inner.path!=prefix+'/example-hydra-bucket/'+name or name not in payloads:
+                    inner.send_response(404);inner.end_headers();return
+                payload=payloads[name]
+                if behavior=='invalid-elf':payload=b'not an executable'
+                inner.send_response(200)
+                inner.send_header('Content-Length',str(65*1024*1024 if behavior=='oversize' else len(payload)))
+                if behavior!='missing-metadata':
+                    inner.send_header('X-Amz-Meta-Sha256','0'*64 if behavior=='corrupt' else hashlib.sha256(payload).hexdigest())
+                    inner.send_header('X-Amz-Meta-Commit','b'*40 if behavior=='mixed' and name=='hydra-proxy' else commit)
+                    inner.send_header('X-Amz-Meta-Target','x86_64-unknown-linux-musl')
+                inner.end_headers()
+                try:inner.wfile.write(payload)
+                except (BrokenPipeError,ConnectionResetError):pass
+            def log_message(self,*args):pass
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(self.directory/'s3-cert',self.directory/'s3-key')
+        server.socket=context.wrap_socket(server.socket,server_side=True)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            endpoint='https://localhost:%d%s'%(server.server_port,prefix)
+            yield '\n'.join([endpoint,region,'example-hydra-bucket',key,secret,token])+'\n',{'SSL_CERT_FILE':str(self.directory/'s3-cert')},requests,payloads
+        finally:server.shutdown();server.server_close();thread.join()
+    def test_s3_signed_download_from_stdin_and_session_token(self):
+        for behavior,token in [('ok','temporary-session-token'),('prefix','')]:
+            with self.subTest(behavior=behavior),self.s3_fixture(behavior,token) as (stdin,env,requests,payloads):
+                target=self.directory/behavior
+                result=self.execute(environment=env,target=target,stdin=stdin)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual(len(requests),2)
+                self.assertEqual((target/CORE).read_bytes(),payloads['hydra-core'])
+                self.assertEqual((target/PROXY).read_bytes(),payloads['hydra-proxy'])
+                self.assertIn('commit='+'a'*40,(target/'BUILD.txt').read_text())
+                self.assertEqual((target/CORE).stat().st_mode&0o777,0o755)
+                for value in ['INSTALLER_FIXTURE_KEY','installer-fixture-secret','temporary-session-token']:
+                    self.assertNotIn(value,result.stdout+result.stderr)
+    def test_s3_terminal_prompts_hide_credentials(self):
+        with self.s3_fixture() as (stdin,env,requests,_):
+            environment={key:value for key,value in os.environ.items() if key not in {'HYDRA_DOWNLOAD_URL','HYDRA_ARCHIVE_SHA256','HYDRA_GITHUB_TOKEN','GH_TOKEN','GITHUB_TOKEN'}}|env
+            master,slave=pty.openpty();transcript=b''
+            process=subprocess.Popen(['bash',str(SCRIPT),'--download-only',str(self.directory/'terminal-output')],stdin=slave,stdout=slave,stderr=slave,env=environment)
+            os.close(slave)
+            try:
+                for label,value in zip(['endpoint URL','region','bucket','access key ID','secret access key','session token (optional; Enter to skip)'],stdin.splitlines()):
+                    deadline=time.monotonic()+10
+                    while (label+': ').encode() not in transcript:
+                        self.assertLess(time.monotonic(),deadline,'Prompt did not arrive: '+label)
+                        if select.select([master],[],[],.1)[0]:transcript+=os.read(master,65536)
+                    os.write(master,value.encode()+b'\n')
+                deadline=time.monotonic()+10
+                while process.poll() is None:
+                    self.assertLess(time.monotonic(),deadline,'Terminal installer did not finish')
+                    if select.select([master],[],[],.1)[0]:
+                        try:transcript+=os.read(master,65536)
+                        except OSError:break
+                self.assertEqual(process.wait(timeout=3),0,transcript.decode(errors='replace'))
+                for value in stdin.splitlines()[3:]:self.assertNotIn(value.encode(),transcript)
+                self.assertEqual(len(requests),2)
+            finally:
+                if process.poll() is None:process.kill();process.wait()
+                os.close(master)
+
+    def test_s3_corrupt_mixed_missing_oversize_and_invalid_binaries_are_rejected(self):
+        for behavior in ['corrupt','mixed','missing-metadata','oversize','invalid-elf']:
+            with self.subTest(behavior=behavior),self.s3_fixture(behavior) as (stdin,env,requests,_):
+                target=self.directory/behavior
+                result=self.execute(environment=env,target=target,stdin=stdin)
+                self.assertNotEqual(result.returncode,0,result.stdout)
+                self.assertFalse(target.exists())
+    def test_s3_redirect_and_denied_response_do_not_expose_credentials(self):
+        for behavior in ['redirect','denied']:
+            with self.subTest(behavior=behavior),self.s3_fixture(behavior) as (stdin,env,requests,_):
+                result=self.execute(environment=env,stdin=stdin)
+                self.assertNotEqual(result.returncode,0)
+                self.assertEqual(len(requests),1)
+                for value in ['INSTALLER_FIXTURE_KEY','installer-fixture-secret','temporary-session-token']:
+                    self.assertNotIn(value,result.stdout+result.stderr)
+    def test_s3_incomplete_stdin_and_insecure_endpoint_fail_before_network(self):
+        for stdin in ['','https://localhost/\n','http://localhost/\nru-test-1\nexample-hydra-bucket\nKEY\nsecret\n\n']:
+            with self.subTest(stdin_length=len(stdin)):
+                result=self.execute(stdin=stdin)
+                self.assertNotEqual(result.returncode,0)
+                self.assertFalse((self.directory/'output').exists())
 
 
 if __name__=='__main__':unittest.main()
