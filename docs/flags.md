@@ -44,7 +44,7 @@ exactly-once delivery is not guaranteed. Editing or pausing can stop subsequent
 calls; an already claimed child may finish. A restarted Core marks an interrupted
 manual request and recovers its in-flight flags to retry. Recent manual request
 metadata is retained for up to 500 completed requests; audit records retain actor
-provenance. See [Farm runtime and gzip log retention](farm.md).
+provenance. See [Farm runtime and zstd log retention](farm.md).
 
 Click **Resubmit** on a failed flag to requeue it with a fresh attempt budget.
 This explicit action preserves the exact value and records the requesting user;

@@ -75,7 +75,7 @@ python3 tests/e2e/farm_host.py
 scripts/check-contracts.sh
 ```
 
-The host acceptance fixture uses temporary state, a loopback management API, harmless uploaded printing scripts, `/bin/echo`, and Python importing `idna==3.10` through real uv. It verifies service/team selection, direct/all-team execution, output, gzip persistence, flag provenance using a synthetic marker, cancellation, newest-first history, and rotation. It never connects to competition service endpoints.
+The host acceptance fixture uses temporary state, a loopback management API, harmless uploaded printing scripts, `/bin/echo`, and Python importing `idna==3.10` through real uv. It verifies service/team selection, direct/all-team execution, output, zstd persistence, flag provenance using a synthetic marker, cancellation, newest-first history, and rotation. It never connects to competition service endpoints.
 
 ## Automatic flag queue and Python submitter
 
@@ -113,7 +113,7 @@ Logs. Counts represent distinct flag values per run/target: a new value was firs
 inserted by this process; an existing value was already captured elsewhere.
 Repeated scans or repeated occurrences of the same flag in one process do not
 inflate counts. Two processes printing the same new flag count it as new for the
-first committed capture and existing for the other. Gzip output retains all
+first committed capture and existing for the other. Zstd-compressed output retains all
 occurrences. Counts update as stream capture commits and survive restart.
 
 Pre-update runs can recover known new flags from retained capture provenance,
