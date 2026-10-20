@@ -96,7 +96,7 @@ contacts a competition checker or service.
 Open **Submission attempts**, then **Input / output**. Each new attempt retains
 its exact input flag array and original stdout/stderr, including echoed flags.
 Hydra no longer substitutes [redacted flag] in these Python logs. Inputs/output
-remain gzip compressed and are accessible only through authenticated, audited
+use zstd compression; old gzip batches remain readable and are accessible only through authenticated, audited
 reads. The paginated list returns metadata; detail loads only the selected
 attempt. Retention is7 days/1,000 attempts/64 MiB of combined compressed input and
 output; each output stream remains bounded to64 KiB. Historical redacted output

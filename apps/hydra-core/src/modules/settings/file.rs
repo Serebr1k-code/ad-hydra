@@ -106,6 +106,10 @@ pub(super) fn restart_revision(settings: &operations::Settings) -> String {
         .as_object_mut()
         .expect("operations object")
         .remove("traffic_history_per_service_mib");
+    value
+        .as_object_mut()
+        .expect("serializable operations settings")
+        .remove("traffic_history_compression_level");
     digest(&serde_json::to_vec(&value).expect("serializable operations settings"))
 }
 fn digest(bytes: &[u8]) -> String {

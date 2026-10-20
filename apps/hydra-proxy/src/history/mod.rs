@@ -1,4 +1,4 @@
-//! Bounded, gzip-compressed tails of completed TCP and UDP flows. Capture never writes
+//! Bounded, zstd-compressed tails of completed TCP and UDP flows. Capture never writes
 //! to disk on the relay task; one bounded worker owns persistence and cleanup.
 mod storage;
 use hydra_domain::Service;
@@ -106,6 +106,11 @@ enum WriteCommand {
         bytes: u64,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    SetPolicy {
+        bytes: u64,
+        compression_level: i32,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 struct Inner {
@@ -115,6 +120,7 @@ struct Inner {
     pending: Arc<Mutex<HashSet<String>>>,
     writer: mpsc::Sender<WriteCommand>,
     quota: Arc<AtomicU64>,
+    compression_level: Arc<std::sync::atomic::AtomicI32>,
     dropped: Arc<AtomicU64>,
 }
 
@@ -166,6 +172,9 @@ impl HistoryStore {
         let (writer, mut reader) = mpsc::channel::<WriteCommand>(WRITE_QUEUE);
         let quota = Arc::new(AtomicU64::new(disk.quota()));
         let worker_quota = quota.clone();
+        let compression_level =
+            Arc::new(std::sync::atomic::AtomicI32::new(disk.compression_level()));
+        let worker_level = compression_level.clone();
         let dropped = Arc::new(AtomicU64::new(0));
         let worker_dropped = dropped.clone();
         let pending = Arc::new(Mutex::new(HashSet::new()));
@@ -185,6 +194,7 @@ impl HistoryStore {
                     _ => None,
                 };
                 let applied_quota = worker_quota.clone();
+                let applied_level = worker_level.clone();
                 let completed = tokio::task::spawn_blocking(move || {
                     let result = match item {
                         Some(WriteCommand::Persist(history)) => disk.persist(*history),
@@ -192,6 +202,20 @@ impl HistoryStore {
                             let result = disk.set_quota(bytes);
                             if result.is_ok() {
                                 applied_quota.store(bytes, Ordering::Relaxed);
+                            }
+                            let _ = reply
+                                .send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+                            result
+                        }
+                        Some(WriteCommand::SetPolicy {
+                            bytes,
+                            compression_level,
+                            reply,
+                        }) => {
+                            let result = disk.set_policy(bytes, compression_level);
+                            if result.is_ok() {
+                                applied_quota.store(bytes, Ordering::Relaxed);
+                                applied_level.store(compression_level, Ordering::Relaxed);
                             }
                             let _ = reply
                                 .send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
@@ -241,6 +265,7 @@ impl HistoryStore {
             pending,
             writer,
             quota,
+            compression_level,
             dropped,
         }))))
     }
@@ -318,6 +343,38 @@ impl HistoryStore {
 
     pub fn quota(&self) -> u64 {
         self.0.quota.load(Ordering::Relaxed)
+    }
+
+    pub fn compression_level(&self) -> i32 {
+        self.0.compression_level.load(Ordering::Relaxed)
+    }
+
+    pub async fn set_policy(&self, bytes: u64, compression_level: i32) -> anyhow::Result<()> {
+        use hydra_domain::history::{MAX_PER_SERVICE_MIB, MIB, MIN_PER_SERVICE_MIB};
+        anyhow::ensure!(
+            (u64::from(MIN_PER_SERVICE_MIB) * MIB..=u64::from(MAX_PER_SERVICE_MIB) * MIB)
+                .contains(&bytes),
+            "history quota must be 1..1024 MiB per service"
+        );
+        anyhow::ensure!(
+            (hydra_compression::MIN_LEVEL..=hydra_compression::MAX_LEVEL)
+                .contains(&compression_level),
+            "compression level must be 1..=19"
+        );
+        let (reply, completed) = oneshot::channel();
+        self.0
+            .writer
+            .send(WriteCommand::SetPolicy {
+                bytes,
+                compression_level,
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("history worker unavailable"))?;
+        completed
+            .await
+            .map_err(|_| anyhow::anyhow!("history worker unavailable"))?
+            .map_err(anyhow::Error::msg)
     }
 
     pub async fn set_quota(&self, bytes: u64) -> anyhow::Result<()> {
@@ -713,11 +770,14 @@ mod tests {
         assert_eq!(store.quota(), 128 * 1024 * 1024);
         assert!(store.set_quota(0).await.is_err());
         assert!(store.set_quota(1025 * 1024 * 1024).await.is_err());
-        store.set_quota(2 * 1024 * 1024).await.unwrap();
+        assert!(store.set_policy(2 * 1024 * 1024, 0).await.is_err());
+        store.set_policy(2 * 1024 * 1024, 9).await.unwrap();
         assert_eq!(store.quota(), 2 * 1024 * 1024);
+        assert_eq!(store.compression_level(), 9);
         drop(store);
         let reopened = HistoryStore::open(&dir.0).await.unwrap();
         assert_eq!(reopened.quota(), 2 * 1024 * 1024);
+        assert_eq!(reopened.compression_level(), 9);
     }
 
     #[tokio::test]
@@ -745,7 +805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gzip_history_preserves_direction_order_tail_and_survives_restart() {
+    async fn zstd_history_preserves_direction_order_tail_and_survives_restart() {
         let dir = Directory::new();
         let flow_id = uuid::Uuid::new_v4().to_string();
         let store = HistoryStore::open(&dir.0).await.unwrap();
@@ -772,9 +832,12 @@ mod tests {
         let gz = std::fs::read_dir(&dir.0)
             .unwrap()
             .map(Result::unwrap)
-            .find(|e| e.path().extension().is_some_and(|ext| ext == "gz"))
+            .find(|e| e.path().extension().is_some_and(|ext| ext == "zst"))
             .unwrap();
-        assert_eq!(&std::fs::read(gz.path()).unwrap()[..2], &[0x1f, 0x8b]);
+        assert_eq!(
+            &std::fs::read(gz.path()).unwrap()[..4],
+            &[0x28, 0xb5, 0x2f, 0xfd]
+        );
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
             std::fs::metadata(gz.path()).unwrap().permissions().mode() & 0o777,
@@ -837,6 +900,9 @@ mod tests {
             pending: Arc::new(Mutex::new(HashSet::new())),
             writer,
             quota: Arc::new(AtomicU64::new(128 * 1024 * 1024)),
+            compression_level: Arc::new(std::sync::atomic::AtomicI32::new(
+                hydra_compression::DEFAULT_LEVEL,
+            )),
             dropped: Arc::new(AtomicU64::new(0)),
         })));
         let first_id = uuid::Uuid::new_v4().to_string();

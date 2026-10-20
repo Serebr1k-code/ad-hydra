@@ -55,6 +55,12 @@ impl ProxyControl for Rpc {
                 .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
                 .map_or(0, |store| store.quota()),
+            history_compression_level: t
+                .history
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map_or(0, |store| store.compression_level()),
             rule_hit_counts: t
                 .hit_counts
                 .lock()
@@ -71,6 +77,11 @@ impl ProxyControl for Rpc {
         let request = request.into_inner();
         check_provenance(request.actor.as_ref(), &request.request_id)?;
         use hydra_domain::history::{MAX_PER_SERVICE_MIB, MIB, MIN_PER_SERVICE_MIB};
+        if !(hydra_compression::MIN_LEVEL..=hydra_compression::MAX_LEVEL)
+            .contains(&request.compression_level)
+        {
+            return Err(Status::invalid_argument("compression level must be 1..=19"));
+        }
         if !(u64::from(MIN_PER_SERVICE_MIB) * MIB..=u64::from(MAX_PER_SERVICE_MIB) * MIB)
             .contains(&request.per_service_bytes)
         {
@@ -88,7 +99,7 @@ impl ProxyControl for Rpc {
             .clone()
             .ok_or_else(|| Status::unavailable("history unavailable"))?;
         store
-            .set_quota(request.per_service_bytes)
+            .set_policy(request.per_service_bytes, request.compression_level)
             .await
             .map_err(|_| Status::unavailable("history policy could not be applied"))?;
         let actor = request.actor.as_ref().expect("validated actor");
@@ -100,6 +111,7 @@ impl ProxyControl for Rpc {
         tracing::info!(request_id=%request.request_id,actor_id,actor_type=actor.r#type,per_service_bytes=request.per_service_bytes,"traffic history policy applied");
         Ok(Response::new(v1::ConfigureHistoryReply {
             per_service_bytes: store.quota(),
+            compression_level: store.compression_level(),
         }))
     }
     async fn apply_config_snapshot(

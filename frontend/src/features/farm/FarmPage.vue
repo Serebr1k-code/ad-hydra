@@ -129,7 +129,7 @@ onUnmounted(() => { mounted = false; if (timer) clearInterval(timer) })
     <FarmEffectiveness :services="services" @logs="id=>showLogs({id})" />
     <DisclosureSection v-model:open="runsOpen" title="Run history" :description="`${runs.items.length} runs on this page`">
     <FarmRuns :runs="runs.items" :busy="busy" @refresh="action(load, false)" @logs="showLogs" @cancel="cancel" @retry="retry" />
-    <p class="text-sm text-muted-foreground">Runs refresh every 2 seconds, newest first. Gzip compressed logs are retained for 7 days, with at most 1,000 completed runs, paged output with no 1 MiB capture cap, and a total compressed disk budget of 64 MiB. Older output rotates when the shared budget is full. New/existing counts are distinct flag values per target process; * marks partial historical counts.</p>
+    <p class="text-sm text-muted-foreground">Runs refresh every 2 seconds, newest first. Compressed logs are retained for 7 days, with at most 1,000 completed runs, paged output with no 1 MiB capture cap, and a total compressed disk budget of 64 MiB. Older output rotates when the shared budget is full. New/existing counts are distinct flag values per target process; * marks partial historical counts.</p>
     <div class="flex flex-wrap gap-2"><Button v-if="cursors.runs" variant="outline" :disabled="busy" @click="first('runs')">Newest runs</Button><Button v-if="runs.items.length === 100 && runs.next_cursor" variant="outline" :disabled="busy" @click="next('runs')">Older runs</Button><Button variant="outline" :disabled="busy" @click="cleanup">Apply log retention policy</Button></div>
     </DisclosureSection>
     <Dialog :open="Boolean(requestedDetail)" @update:open="open=>{if(!open)closeLogs()}">

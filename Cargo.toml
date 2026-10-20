@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["apps/hydra-core", "apps/hydra-proxy", "crates/hydra-domain", "crates/hydra-wire", "crates/hydra-filter-engine", "crates/hydra-protocol-sdk", "crates/hydra-protocol-runtime"]
+members = ["apps/hydra-core", "apps/hydra-proxy", "crates/hydra-domain", "crates/hydra-compression", "crates/hydra-wire", "crates/hydra-filter-engine", "crates/hydra-protocol-sdk", "crates/hydra-protocol-runtime"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,7 @@ axum = "0.8"
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 clap = { version = "4", features = ["derive"] }
+hydra-compression = { path = "crates/hydra-compression" }
 hydra-domain = { path = "crates/hydra-domain" }
 hydra-filter-engine = { path = "crates/hydra-filter-engine" }
 hydra-protocol-runtime = { path = "crates/hydra-protocol-runtime" }

@@ -23,37 +23,33 @@ pub(crate) async fn persist_logs(
     }).await
 }
 
-/// Gzip encoding for bounded previews, legacy blobs, and individual stream chunks.
+/// Zstandard encoding for bounded previews and stream chunks; the shared decoder
+/// also accepts legacy gzip blobs retained in older database rows.
 pub(crate) fn encode_log(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-    use std::io::Write;
-    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-    encoder.write_all(bytes)?;
-    Ok(encoder.finish()?)
+    hydra_compression::encode(bytes)
 }
 
 pub(crate) fn decode_log(blob: &[u8]) -> anyhow::Result<Vec<u8>> {
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    flate2::read::GzDecoder::new(blob)
-        .take(1024 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
-    anyhow::ensure!(
-        bytes.len() <= 1024 * 1024,
-        "stored log exceeds stream quota"
-    );
-    Ok(bytes)
+    hydra_compression::decode(blob, 1024 * 1024)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn gzip_roundtrip_and_rejects_legacy_decompression_overflow() {
+    fn zstd_roundtrip_and_legacy_gzip_reads_remain_bounded() {
         use std::io::Write;
         let bytes = vec![b'x'; 32768];
         let compressed = encode_log(&bytes).unwrap();
+        assert_eq!(&compressed[..4], b"\x28\xb5\x2f\xfd");
         assert!(compressed.len() < 8192);
         assert_eq!(decode_log(&compressed).unwrap(), bytes);
+        let mut legacy = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        legacy.write_all(b"old gzip row").unwrap();
+        assert_eq!(
+            decode_log(&legacy.finish().unwrap()).unwrap(),
+            b"old gzip row"
+        );
         let bytes = vec![b'x'; 2 * 1024 * 1024];
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         encoder.write_all(&bytes).unwrap();

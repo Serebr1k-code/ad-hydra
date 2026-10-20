@@ -11,7 +11,7 @@ defineProps<{ run: FarmRunDetail; loading: boolean }>()
     <p class="text-sm">New flags: <strong>{{run.new_flags??0}}</strong> · Existing flags: <strong>{{run.existing_flags??0}}</strong></p>
     <p v-if="run.flag_counts_complete===false" class="text-sm text-muted-foreground">Historical counts are partial: duplicate observations were not recorded before this update.</p>
     <ul v-if="run.flag_counts?.length" class="space-y-1 text-sm"><li v-for="item in run.flag_counts" :key="item.target_id">{{item.target_id}} · {{item.new_flags}} new · {{item.existing_flags}} existing</li></ul>
-    <p class="text-sm text-muted-foreground">Gzip logs are paged in 64 KiB views. Output continues past 1 MiB; older retained output is available through the navigation buttons.</p>
+    <p class="text-sm text-muted-foreground">Compressed logs are paged in 64 KiB views. Output continues past 1 MiB; older retained output is available through the navigation buttons.</p>
     <FarmLogStream :run-id="run.id" stream="stdout" />
     <FarmLogStream :run-id="run.id" stream="stderr" />
   </section>

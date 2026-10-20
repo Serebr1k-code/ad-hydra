@@ -2264,6 +2264,9 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/SandboxSettings'
+        traffic_history_compression_level:
+          type: integer
+          format: int32
         traffic_history_per_service_mib:
           type: integer
           format: int32
@@ -3134,6 +3137,11 @@ components:
           type: integer
           format: int64
           minimum: 0
+        history_compression_level:
+          type:
+          - integer
+          - 'null'
+          format: int32
         history_dropped:
           type: integer
           format: int64
@@ -3344,6 +3352,8 @@ components:
       required:
       - editable_config
       - history_apply_pending
+      - compression_apply_pending
+      - core_compression_level_applied
       - restart_required
       - configuration_editable
       - automatic_submission
@@ -3367,8 +3377,13 @@ components:
         checker_batch_size:
           type: integer
           minimum: 0
+        compression_apply_pending:
+          type: boolean
         configuration_editable:
           type: boolean
+        core_compression_level_applied:
+          type: integer
+          format: int32
         editable_config:
           $ref: '#/components/schemas/EditableConfig'
         flag_pattern:
@@ -3397,6 +3412,11 @@ components:
           type: array
           items:
             type: string
+        traffic_history_compression_level_applied:
+          type:
+          - integer
+          - 'null'
+          format: int32
         traffic_history_per_service_mib_applied:
           type:
           - integer

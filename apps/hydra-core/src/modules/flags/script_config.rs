@@ -6,7 +6,6 @@ use crate::modules::{
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
 use utoipa::ToSchema;
 
 #[derive(Clone, Serialize, Deserialize, ToSchema)]
@@ -246,7 +245,7 @@ fn decode_batch(row: BatchRow) -> anyhow::Result<SubmitterBatch> {
     let input_flags = input
         .map(|blob| -> anyhow::Result<Vec<String>> {
             let values: Vec<String> =
-                serde_json::from_slice(&decode_gzip(&blob, MAX_INPUT_BYTES)?)?;
+                serde_json::from_slice(&decode_compressed(&blob, MAX_INPUT_BYTES)?)?;
             anyhow::ensure!(
                 values.len() <= 240 && values.iter().all(|v| v.len() <= 256),
                 "invalid submitter input bounds"
@@ -267,27 +266,19 @@ fn decode_batch(row: BatchRow) -> anyhow::Result<SubmitterBatch> {
         stderr: decode_output(err)?,
     })
 }
-fn decode_gzip(blob: &[u8], limit: usize) -> anyhow::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    flate2::read::GzDecoder::new(blob)
-        .take((limit + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    anyhow::ensure!(
-        bytes.len() <= limit,
-        "submitter diagnostic exceeds decoded size limit"
-    );
-    Ok(bytes)
+fn decode_compressed(blob: &[u8], limit: usize) -> anyhow::Result<Vec<u8>> {
+    hydra_compression::decode(blob, limit)
 }
 fn decode_output(blob: Option<Vec<u8>>) -> anyhow::Result<String> {
     Ok(match blob {
-        Some(blob) => String::from_utf8_lossy(&decode_gzip(&blob, MAX_OUTPUT_BYTES)?).into_owned(),
+        Some(blob) => {
+            String::from_utf8_lossy(&decode_compressed(&blob, MAX_OUTPUT_BYTES)?).into_owned()
+        }
         None => String::new(),
     })
 }
-pub(super) fn encode_gzip(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    encoder.write_all(bytes)?;
-    Ok(encoder.finish()?)
+pub(super) fn encode_compressed(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    hydra_compression::encode(bytes)
 }
 impl Flags {
     pub async fn submitter_batches(

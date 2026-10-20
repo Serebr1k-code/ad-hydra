@@ -24,6 +24,9 @@ pub struct SettingsView {
     pub editable_config: EditableConfig,
     pub traffic_history_per_service_mib_applied: Option<u32>,
     pub history_apply_pending: bool,
+    pub traffic_history_compression_level_applied: Option<i32>,
+    pub compression_apply_pending: bool,
+    pub core_compression_level_applied: i32,
     pub saved_revision: Option<String>,
     pub restart_required: bool,
     pub configuration_editable: bool,
@@ -54,6 +57,9 @@ impl SettingsView {
                 .expect("serializable operations config"),
             traffic_history_per_service_mib_applied: None,
             history_apply_pending: true,
+            traffic_history_compression_level_applied: None,
+            compression_apply_pending: true,
+            core_compression_level_applied: settings.traffic_history_compression_level,
             saved_revision: None,
             restart_required: false,
             configuration_editable: false,
@@ -75,7 +81,7 @@ pub struct Settings {
     pub auth: AuthState,
     pub view: SettingsView,
     pub file: Arc<Mutex<file::ConfigFile>>,
-    history_policy: Option<tokio::sync::watch::Sender<u64>>,
+    history_policy: Option<tokio::sync::watch::Sender<(u64, i32)>>,
     proxy_view: Option<crate::api::SharedView>,
 }
 #[utoipa::path(get,path="/api/v1/system/settings",responses((status=200,body=SettingsView),(status=401)),tag="system")]
@@ -149,7 +155,7 @@ impl Settings {
     }
     pub fn with_history_policy(
         mut self,
-        policy: tokio::sync::watch::Sender<u64>,
+        policy: tokio::sync::watch::Sender<(u64, i32)>,
         view: crate::api::SharedView,
     ) -> Self {
         self.history_policy = Some(policy);
@@ -159,6 +165,7 @@ impl Settings {
     async fn current_view(&self) -> Result<SettingsView, StatusCode> {
         let file = self.file.lock().await.clone();
         let mut view = self.view.clone();
+        view.core_compression_level_applied = hydra_compression::level();
         let (saved, reason) = tokio::task::spawn_blocking(move || {
             let reason = file.readonly_reason();
             file.read().map(|saved| {
@@ -187,9 +194,17 @@ impl Settings {
             view.traffic_history_per_service_mib_applied = (proxy.connected
                 && proxy.history_per_service_bytes > 0)
                 .then_some((proxy.history_per_service_bytes / hydra_domain::history::MIB) as u32);
+            view.traffic_history_compression_level_applied = proxy
+                .connected
+                .then_some(proxy.history_compression_level)
+                .flatten();
         }
         view.history_apply_pending = view.traffic_history_per_service_mib_applied
             != Some(view.editable_config.traffic_history_per_service_mib);
+        view.compression_apply_pending = view.core_compression_level_applied
+            != view.editable_config.traffic_history_compression_level
+            || view.traffic_history_compression_level_applied
+                != Some(view.editable_config.traffic_history_compression_level);
         view.configuration_editable = reason.is_none();
         view.readonly_reason = reason;
         Ok(view)
@@ -253,7 +268,8 @@ async fn update_settings(
     // Serialize API writers across revision check, audit intent, and atomic replacement.
     let file = state.file.lock().await;
     let history_mib = input.editable_config.traffic_history_per_service_mib;
-    let metadata = serde_json::json!({"source":"operations_file","apply_on":"history_live_other_settings_core_restart","traffic_history_per_service_mib":history_mib});
+    let compression_level = input.editable_config.traffic_history_compression_level;
+    let metadata = serde_json::json!({"source":"operations_file","apply_on":"history_live_other_settings_core_restart","traffic_history_per_service_mib":history_mib,"traffic_history_compression_level":compression_level});
     record(
         &state,
         actor.clone(),
@@ -281,8 +297,11 @@ async fn update_settings(
         })
         .await
         {
-            Ok(Ok(saved)) => Ok(u64::from(saved.settings.traffic_history_per_service_mib)
-                * hydra_domain::history::MIB),
+            Ok(Ok(saved)) => Ok((
+                u64::from(saved.settings.traffic_history_per_service_mib)
+                    * hydra_domain::history::MIB,
+                saved.settings.traffic_history_compression_level,
+            )),
             Ok(Err(file::SaveError::Conflict)) => Err(error(
                 StatusCode::CONFLICT,
                 "Configuration changed; reload Settings before saving",
@@ -296,7 +315,7 @@ async fn update_settings(
             )),
         }
     };
-    let outcome = serde_json::json!({"source":"operations_file","traffic_history_per_service_mib":history_mib,"after":{"http_status":result.as_ref().map(|_|200).unwrap_or_else(|(code,_)|code.as_u16())}});
+    let outcome = serde_json::json!({"source":"operations_file","traffic_history_per_service_mib":history_mib,"traffic_history_compression_level":compression_level,"after":{"http_status":result.as_ref().map(|_|200).unwrap_or_else(|(code,_)|code.as_u16())}});
     record(
         &state,
         actor,
@@ -305,9 +324,11 @@ async fn update_settings(
         outcome,
     )
     .await?;
-    let history_bytes = result?;
+    let (history_bytes, compression_level) = result?;
+    hydra_compression::set_level(compression_level)
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "Invalid zstd compression level"))?;
     if let Some(policy) = &state.history_policy {
-        policy.send_replace(history_bytes);
+        policy.send_replace((history_bytes, compression_level));
     }
     drop(file);
     state.current_view().await.map(Json).map_err(|status| {

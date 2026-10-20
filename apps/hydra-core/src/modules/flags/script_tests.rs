@@ -191,7 +191,7 @@ async fn configuration_and_regex_survive_reopen() {
 }
 
 #[tokio::test]
-async fn captured_farm_flags_preserve_exact_batch_input_and_unredacted_gzip_output() {
+async fn captured_farm_flags_preserve_exact_batch_input_and_unredacted_zstd_output() {
     let fixture =
         fixture(b"printf 'count=%s\\n' \"$#\"\nprintf '%s\\n' \"$@\"\nprintf '%s\\n' \"$@\" >&2\n")
             .await;
@@ -238,7 +238,9 @@ async fn captured_farm_flags_preserve_exact_batch_input_and_unredacted_gzip_outp
     );
     assert!(!batch.stdout.contains("[redacted flag]"));
     let (out, err) = f.auth.db.run(|db| Ok(db.query_row("SELECT stdout_gzip,stderr_gzip FROM flag_submitter_batches ORDER BY rowid DESC LIMIT 1", [], |r| Ok((r.get::<_,Vec<u8>>(0)?, r.get::<_,Vec<u8>>(1)?)))?)).await.unwrap();
-    assert!(out.starts_with(&[0x1f, 0x8b]) && err.starts_with(&[0x1f, 0x8b]));
+    assert!(
+        out.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) && err.starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
+    );
     assert!(
         String::from_utf8_lossy(&crate::modules::farm::runtimes::decode_log(&out).unwrap())
             .contains("FLAG")
@@ -583,7 +585,7 @@ async fn input_decode_rejects_oversized_gzip_and_preserves_json_escaping() {
     let id = uuid::Uuid::new_v4().to_string();
     let key = id.clone();
     f.auth.db.run(move |db| {
-        let input = super::script_config::encode_gzip(&serde_json::to_vec(&vec!["quote\"\n\\flag"]).unwrap())?;
+        let input = super::script_config::encode_compressed(&serde_json::to_vec(&vec!["quote\"\n\\flag"]).unwrap())?;
         db.execute("INSERT INTO flag_submitter_batches(id,revision,flag_count,status,started_at,input_gzip) VALUES(?1,1,1,'failed',?2,?3)", params![key,crate::modules::auth::now(),input])?;
         Ok(())
     }).await.unwrap();
@@ -599,7 +601,7 @@ async fn input_decode_rejects_oversized_gzip_and_preserves_json_escaping() {
     f.auth
         .db
         .run(move |db| {
-            let input = super::script_config::encode_gzip(&vec![b'x'; 400000])?;
+            let input = super::script_config::encode_compressed(&vec![b'x'; 400000])?;
             db.execute(
                 "UPDATE flag_submitter_batches SET input_gzip=?2 WHERE id=?1",
                 params![id, input],

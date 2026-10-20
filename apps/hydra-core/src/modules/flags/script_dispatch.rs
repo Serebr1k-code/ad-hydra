@@ -1,7 +1,7 @@
 //! Durable immediate/manual dispatch; one bounded Python child at a time.
 use super::{
     Flags,
-    script_config::{SubmitterConfig, encode_gzip},
+    script_config::{SubmitterConfig, encode_compressed},
 };
 use crate::{
     infrastructure::submitter_process,
@@ -137,7 +137,7 @@ impl Flags {
             }
             if !items.is_empty() {
                 let input = serde_json::to_vec(&items.iter().map(|item| &item.value).collect::<Vec<_>>())?;
-                tx.execute("INSERT INTO flag_submitter_batches(id,revision,flag_count,status,started_at,input_gzip) VALUES(?1,?2,?3,'running',?4,?5)",params![batch,revision,items.len() as u32,now(),encode_gzip(&input)?])?;
+                tx.execute("INSERT INTO flag_submitter_batches(id,revision,flag_count,status,started_at,input_gzip) VALUES(?1,?2,?3,'running',?4,?5)",params![batch,revision,items.len() as u32,now(),encode_compressed(&input)?])?;
                 audit::append(&tx,&audit_actor,"submitter.batch.start",&batch,&batch,true,now())?;
             }
             tx.commit()?;Ok(items)
@@ -187,8 +187,8 @@ impl Flags {
                     .to_vec(),
             ),
         };
-        let out = encode_gzip(&out)?;
-        let err = encode_gzip(&err)?;
+        let out = encode_compressed(&out)?;
+        let err = encode_compressed(&err)?;
         let audit_actor = initiator;
         self.auth.db.run(move|db| {
             let tx=db.transaction()?;

@@ -266,6 +266,10 @@ fn history_defaults_and_bounds_preserve_existing_configuration() {
         128
     );
     assert_eq!(
+        operations::Settings::default().traffic_history_compression_level,
+        1
+    );
+    assert_eq!(
         operations::Settings::load(Some(&fixture.path))
             .unwrap()
             .traffic_history_per_service_mib,
@@ -283,12 +287,19 @@ fn history_defaults_and_bounds_preserve_existing_configuration() {
         assert_eq!(std::fs::read(&fixture.path).unwrap(), before);
     }
     config.traffic_history_per_service_mib = 256;
+    config.traffic_history_compression_level = 19;
     store.save(&revision, &config).unwrap();
     assert_eq!(
         operations::Settings::load(Some(&fixture.path))
             .unwrap()
             .traffic_history_per_service_mib,
         256
+    );
+    assert_eq!(
+        operations::Settings::load(Some(&fixture.path))
+            .unwrap()
+            .traffic_history_compression_level,
+        19
     );
     assert_eq!(
         store.running_restart_revision,
@@ -309,10 +320,11 @@ async fn history_updates_are_live_audited_and_pending_until_proxy_acknowledges()
         "https://localhost".into(),
     );
     let running = operations::Settings::load(Some(&fixture.path)).unwrap();
-    let (policy, mut receive) = tokio::sync::watch::channel(128 * 1024 * 1024u64);
+    let (policy, mut receive) = tokio::sync::watch::channel((128 * 1024 * 1024u64, 1i32));
     let proxy = Arc::new(tokio::sync::RwLock::new(crate::api::ProxyView {
         connected: true,
         history_per_service_bytes: 128 * 1024 * 1024,
+        history_compression_level: Some(1),
         ..Default::default()
     }));
     let state = Settings::new(
@@ -326,6 +338,7 @@ async fn history_updates_are_live_audited_and_pending_until_proxy_acknowledges()
     assert!(!view.history_apply_pending);
     let mut config = view.editable_config;
     config.traffic_history_per_service_mib = 256;
+    config.traffic_history_compression_level = 7;
     let saved = update_settings(
         State(state.clone()),
         Authenticated(audit::Actor::user("operator-id".into())),
@@ -339,16 +352,28 @@ async fn history_updates_are_live_audited_and_pending_until_proxy_acknowledges()
     .unwrap()
     .0;
     receive.changed().await.unwrap();
-    assert_eq!(*receive.borrow(), 256 * 1024 * 1024);
+    assert_eq!(*receive.borrow(), (256 * 1024 * 1024, 7));
     assert!(!saved.restart_required);
     assert!(saved.history_apply_pending);
     assert_eq!(saved.traffic_history_per_service_mib_applied, Some(128));
+    assert!(saved.compression_apply_pending);
+    assert_eq!(saved.core_compression_level_applied, 7);
+    assert_eq!(hydra_compression::level(), 7);
     proxy.write().await.history_per_service_bytes = 256 * 1024 * 1024;
+    proxy.write().await.history_compression_level = Some(7);
     assert!(!state.current_view().await.unwrap().history_apply_pending);
+    assert!(
+        !state
+            .current_view()
+            .await
+            .unwrap()
+            .compression_apply_pending
+    );
     proxy.write().await.connected = false;
     let disconnected = state.current_view().await.unwrap();
     assert!(disconnected.history_apply_pending);
     assert_eq!(disconnected.traffic_history_per_service_mib_applied, None);
+    assert!(disconnected.compression_apply_pending);
     let count=state.auth.db.run(|db|Ok(db.query_row("SELECT count(*) FROM audit WHERE actor_id='operator-id' AND action='settings.update.result' AND success=1",[],|r|r.get::<_,i64>(0))?)).await.unwrap();
     assert_eq!(count, 1);
 }

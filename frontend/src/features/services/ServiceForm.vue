@@ -77,7 +77,7 @@ async function save() {
         <Checkbox id="service-retain-history" v-model="form.retain_history" :disabled="saving" />
         <Label for="service-retain-history">Retain completed stream history</Label>
       </div>
-      <p class="text-sm text-muted-foreground">Keeps a gzip-compressed tail (up to 64 KiB per direction) for 24 hours so finished TCP streams remain inspectable.</p>
+      <p class="text-sm text-muted-foreground">Keeps a compressed tail (up to 64 KiB per direction) for 24 hours so finished TCP streams remain inspectable.</p>
     </div>
     <p v-if="error" role="alert" class="text-sm text-destructive">{{ error }}</p>
     <Button id="service-save" type="submit" :disabled="saving || !decodersReady">{{ saving ? 'Saving…' : 'Save service' }}</Button>

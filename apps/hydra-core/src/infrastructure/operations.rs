@@ -17,6 +17,8 @@ use tokio_util::sync::CancellationToken;
 pub struct Settings {
     #[serde(default = "hydra_domain::history::default_per_service_mib")]
     pub traffic_history_per_service_mib: u32,
+    #[serde(default = "hydra_compression::default_level")]
+    pub traffic_history_compression_level: i32,
     pub flag_pattern: Option<String>,
     #[serde(default)]
     pub auto_submit_captured: bool,
@@ -30,6 +32,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             traffic_history_per_service_mib: hydra_domain::history::default_per_service_mib(),
+            traffic_history_compression_level: hydra_compression::DEFAULT_LEVEL,
             flag_pattern: None,
             auto_submit_captured: false,
             checker: None,
@@ -133,6 +136,11 @@ impl Settings {
                 ..=hydra_domain::history::MAX_PER_SERVICE_MIB)
                 .contains(&settings.traffic_history_per_service_mib),
             "traffic history must be 1..1024 MiB per service"
+        );
+        anyhow::ensure!(
+            (hydra_compression::MIN_LEVEL..=hydra_compression::MAX_LEVEL)
+                .contains(&settings.traffic_history_compression_level),
+            "traffic compression level must be 1..=19"
         );
         if let Some(Checker::Https {
             ca_certificate_der,

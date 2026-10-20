@@ -82,6 +82,9 @@ hydra/
 │       └── tests/                      # Cargo integration tests for HTTP and CLI
 │
 ├── crates/                             # Small, reusable in-process Rust libraries
+│   ├── hydra-compression/
+│   │   ├── Cargo.toml
+│   │   └── src/                         # Bounded zstd writes and legacy gzip reads
 │   ├── hydra-domain/
 │   │   ├── Cargo.toml
 │   │   └── src/                         # Shared IDs, typed Flow/Event/Rule/Actor etc.
@@ -164,6 +167,8 @@ hydra-protocol-sdk ──> hydra-protocol-runtime ──────────
                            ^
                            └── hydra-domain (events/types only)
 
+hydra-compression ────────────────────────────────────> hydra-core, hydra-proxy
+
 frontend ──HTTP/OpenAPI──> hydra-core
 hydra-core ──gRPC/protobuf──> hydra-proxy   (RUNTIME only, no Cargo import)
 ```
@@ -174,13 +179,14 @@ For full clarity, allowed Cargo dependencies:
 
 | Package | May depend on | Must not depend on |
 |---|---|---|
+| `hydra-compression` | anyhow, zstd, flate2 (legacy reads) | `apps/*`, domain, databases, networking |
 | `hydra-domain` | serde, lightweight value/ID types | `apps/*`, db, networking, axum, tonic |
 | `hydra-wire` | `hydra-domain`, prost, tonic | `apps/*`, SQLite, WASM host |
 | `hydra-filter-engine` | `hydra-domain`, regex/aho-corasick | `apps/*`, web framework, databases |
 | `hydra-protocol-sdk` | small WASM-compatible type libraries | `apps/*`, Tokio, wasmi host |
 | `hydra-protocol-runtime` | `hydra-protocol-sdk`, `hydra-domain`, bounded WASM runtime | `apps/*`, SQLite, UI |
-| `hydra-proxy` | domain, wire, filter-engine, protocol-runtime | hydra-core, SQLite, UI/auth |
-| `hydra-core` | domain, wire, filter-engine for validation, SQLite/axum/auth | hydra-proxy, WASM host, raw socket transport |
+| `hydra-proxy` | compression, domain, wire, filter-engine, protocol-runtime | hydra-core, SQLite, UI/auth |
+| `hydra-core` | compression, domain, wire, filter-engine for validation, SQLite/axum/auth | hydra-proxy, WASM host, raw socket transport |
 | `hydra-testkit` | test fixtures and minimal domain types | production runtime dependency of Core/Proxy |
 
 **Code review check:** if shared business logic is duplicated in Core and Proxy, put the truly shared pure part in an existing appropriate crate. Never solve sharing by adding `hydra-core` as a dependency of `hydra-proxy`, or vice versa. Prevent dependency cycles using `cargo metadata` and CI boundary tests.
@@ -273,6 +279,7 @@ members = [
   "apps/hydra-core",
   "apps/hydra-proxy",
   "crates/hydra-domain",
+  "crates/hydra-compression",
   "crates/hydra-wire",
   "crates/hydra-filter-engine",
   "crates/hydra-protocol-sdk",

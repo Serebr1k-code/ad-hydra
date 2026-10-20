@@ -158,13 +158,17 @@ message ServiceConfig {
   bool enabled = 6;
   bool retain_history = 7;
 }
-// Persistent per-service disk budget for completed gzip traffic, including metadata.
+// Persistent per-service disk budget for completed compressed traffic, including metadata.
 message ConfigureHistoryRequest {
   uint64 per_service_bytes = 1;
   Actor actor = 2;
   string request_id = 3;
+  int32 compression_level = 4;
 }
-message ConfigureHistoryReply { uint64 per_service_bytes = 1; }
+message ConfigureHistoryReply {
+  uint64 per_service_bytes = 1;
+  int32 compression_level = 2;
+}
 message GetStatusRequest {}
 message ProxyStatus {
   string proxy_instance_id = 1;
@@ -182,6 +186,7 @@ message ProxyStatus {
   uint64 sample_dropped = 13;
   uint64 history_per_service_bytes = 14;
   uint64 history_dropped = 15;
+  int32 history_compression_level = 16;
 }
 message ApplyServiceSnapshotRequest {
   uint64 revision = 1;

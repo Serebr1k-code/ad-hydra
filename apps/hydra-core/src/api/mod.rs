@@ -21,6 +21,7 @@ use utoipa::{OpenApi, ToSchema};
 pub struct ProxyView {
     pub connected: bool,
     pub history_per_service_bytes: u64,
+    pub history_compression_level: Option<i32>,
     pub history_dropped: u64,
     pub proxy_epoch_id: String,
     pub active_flows: u32,
@@ -40,6 +41,8 @@ impl ProxyView {
         Self {
             connected: true,
             history_per_service_bytes: s.history_per_service_bytes,
+            history_compression_level: (s.history_compression_level > 0)
+                .then_some(s.history_compression_level),
             history_dropped: s.history_dropped,
             proxy_epoch_id: s.proxy_epoch_id,
             active_flows: s.active_flows,

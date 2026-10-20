@@ -1,0 +1,13 @@
+[package]
+name = "hydra-compression"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+flate2 = "1"
+zstd = { version = "0.13", default-features = false }
+
+[lints]
+workspace = true

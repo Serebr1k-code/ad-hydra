@@ -13,12 +13,14 @@ const loading = ref(false), exporting = ref(false), error = ref('')
 let timer:ReturnType<typeof setInterval>|undefined
 let disposed=false,checking=false
 async function checkHistory(){
- if(disposed||saving.value||loading.value||checking||!settings.value?.history_apply_pending)return
+ if(disposed||saving.value||loading.value||checking||!(settings.value?.history_apply_pending||settings.value?.compression_apply_pending))return
  checking=true
  try{const current=await api<SettingsView>('/system/settings');if(!disposed&&!saving.value)settings.value=current}catch(e){if(!disposed)error.value=errorMessage(e)}finally{checking=false}
 }
 const rows = computed(() => settings.value ? [
   { key:'Applied traffic history per service',value:settings.value.traffic_history_per_service_mib_applied==null?'Proxy unavailable / pending':`${settings.value.traffic_history_per_service_mib_applied} MiB` },
+  { key:'Applied zstd level in Core',value:String(settings.value.core_compression_level_applied) },
+  { key:'Applied zstd level in Proxy',value:settings.value.traffic_history_compression_level_applied==null?'Proxy unavailable / pending':String(settings.value.traffic_history_compression_level_applied) },
   { key: 'Flag format', value: settings.value.flag_pattern || 'Not configured' },
   { key: 'Automatic captured submission', value: String(settings.value.automatic_submission) },
   { key: 'Checker', value: settings.value.checker_adapter || 'Not configured' },
@@ -41,7 +43,7 @@ async function save() {
   try {
     settings.value = await api<SettingsView>('/system/settings', 'PUT', {saved_revision: settings.value.saved_revision, editable_config: draft.value})
     draft.value = structuredClone(toRaw(settings.value.editable_config))
-    notice.value = 'Saved to the configuration file. Traffic history applies automatically.' + (settings.value.restart_required?' Restart Core to apply other changes.':'')
+    notice.value = 'Saved to the configuration file. Traffic retention and zstd level apply live.' + (settings.value.restart_required?' Restart Core to apply other changes.':'')
   } catch (cause) { error.value = errorMessage(cause) }
   finally { saving.value = false }
 }
@@ -61,11 +63,12 @@ onUnmounted(()=>{disposed=true;clearInterval(timer)})
 <template>
   <section class="space-y-4">
     <h1 class="text-2xl font-semibold">Settings</h1>
-    <p class="text-muted-foreground">Current installation settings. Checker credentials and signing keys stay on the server. Traffic history limits apply live. Other operator configuration changes take effect after Core restart.</p>
+    <p class="text-muted-foreground">Current installation settings. Checker credentials and signing keys stay on the server. Traffic retention and zstd compression apply live. Other operator configuration changes take effect after Core restart.</p>
     <Alert v-if="error" variant="destructive"><AlertDescription>{{ error }}</AlertDescription></Alert>
     <p v-if="loading" role="status">Loading settings…</p>
     <p v-if="notice" role="status">{{notice}}</p>
     <p v-if="settings?.history_apply_pending" role="status" class="text-sm text-muted-foreground">Saved history limit is pending Proxy connection or application.</p>
+    <p v-if="settings?.compression_apply_pending" role="status" class="text-sm text-muted-foreground">Saved zstd compression level is pending Core and Proxy application.</p>
     <p v-if="settings?.restart_required" role="status" class="font-medium">Saved configuration is pending a Core restart.</p>
     <p v-if="settings?.readonly_reason" role="status">{{settings.readonly_reason}}</p>
     <form v-if="settings && draft" id="settings-form" class="space-y-4" @submit.prevent="save">

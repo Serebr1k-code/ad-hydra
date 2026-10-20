@@ -1,14 +1,13 @@
-//! Single-owner bounded index of retained gzip files. Scan once at startup;
+//! Single-owner bounded index of retained compressed files. Scan once at startup;
 //! completed flows and expiry touch only new or evicted records.
 use super::{
     Datagram, FILE_PREFIX, FlowHistory, MAX_DATAGRAMS, MAX_DIRECTION_BYTES, MAX_ENCODED_BYTES,
     MAX_HISTORY_BYTES, Metadata, TTL_SECONDS, now_ms,
 };
-use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -18,9 +17,31 @@ const MAX_RECORDS: usize = 65_536;
 pub(super) fn paths(directory: &Path, id: &str) -> (PathBuf, PathBuf) {
     let stem = format!("{FILE_PREFIX}{id}");
     (
-        directory.join(format!("{stem}.gz")),
+        directory.join(format!("{stem}.zst")),
         directory.join(format!("{stem}.json")),
     )
+}
+
+fn legacy_path(directory: &Path, id: &str) -> PathBuf {
+    directory.join(format!("{FILE_PREFIX}{id}.gz"))
+}
+
+// A single sidecar identifies one payload. Ambiguous pairs are rejected rather
+// than silently ignoring bytes in quota accounting or selecting stale content.
+fn payload_path(directory: &Path, id: &str) -> anyhow::Result<Option<PathBuf>> {
+    let current = paths(directory, id).0;
+    let legacy = legacy_path(directory, id);
+    anyhow::ensure!(
+        !(current.exists() && legacy.exists()),
+        "ambiguous history payloads"
+    );
+    Ok(if current.exists() {
+        Some(current)
+    } else if legacy.exists() {
+        Some(legacy)
+    } else {
+        None
+    })
 }
 
 type Key = (i64, String);
@@ -39,19 +60,35 @@ pub(super) struct Disk {
     services: HashMap<String, Usage>,
     bytes: u64,
     quota: u64,
+    compression_level: i32,
 }
 
 impl Disk {
     pub(super) fn open(directory: PathBuf, now: i64) -> anyhow::Result<Self> {
         safe_directory(&directory)?;
         let policy = directory.join("history-policy.json");
-        let quota = if policy.exists() {
+        let (quota, compression_level) = if policy.exists() {
             safe_file(&policy)?;
             anyhow::ensure!(
                 policy.metadata()?.len() <= 4096,
                 "history policy exceeds bound"
             );
-            let quota: u64 = serde_json::from_slice(&fs::read(policy)?)?;
+            let value: serde_json::Value = serde_json::from_slice(&fs::read(policy)?)?;
+            let (quota, compression_level) = if let Some(quota) = value.as_u64() {
+                (quota, hydra_compression::DEFAULT_LEVEL)
+            } else {
+                (
+                    value
+                        .get("per_service_bytes")
+                        .and_then(serde_json::Value::as_u64)
+                        .ok_or_else(|| anyhow::anyhow!("invalid history quota"))?,
+                    value
+                        .get("compression_level")
+                        .and_then(serde_json::Value::as_i64)
+                        .and_then(|v| i32::try_from(v).ok())
+                        .ok_or_else(|| anyhow::anyhow!("invalid compression level"))?,
+                )
+            };
             anyhow::ensure!(
                 quota > 0
                     && quota
@@ -59,9 +96,18 @@ impl Disk {
                             * hydra_domain::history::MIB,
                 "invalid history quota"
             );
-            quota
+            anyhow::ensure!(
+                (hydra_compression::MIN_LEVEL..=hydra_compression::MAX_LEVEL)
+                    .contains(&compression_level),
+                "invalid compression level"
+            );
+            (quota, compression_level)
         } else {
-            u64::from(hydra_domain::history::default_per_service_mib()) * hydra_domain::history::MIB
+            (
+                u64::from(hydra_domain::history::default_per_service_mib())
+                    * hydra_domain::history::MIB,
+                hydra_compression::DEFAULT_LEVEL,
+            )
         };
         let mut disk = Self {
             directory,
@@ -69,7 +115,9 @@ impl Disk {
             services: HashMap::new(),
             bytes: 0,
             quota,
+            compression_level,
         };
+        hydra_compression::set_level(compression_level)?;
         // Import existing flat files once. The service ID is already in each
         // sidecar, so no disk-format migration or per-flow directory scan is needed.
         for entry in fs::read_dir(&disk.directory)? {
@@ -82,7 +130,7 @@ impl Disk {
             }
             if let Some(id) = name
                 .strip_prefix(FILE_PREFIX)
-                .and_then(|s| s.strip_suffix(".gz"))
+                .and_then(|s| s.strip_suffix(".gz").or_else(|| s.strip_suffix(".zst")))
             {
                 if uuid::Uuid::parse_str(id).is_ok()
                     && !paths(&disk.directory, id).1.exists()
@@ -111,7 +159,10 @@ impl Disk {
             let metadata_size = fs::metadata(&metadata_path)?.len();
             anyhow::ensure!(metadata_size <= 4096, "history metadata exceeds bound");
             let detail: Metadata = serde_json::from_slice(&fs::read(&metadata_path)?)?;
-            let (payload, _) = paths(&disk.directory, id);
+            let Some(payload) = payload_path(&disk.directory, id)? else {
+                remove_if_present(&metadata_path)?;
+                continue;
+            };
             if detail.flow_id != id
                 || detail.closed_at_ms < now - TTL_SECONDS * 1000
                 || !payload.exists()
@@ -144,7 +195,15 @@ impl Disk {
         self.quota
     }
 
+    pub(super) fn compression_level(&self) -> i32 {
+        self.compression_level
+    }
+
     pub(super) fn set_quota(&mut self, quota: u64) -> anyhow::Result<()> {
+        self.set_policy(quota, self.compression_level)
+    }
+
+    pub(super) fn set_policy(&mut self, quota: u64, compression_level: i32) -> anyhow::Result<()> {
         anyhow::ensure!(
             quota > 0
                 && quota
@@ -152,12 +211,22 @@ impl Disk {
                         * hydra_domain::history::MIB,
             "invalid history quota"
         );
-        if self.quota != quota {
+        anyhow::ensure!(
+            (hydra_compression::MIN_LEVEL..=hydra_compression::MAX_LEVEL)
+                .contains(&compression_level),
+            "invalid compression level"
+        );
+        if self.quota != quota || self.compression_level != compression_level {
             let temporary = self
                 .directory
                 .join(format!("{FILE_PREFIX}{}.tmp.policy", uuid::Uuid::new_v4()));
             let result = (|| -> anyhow::Result<()> {
-                write_private(&temporary, &serde_json::to_vec(&quota)?)?;
+                write_private(
+                    &temporary,
+                    &serde_json::to_vec(
+                        &serde_json::json!({"per_service_bytes":quota,"compression_level":compression_level}),
+                    )?,
+                )?;
                 fs::rename(&temporary, self.directory.join("history-policy.json"))?;
                 fs::File::open(&self.directory)?.sync_all()?;
                 Ok(())
@@ -167,6 +236,8 @@ impl Disk {
             }
             result?;
             self.quota = quota;
+            self.compression_level = compression_level;
+            hydra_compression::set_level(compression_level)?;
         }
         // Enforce decreases immediately and retry any partially failed eviction.
         for service in self.services.keys().cloned().collect::<Vec<_>>() {
@@ -196,6 +267,7 @@ impl Disk {
         let (payload, metadata) = paths(&self.directory, &key.1);
         // Retain both indexes until both unlinks succeed, allowing an I/O retry.
         remove_if_present(&payload)?;
+        remove_if_present(&legacy_path(&self.directory, &key.1))?;
         remove_if_present(&metadata)?;
         let usage = self
             .services
@@ -257,18 +329,20 @@ impl Disk {
             !history.service_id.is_empty() && history.service_id.len() <= 128,
             "invalid history service ID"
         );
-        let payload = gzip_payload(&history)?;
+        let payload = compressed_payload(&history)?;
         let details = serde_json::to_vec(&metadata(&history))?;
         anyhow::ensure!(details.len() <= 4096, "history metadata exceeds bound");
         let (payload_path, metadata_path) = paths(&self.directory, &history.flow_id);
         anyhow::ensure!(
-            !payload_path.exists() && !metadata_path.exists(),
+            !payload_path.exists()
+                && !legacy_path(&self.directory, &history.flow_id).exists()
+                && !metadata_path.exists(),
             "history already exists"
         );
         let size = (payload.len() + details.len()) as u64;
         self.make_room(now_ms(), &history.service_id, size, 1, self.quota)?;
         let nonce = uuid::Uuid::new_v4();
-        let payload_tmp = self.directory.join(format!("{FILE_PREFIX}{nonce}.tmp.gz"));
+        let payload_tmp = self.directory.join(format!("{FILE_PREFIX}{nonce}.tmp.zst"));
         let metadata_tmp = self
             .directory
             .join(format!("{FILE_PREFIX}{nonce}.tmp.json"));
@@ -333,7 +407,7 @@ pub(super) fn safe_directory(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn gzip_payload(history: &FlowHistory) -> anyhow::Result<Vec<u8>> {
+fn compressed_payload(history: &FlowHistory) -> anyhow::Result<Vec<u8>> {
     let mut payload = Vec::new();
     if history.transport == "udp" {
         anyhow::ensure!(
@@ -371,9 +445,7 @@ fn gzip_payload(history: &FlowHistory) -> anyhow::Result<Vec<u8>> {
         payload.len() <= MAX_ENCODED_BYTES,
         "history exceeds encoded bound"
     );
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&payload)?;
-    Ok(encoder.finish()?)
+    hydra_compression::encode(&payload)
 }
 
 fn decode_datagrams(payload: &[u8], count: usize) -> anyhow::Result<Vec<Datagram>> {
@@ -448,8 +520,11 @@ pub(super) fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 pub(super) fn read_record(directory: &Path, id: &str) -> anyhow::Result<Option<FlowHistory>> {
-    let (payload_path, metadata_path) = paths(directory, id);
-    if !metadata_path.exists() || !payload_path.exists() {
+    let (_, metadata_path) = paths(directory, id);
+    let Some(payload_path) = payload_path(directory, id)? else {
+        return Ok(None);
+    };
+    if !metadata_path.exists() {
         return Ok(None);
     }
     safe_file(&metadata_path)?;
@@ -475,11 +550,11 @@ pub(super) fn read_record(directory: &Path, id: &str) -> anyhow::Result<Option<F
     } else {
         MAX_HISTORY_BYTES
     };
-    let file = fs::File::open(payload_path)?;
-    let mut decoder = GzDecoder::new(file).take((bound + 1) as u64);
-    let mut payload = Vec::with_capacity(MAX_HISTORY_BYTES);
-    decoder.read_to_end(&mut payload)?;
-    anyhow::ensure!(payload.len() <= bound, "decompressed history exceeds bound");
+    anyhow::ensure!(
+        payload_path.metadata()?.len() <= MAX_ENCODED_BYTES as u64 + 1024,
+        "compressed history exceeds bound"
+    );
+    let mut payload = hydra_compression::decode(&fs::read(payload_path)?, bound)?;
     let (client, server, datagrams) = if details.transport == "udp" {
         let datagrams = decode_datagrams(&payload, details.datagram_count)?;
         let mut counts = [0u64; 2];
@@ -578,7 +653,7 @@ mod tests {
             detail.as_object_mut().unwrap().remove(key);
         }
         let (payload, sidecar) = paths(&dir.0, &record.flow_id);
-        write_private(&payload, &gzip_payload(&record).unwrap()).unwrap();
+        write_private(&payload, &compressed_payload(&record).unwrap()).unwrap();
         write_private(&sidecar, &serde_json::to_vec(&detail).unwrap()).unwrap();
         assert_eq!(
             Disk::open(dir.0.clone(), now_ms()).unwrap().records.len(),
@@ -587,6 +662,40 @@ mod tests {
         assert_eq!(
             read_record(&dir.0, &record.flow_id).unwrap().unwrap(),
             record
+        );
+    }
+
+    #[test]
+    fn reads_legacy_gzip_payload_and_keeps_zstd_as_the_write_format() {
+        use std::io::Write;
+        let dir = super::super::tests::Directory::new();
+        let record = history(now_ms());
+        let plain = [
+            record.client_to_server.as_slice(),
+            record.server_to_client.as_slice(),
+        ]
+        .concat();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&plain).unwrap();
+        let legacy = dir.0.join(format!("{FILE_PREFIX}{}.gz", record.flow_id));
+        write_private(&legacy, &encoder.finish().unwrap()).unwrap();
+        let (_, sidecar) = paths(&dir.0, &record.flow_id);
+        write_private(&sidecar, &serde_json::to_vec(&metadata(&record)).unwrap()).unwrap();
+        assert_eq!(
+            read_record(&dir.0, &record.flow_id).unwrap().unwrap(),
+            record
+        );
+
+        let fresh = history(now_ms());
+        Disk::open(dir.0.clone(), now_ms())
+            .unwrap()
+            .persist(fresh.clone())
+            .unwrap();
+        let (zstd, _) = paths(&dir.0, &fresh.flow_id);
+        assert!(
+            fs::read(zstd)
+                .unwrap()
+                .starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
         );
     }
 
@@ -650,7 +759,7 @@ mod tests {
             record.service_id = name.into();
             write_private(
                 &paths(&dir.0, &record.flow_id).0,
-                &gzip_payload(&record).unwrap(),
+                &compressed_payload(&record).unwrap(),
             )
             .unwrap();
             write_private(

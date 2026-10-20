@@ -164,10 +164,12 @@ pub async fn run() -> anyhow::Result<()> {
             let auth = AuthState::new(db, crypto, origin);
             let settings =
                 crate::infrastructure::operations::Settings::load(operations.as_deref())?;
+            hydra_compression::set_level(settings.traffic_history_compression_level)?;
             let view = Arc::new(RwLock::new(ProxyView::default()));
-            let (history_policy, history_receiver) = tokio::sync::watch::channel(
+            let (history_policy, history_receiver) = tokio::sync::watch::channel((
                 u64::from(settings.traffic_history_per_service_mib) * hydra_domain::history::MIB,
-            );
+                settings.traffic_history_compression_level,
+            ));
             let settings_view = crate::modules::settings::SettingsView::from_settings(&settings);
             let settings_state =
                 crate::modules::settings::Settings::new(auth.clone(), settings_view, operations)?

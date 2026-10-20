@@ -5,9 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 [dependencies]
 sha2 = "0.10"
-flate2 = "1.1"
 anyhow.workspace = true
 clap.workspace = true
+hydra-compression.workspace = true
 hydra-domain.workspace = true
 hydra-wire.workspace = true
 hydra-filter-engine.workspace = true
@@ -29,6 +29,7 @@ uuid.workspace = true
 workspace = true
 
 [dev-dependencies]
+flate2 = "1.1"
 wat = "1"
 sha2 = "0.10"
 
