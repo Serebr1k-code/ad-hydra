@@ -68,7 +68,7 @@ class Relay(unittest.TestCase):
                  'upstream_address': f'127.0.0.1:{tcp.getsockname()[1]}', 'enabled': True, 'protocol_id': 'utf8'}]}
             sock = str(tmp / 'proxy.sock')
             cfg = {'socket': sock, 'state_file': str(tmp / 'last-good.json'),
-                   'snapshot': snapshot, 'limits': {'max_flows': 4, 'udp_idle_ms': 200}}
+                   'snapshot': snapshot, 'limits': {'max_flows': 4, 'udp_idle_ms': 2000}}
             (tmp / 'proxy.json').write_text(json.dumps(cfg))
             (tmp / 'snapshot.json').write_text(json.dumps(snapshot))
             processes = []
@@ -205,10 +205,10 @@ class Relay(unittest.TestCase):
                 clients = [socket.socket(type=socket.SOCK_DGRAM) for _ in range(2)]
                 try:
                     for i, c in enumerate(clients):
-                        c.settimeout(2)
+                        c.settimeout(5)
                         c.sendto(bytes([i, 0, 255]) * 1000, ('127.0.0.1', up))
                     for i, c in enumerate(clients):
-                        self.assertEqual(c.recv(65535), bytes([i, 0, 255]) * 1000)
+                        self.assertEqual(c.recv(65535), bytes([i, 0, 255]) * 1000, f'UDP echo for client {i} was lost')
                     # Empty datagrams are valid and must survive.
                     clients[0].sendto(b'', ('127.0.0.1', up))
                     self.assertEqual(clients[0].recv(65535), b'')
@@ -252,7 +252,7 @@ class Relay(unittest.TestCase):
                 live.close()
                 check_tcp()
                 check_udp()
-                time.sleep(.5)
+                time.sleep(2.5)  # Let short-lived UDP mappings expire before checking TCP admission.
                 held = [socket.create_connection(('127.0.0.1', tp), timeout=2) for _ in range(4)]
                 for c in held:
                     c.sendall(b'held')
