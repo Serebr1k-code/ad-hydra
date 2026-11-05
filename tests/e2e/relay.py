@@ -63,7 +63,10 @@ class Relay(unittest.TestCase):
                 {'id': 'tcp', 'transport': 'tcp', 'listen_address': f'127.0.0.1:{tp}',
                  'upstream_address': f'127.0.0.1:{tcp.getsockname()[1]}', 'enabled': True, 'protocol_id': 'raw'},
                 {'id': 'udp', 'transport': 'udp', 'listen_address': f'127.0.0.1:{up}',
-                 'upstream_address': f'127.0.0.1:{udp.getsockname()[1]}', 'enabled': True, 'protocol_id': 'raw'},
+                 'upstream_address': f'127.0.0.1:{udp.getsockname()[1]}', 'enabled': True, 'protocol_id': 'raw',
+                 'protection': {'max_active_flows': 4, 'tcp_connections_per_second': 0,
+                                'udp_datagrams_per_second': 0, 'bytes_per_second': 0,
+                                'idle_timeout_ms': 2000}},
                 {'id': 'text', 'transport': 'tcp', 'listen_address': f'127.0.0.1:{text_port}',
                  'upstream_address': f'127.0.0.1:{tcp.getsockname()[1]}', 'enabled': True, 'protocol_id': 'utf8'}]}
             sock = str(tmp / 'proxy.sock')
@@ -251,8 +254,10 @@ class Relay(unittest.TestCase):
                 self.assertEqual(live.recv(64), b'after-half-close')
                 live.close()
                 check_tcp()
+                time.sleep(4)  # Retire earlier UDP mappings before opening another pair.
                 check_udp()
-                time.sleep(2.5)  # Let short-lived UDP mappings expire before checking TCP admission.
+                time.sleep(4)  # Let short-lived UDP mappings expire before checking TCP admission.
+                self.assertEqual(status()['active_flows'], 0, 'Earlier TCP or UDP relays must release their active-flow slots')
                 held = [socket.create_connection(('127.0.0.1', tp), timeout=2) for _ in range(4)]
                 for c in held:
                     c.sendall(b'held')
