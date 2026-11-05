@@ -64,6 +64,9 @@ pub(super) struct Disk {
 }
 
 impl Disk {
+    pub(super) fn directory_path(&self) -> PathBuf {
+        self.directory.clone()
+    }
     pub(super) fn open(directory: PathBuf, now: i64) -> anyhow::Result<Self> {
         safe_directory(&directory)?;
         let policy = directory.join("history-policy.json");
@@ -409,7 +412,7 @@ pub(super) fn safe_directory(path: &Path) -> anyhow::Result<()> {
 
 fn compressed_payload(history: &FlowHistory) -> anyhow::Result<Vec<u8>> {
     let mut payload = Vec::new();
-    if history.transport == "udp" {
+    if history.transport == "udp" || !history.datagrams.is_empty() {
         anyhow::ensure!(
             history.datagrams.len() <= MAX_DATAGRAMS,
             "history datagram bound"
@@ -488,6 +491,7 @@ fn decode_datagrams(payload: &[u8], count: usize) -> anyhow::Result<Vec<Datagram
 
 fn metadata(history: &FlowHistory) -> Metadata {
     Metadata {
+        ordered_tcp: history.transport == "tcp" && !history.datagrams.is_empty(),
         transport: history.transport.clone(),
         datagram_count: history.datagrams.len(),
         datagrams_client_to_server: history.datagrams_client_to_server,
@@ -545,7 +549,11 @@ pub(super) fn read_record(directory: &Path, id: &str) -> anyhow::Result<Option<F
         details.transport == "tcp" || details.transport == "udp",
         "invalid history transport"
     );
-    let bound = if details.transport == "udp" {
+    anyhow::ensure!(
+        !details.ordered_tcp || details.transport == "tcp",
+        "invalid ordered TCP history metadata"
+    );
+    let bound = if details.transport == "udp" || details.ordered_tcp {
         MAX_ENCODED_BYTES
     } else {
         MAX_HISTORY_BYTES
@@ -555,18 +563,36 @@ pub(super) fn read_record(directory: &Path, id: &str) -> anyhow::Result<Option<F
         "compressed history exceeds bound"
     );
     let mut payload = hydra_compression::decode(&fs::read(payload_path)?, bound)?;
-    let (client, server, datagrams) = if details.transport == "udp" {
+    let (client, server, datagrams) = if details.transport == "udp" || details.ordered_tcp {
         let datagrams = decode_datagrams(&payload, details.datagram_count)?;
         let mut counts = [0u64; 2];
         for datagram in &datagrams {
             counts[usize::from(datagram.direction == 2)] += 1;
         }
         anyhow::ensure!(
-            counts[0] <= details.datagrams_client_to_server
-                && counts[1] <= details.datagrams_server_to_client,
+            details.ordered_tcp
+                || (counts[0] <= details.datagrams_client_to_server
+                    && counts[1] <= details.datagrams_server_to_client),
             "history datagram count mismatch"
         );
-        (vec![], vec![], datagrams)
+        if details.ordered_tcp {
+            let mut client = Vec::new();
+            let mut server = Vec::new();
+            for chunk in &datagrams {
+                if chunk.direction == 1 {
+                    client.extend_from_slice(&chunk.data)
+                } else {
+                    server.extend_from_slice(&chunk.data)
+                }
+            }
+            anyhow::ensure!(
+                client.len() == details.client_len && server.len() == details.server_len,
+                "ordered TCP length mismatch"
+            );
+            (client, server, datagrams)
+        } else {
+            (vec![], vec![], datagrams)
+        }
     } else {
         anyhow::ensure!(
             payload.len() == details.client_len + details.server_len,

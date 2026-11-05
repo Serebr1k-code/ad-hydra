@@ -95,6 +95,7 @@ jobs:
       - run: python3 tests/e2e/relay.py
       - run: python3 tests/e2e/proxy_runtime.py
       - run: python3 tests/e2e/udp_history.py
+      - run: python3 tests/e2e/forwarding.py
       - run: cargo build --locked --release --manifest-path plugins/examples/length-prefixed/Cargo.toml --target wasm32-unknown-unknown
       - run: python3 tests/e2e/http_filters.py
         env:

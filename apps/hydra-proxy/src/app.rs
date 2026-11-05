@@ -63,6 +63,19 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         .protocols
         .write()
         .unwrap_or_else(|e| e.into_inner()) = Some(protocols.clone());
+    *telemetry
+        .forwarding
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = Some(
+        crate::forwarding::Store::open(
+            config
+                .state_file
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("forwarding-mappings.jsonl"),
+        )
+        .await?,
+    );
     let manager = Manager::new(config.limits, telemetry.clone(), shutdown.clone());
 
     let state = State::start(config.state_file, config.snapshot, manager, telemetry).await?;

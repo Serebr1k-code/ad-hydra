@@ -72,7 +72,8 @@ impl Context {
                 .evaluate_stream_sizes(&self.config, &self.flow.id, &live_fields),
             Some(Action::DropDatagram)
         ) {
-            self.telemetry.udp_dropped.fetch_add(1, Ordering::Relaxed);
+            self.telemetry
+                .drop_udp(&self.telemetry.budget(&self.config));
             return true;
         }
         self.flow.scan(direction, bytes);
@@ -132,7 +133,8 @@ impl Context {
                     &message_id,
                 );
                 if matches!(action, Some(Action::DropDatagram)) {
-                    self.telemetry.udp_dropped.fetch_add(1, Ordering::Relaxed);
+                    self.telemetry
+                        .drop_udp(&self.telemetry.budget(&self.config));
                     return true;
                 }
             }
@@ -157,7 +159,8 @@ impl Context {
                 Some(Action::DropDatagram)
             )
         {
-            self.telemetry.udp_dropped.fetch_add(1, Ordering::Relaxed);
+            self.telemetry
+                .drop_udp(&self.telemetry.budget(&self.config));
             return true;
         }
         false
@@ -184,18 +187,23 @@ pub async fn listen(
          biased;
          _=shutdown.cancelled()=>break,
          changed=service.changed()=>{sessions.clear();if changed.is_err()||service.borrow().is_none(){break}},
-         _=tick.tick()=>{let now=start.elapsed().as_millis() as u64;sessions.retain(|_,s|!s.task.is_finished()&&now.saturating_sub(s.context.last.load(Ordering::Relaxed))<limits.udp_idle_ms);},
+         _=tick.tick()=>{let now=start.elapsed().as_millis() as u64;sessions.retain(|_,s|!s.task.is_finished()&&now.saturating_sub(s.context.last.load(Ordering::Relaxed))<s.context.flow.protection.as_ref().map_or(limits.udp_idle_ms,|l|l.0.idle(limits.udp_idle_ms)));},
          _=replies.join_next(),if !replies.is_empty()=>{},
          received=listener.recv_from(&mut buf)=>{
           let(n,client)=match received{Ok(v)=>v,Err(error)=>{tracing::warn!(%error,"UDP receive failed");continue}};
-          if n>65535{telemetry.udp_dropped.fetch_add(1,Ordering::Relaxed);continue}
+          let Some(config)=service.borrow().clone()else{break};
+          let budget=telemetry.budget(&config);
+          if !budget.transfer(n,true){telemetry.drop_udp(&budget);continue}
+          if n>65535{telemetry.drop_udp(&budget);continue}
           if let std::collections::hash_map::Entry::Vacant(entry)=sessions.entry(client){
            let Some(config)=service.borrow().clone()else{break};
-           let Ok(permit)=telemetry.permits.clone().try_acquire_owned()else{telemetry.rejected.fetch_add(1,Ordering::Relaxed);telemetry.udp_dropped.fetch_add(1,Ordering::Relaxed);continue};
-           let bind=if config.upstream_address.is_ipv4(){"0.0.0.0:0"}else{"[::]:0"};
-           let socket=match UdpSocket::bind(bind).await{Ok(s)=>Arc::new(s),Err(_)=>{telemetry.udp_dropped.fetch_add(1,Ordering::Relaxed);continue}};
-           if socket.connect(config.upstream_address).await.is_err()||socket.writable().await.is_err(){telemetry.udp_dropped.fetch_add(1,Ordering::Relaxed);continue}
-           let flow=telemetry.open(&config,client,permit);
+           let Ok(permit)=telemetry.permits.clone().try_acquire_owned()else{budget.reject();telemetry.rejected.fetch_add(1,Ordering::Relaxed);telemetry.drop_udp(&budget);continue};
+           let Some(lease)=budget.admit(false)else{telemetry.rejected.fetch_add(1,Ordering::Relaxed);telemetry.drop_udp(&budget);continue};
+           let bind=if config.effective_upstream().is_ipv4(){"0.0.0.0:0"}else{"[::]:0"};
+           let socket=match UdpSocket::bind(bind).await{Ok(s)=>Arc::new(s),Err(_)=>{telemetry.drop_udp(&budget);continue}};
+           if socket.connect(config.effective_upstream()).await.is_err()||socket.writable().await.is_err(){telemetry.drop_udp(&budget);continue}
+           let mut flow=telemetry.open(&config,client,permit);
+           flow.protection=Some(lease);
            let decoder=telemetry.protocols.read().unwrap_or_else(|e|e.into_inner()).as_ref().and_then(|p|match p.session(&config.id,&config.protocol_id){Ok(s)=>Some(s),Err(_)=>{telemetry.decoder_error(&config.id,&flow.id,"decoder_initialization_failed");None}});
            let context=Arc::new(Context{base:RelayBase::new(config,client,telemetry.clone(),Arc::new(Mutex::new(decoder))),flow,last:AtomicU64::new(start.elapsed().as_millis() as u64),start});
            let task=replies.spawn(reply(socket.clone(),listener.clone(),context.clone()));
@@ -203,7 +211,8 @@ pub async fn listen(
           }
           if let Some(s)=sessions.get(&client){
            s.context.activity();if s.context.inspect(Direction::ClientToServer,&buf[..n]){continue}
-           match s.socket.try_send(&buf[..n]){Ok(sent)if sent==n=>{s.context.flow.up.fetch_add(n as u64,Ordering::Relaxed);},_=>{telemetry.udp_dropped.fetch_add(1,Ordering::Relaxed);}}
+           let payload=match rewrite(&s.context,&buf[..n],false).await {Ok(v)=>v,Err(_)=>{telemetry.drop_udp(&budget);continue}};
+           match s.socket.try_send(&payload){Ok(sent)if sent==n=>{s.context.flow.forwarded(n,true);},_=>{telemetry.drop_udp(&budget);}}
           }
          }
         }
@@ -214,27 +223,78 @@ pub async fn listen(
 async fn reply(socket: Arc<UdpSocket>, listener: Arc<UdpSocket>, context: Arc<Context>) {
     let mut buf = vec![0u8; 65536];
     while let Ok(n) = socket.recv(&mut buf).await {
+        if !context
+            .flow
+            .protection
+            .as_ref()
+            .is_none_or(|lease| lease.0.transfer(n, true))
+        {
+            context
+                .telemetry
+                .drop_udp(&context.telemetry.budget(&context.config));
+            continue;
+        }
         context.activity();
         if n > 65535 {
             context
                 .telemetry
-                .udp_dropped
-                .fetch_add(1, Ordering::Relaxed);
+                .drop_udp(&context.telemetry.budget(&context.config));
             continue;
         }
-        if context.inspect(Direction::ServerToClient, &buf[..n]) {
+        let payload = match rewrite(&context, &buf[..n], true).await {
+            Ok(v) => v,
+            Err(_) => {
+                context
+                    .telemetry
+                    .drop_udp(&context.telemetry.budget(&context.config));
+                continue;
+            }
+        };
+        if context.inspect(Direction::ServerToClient, &payload) {
             continue;
         }
-        match listener.try_send_to(&buf[..n], context.client) {
+        match listener.try_send_to(&payload, context.client) {
             Ok(sent) if sent == n => {
-                context.flow.down.fetch_add(n as u64, Ordering::Relaxed);
+                context.flow.forwarded(n, false);
             }
             _ => {
                 context
                     .telemetry
-                    .udp_dropped
-                    .fetch_add(1, Ordering::Relaxed);
+                    .drop_udp(&context.telemetry.budget(&context.config));
             }
         }
     }
+}
+
+async fn rewrite<'a>(
+    context: &Context,
+    bytes: &'a [u8],
+    reverse: bool,
+) -> anyhow::Result<std::borrow::Cow<'a, [u8]>> {
+    if context.config.forwarding.is_none() {
+        return Ok(std::borrow::Cow::Borrowed(bytes));
+    }
+    let store = context
+        .telemetry
+        .forwarding
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("forwarding store unavailable"))?;
+    let format = store.format(&context.config)?;
+    let mut frame = hydra_rewrite::Frame::payload(bytes.to_vec(), 0);
+    if let Err(error) = store
+        .rewrite(
+            &crate::forwarding::namespace(&context.config),
+            &format,
+            &mut frame,
+            reverse,
+        )
+        .await
+    {
+        store.errors.fetch_add(1, Ordering::Relaxed);
+        tracing::warn!(service_id=%context.config.id,"UDP forwarding mapping failed");
+        return Err(error);
+    }
+    Ok(std::borrow::Cow::Owned(frame.wire))
 }

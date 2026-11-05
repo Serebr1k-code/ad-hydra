@@ -7,13 +7,14 @@ root = pathlib.Path(__file__).resolve().parents[1]
 metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version', '1'], cwd=root))
 allowed = {
     'hydra-domain': set(),
+    'hydra-rewrite': {'hydra-domain'},
     'hydra-compression': set(),
     'hydra-wire': {'hydra-domain'},
     'hydra-filter-engine': {'hydra-domain'},
     'hydra-protocol-sdk': set(),
     'hydra-protocol-runtime': {'hydra-domain', 'hydra-protocol-sdk'},
-    'hydra-core': {'hydra-compression', 'hydra-domain', 'hydra-wire', 'hydra-filter-engine'},
-    'hydra-proxy': {'hydra-compression', 'hydra-domain', 'hydra-wire', 'hydra-filter-engine', 'hydra-protocol-runtime', 'hydra-protocol-sdk'},
+    'hydra-core': {'hydra-rewrite', 'hydra-compression', 'hydra-domain', 'hydra-wire', 'hydra-filter-engine'},
+    'hydra-proxy': {'hydra-rewrite', 'hydra-compression', 'hydra-domain', 'hydra-wire', 'hydra-filter-engine', 'hydra-protocol-runtime', 'hydra-protocol-sdk'},
 }
 for package in metadata['packages']:
     name = package['name']

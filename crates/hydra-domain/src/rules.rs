@@ -27,9 +27,27 @@ pub enum Comparison {
     In,
     NotIn,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleDirection {
+    ClientToServer,
+    ServerToClient,
+}
+impl RuleDirection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ClientToServer => "client_to_server",
+            Self::ServerToClient => "server_to_client",
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum Expression {
+    Scoped {
+        direction: RuleDirection,
+        scoped: Box<Expression>,
+    },
     All {
         all: Vec<Expression>,
     },

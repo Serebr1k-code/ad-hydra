@@ -1,5 +1,7 @@
 //! Pure, framework-independent service configuration shared by both applications.
+mod forwarding;
 pub mod history;
+pub use forwarding::{ForwardFraming, Forwarding};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, net::SocketAddr};
 
@@ -13,6 +15,8 @@ pub enum Transport {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Service {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarding: Option<Forwarding>,
     pub id: String,
     pub transport: Transport,
     pub listen_address: SocketAddr,
@@ -22,6 +26,18 @@ pub struct Service {
     pub enabled: bool,
     #[serde(default = "history_enabled")]
     pub retain_history: bool,
+    #[serde(default)]
+    pub protection: Option<ServiceProtection>,
+}
+/// Aggregate service budgets; zero disables only a rate.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceProtection {
+    pub max_active_flows: u64,
+    pub tcp_connections_per_second: u64,
+    pub udp_datagrams_per_second: u64,
+    pub bytes_per_second: u64,
+    pub idle_timeout_ms: u64,
 }
 fn raw() -> String {
     "raw".into()
@@ -37,6 +53,14 @@ pub struct ServiceSnapshot {
     pub services: Vec<Service>,
 }
 
+impl Service {
+    pub fn effective_upstream(&self) -> SocketAddr {
+        self.forwarding
+            .as_ref()
+            .map_or(self.upstream_address, |f| f.target_address)
+    }
+}
+
 impl ServiceSnapshot {
     pub fn validate(&self) -> Result<(), String> {
         if self.services.len() > 128 {
@@ -45,6 +69,32 @@ impl ServiceSnapshot {
         let mut ids = HashSet::new();
         let mut endpoints = HashSet::new();
         for s in &self.services {
+            if let Some(f) = &s.forwarding {
+                if f.team_id.is_empty()
+                    || f.team_id.len() > 128
+                    || f.flag_pattern.is_empty()
+                    || f.flag_pattern.len() > 4096
+                    || f.target_address.port() == 0
+                    || f.target_address.ip().is_unspecified()
+                    || f.target_address.ip().is_multicast()
+                    || f.target_address == s.listen_address
+                {
+                    return Err("invalid forwarding configuration".into());
+                }
+                if (s.transport == Transport::Udp) != matches!(f.framing, ForwardFraming::Datagram)
+                {
+                    return Err(
+                        "UDP requires datagram forwarding; TCP requires message framing".into(),
+                    );
+                }
+            }
+            if let Some(p) = &s.protection
+                && (p.max_active_flows == 0 || p.idle_timeout_ms == 0)
+            {
+                return Err(
+                    "protection active-flow limit and idle timeout must be positive".into(),
+                );
+            }
             if s.id.is_empty() || s.id.len() > 128 || !ids.insert(&s.id) {
                 return Err("service IDs must be unique, nonempty, and at most 128 bytes".into());
             }
@@ -71,10 +121,10 @@ impl ServiceSnapshot {
             if self.services.iter().any(|other| {
                 other.enabled
                     && other.transport == s.transport
-                    && other.listen_address.port() == s.upstream_address.port()
-                    && (other.listen_address.ip() == s.upstream_address.ip()
+                    && other.listen_address.port() == s.effective_upstream().port()
+                    && (other.listen_address.ip() == s.effective_upstream().ip()
                         || (other.listen_address.ip().is_unspecified()
-                            && s.upstream_address.ip().is_loopback()))
+                            && s.effective_upstream().ip().is_loopback()))
             }) {
                 return Err("upstream points to a Hydra listener".into());
             }
@@ -88,6 +138,7 @@ mod tests {
     use super::*;
     fn service() -> Service {
         Service {
+            forwarding: None,
             id: "one".into(),
             transport: Transport::Tcp,
             listen_address: "127.0.0.1:2001".parse().unwrap(),
@@ -95,6 +146,7 @@ mod tests {
             protocol_id: "raw".into(),
             enabled: true,
             retain_history: true,
+            protection: None,
         }
     }
     #[test]

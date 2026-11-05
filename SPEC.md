@@ -32,6 +32,10 @@ A service has id, TCP/UDP transport, listen endpoint, backend endpoint, protocol
 
 TCP: correct full-duplex bytes, ordering, backpressure, EOF/half-close, fragmented messages, TLS passthrough when not terminated, connection timeouts. UDP: preserve datagram boundaries and payload bytes, correct bidirectional client-to-upstream session mapping and idle TTL, bounded session table. Transport fast path must be independent from gRPC and SQLite. Avoid plugin failure crashing the relay.
 
+Overload protection amendment 2026-10-20: optionally configure each service's active-session ceiling, TCP admission rate, UDP datagram rate, aggregate byte rate and idle timeout. Aggregate by service rather than source IP because competition traffic can share a gateway. Enforce before costly inspection/capture and upstream admission; reject complete TCP connections or complete UDP datagrams, with bounded local state and cumulative per-service counters. Keep the global cap and existing services' unprotected behaviour unless explicitly enabled. Show bounded recent live charts of connections, active streams, byte rates and drops in the console; no additional monitor process or metrics database. See docs/traffic-protection.md.
+
+Forwarding amendment 2026-10-22 (explicit user approval): services may opt into routing to an enabled configured competition team with generated same-format/same-length flag substitution and restoration in replies. Persist reversible mappings separately in protected bounded Proxy state across connections/restarts; this is the explicit exception to value-free defensive detection and unchanged payload forwarding. Never enqueue these values for submission. Rewriting requires supported plaintext message framing; unsupported/partial framing fails closed in enabled mode. Disabled mode retains byte-transparent universal TCP/UDP forwarding. See docs/flag-forwarding.md and DECISIONS028.
+
 ## 5. Protocol system and inspection
 
 - Built-in HTTP/1.1 parser with headers, method, path, body metadata (bounded inspection), message direction; HTTP/2, WebSocket and TLS termination are future integrations unless implemented and tested. Unknown/encrypted raw traffic remains pass-through.
@@ -55,9 +59,13 @@ Keep network filtering backend trait independent of userspace implementation; do
 
 Traffic UX amendment 2026-10-17: hide streams with actual enforced blocks by default, with a Show blocked checkbox to include them. Highlight connections containing detected flag findings. Give each service a consistent color stripe on its stream cards. Shadow hits and backend HTTP errors do not count as blocked. See docs/traffic-view.md.
 
+Terminal-view amendment 2026-10-22: the shared stream viewer offers read-only terminal playback alongside captured hex and decoded fields. UTF-8 profiles default to terminal view; Raw remains hex. Preserve parsed message insertion order and retain bounded ordered TCP chunks for new histories, with backward-readable legacy archives and honest unavailable-interleaving states. No shell/PTY or packet-injection interface is introduced. See docs/traffic-view.md and DECISIONS029.
+
 Core receives only parsed telemetry batches and indexes `Flow`, `Message`, `Finding/RuleHit`. Browse/filter by service, time, transport, source/destination, direction, parser fields, matched rule/flag. Flow detail shows bidirectional conversation, timestamps and structured fields. For configured TCP and UDP services, Proxy retains a rolling tail of up to 64 KiB per direction and zstd-compresses each completed flow for up to 24 hours, subject to a configurable per-service disk quota (default 128 MiB for compressed payloads and sidecar metadata) and oldest-first eviction within that service. Settings saves apply the history quota and zstd compression level (1–19, default 1) live through Core-to-Proxy control, retry after reconnection, and persist across restart. Existing gzip archives remain readable; level changes affect new writes only. Retention is enabled by default per service and can be disabled live. Captures exceeding the tail, active-history limit, write queue or storage quota are marked incomplete or counted as lost; relay forwarding continues unchanged. Core fetches a completed history only on demand through authenticated, audited `GET /traffic/flows/{id}/history`; the RPC identifies a known flow and never accepts a destination. Raw bytes default to hex with explicit UTF-8 and ASCII views. Decoded profiles replay saved parsed messages; unknown protocols show metadata and retained bytes without inventing decoded content. UDP history retains whole datagrams in capture order, including empty datagrams, with direction, timestamp and sequence metadata; at most 1,024 datagrams are retained per flow. Both transports support saved-history filter preview with explicit partial/unavailable states. Existing one-shot `GetSample` remains available for the next live chunk.
 
 Proxy raw sample disk ring with hard quota, generation/version reference to avoid stale offsets; no unlimited packet capture. Core SQLite WAL with one batched writer and bounded queues. Normal telemetry may drop on overload but must count/notify losses. Critical events have finite persisted spool, monotonically sequenced `(proxy_epoch_id, seq)`, Core durable commit before ACK, replay/dedup on reconnect. If critical spool is exhausted, make it observable; cannot promise unbounded guaranteed delivery.
+
+Favourites amendment 2026-10-20: users can save active or completed streams. Preserve their retained metadata, decoded content and raw zstd history across normal rotation/restart, using a separate bounded archive with explicit capacity errors rather than automatic favourite eviction. Retention does not reconstruct already lost data or remove capture-tail limits. Mark partial/unavailable history and decoded capture limits explicitly; removing a favourite restores normal rotation eligibility. Favourites are shared by all equal-privilege authenticated users, and mutations carry audit provenance. See docs/traffic-protection.md.
 
 ## 8. Exploit Farm
 
@@ -78,6 +86,8 @@ HTTP surface: `/auth`, `/users` (no registration), `/services`, `/filters` (+ to
 Internal gRPC service groups: `ProxyControl` (status and atomic service/rule snapshots, plugins), `ProxyTelemetry` (parsed normal and critical streams plus ACK), `ProxyDiagnostics` (on-demand sample and bounded test connection to configured competition service). Authenticate local core using Unix socket owner/mode and peer credentials where supported. Proxy should store last-known-good config and restore it after restart; Core reconciles state/revisions on reconnect.
 
 ## 11. Resource strategy and delivery
+
+Database-cap amendment 2026-10-22 (explicit user instruction): do not impose an application-wide SQLite file-size/page-count ceiling. Keep bounded in-memory state and independent traffic/log/queue retention quotas. Preserve audit records; unchanged configuration acknowledgements must not create duplicate audit rows. A successful login must not be prevented by an artificial shared database quota.
 
 - Single Rust workspace: proxy binary, core binary, shared types/SDK/proto, embedded static web UI. Systemd unit(s) and minimal config with example safe deployment.
 - No resource-unbounded allocations, no per-packet gRPC, no full PCAP by default. Run critical network operations independently from UI/core. Prioritize backend game services and proxy over farm. Avoid writing individual packets as SQLite rows.
@@ -108,3 +118,20 @@ Required acceptance tests:
 ## 14. Mandatory source tree and scalability
 
 `REPOSITORY_STRUCTURE.md` is the **normative repo layout and dependency-boundary contract**, not an optional style guide. Use its virtual Cargo workspace, two application crates, only genuinely needed reusable crates, feature-organized Core modules, layered Proxy, one canonical Proto path, generated OpenAPI snapshot, per-crate tests and explicit end-to-end harness. Maintain no Core↔Proxy package dependency, no SQLite or auth inside Proxy, no transport socket code inside Core, and no direct UI↔Proxy connectivity. Include structure-compliance checks in Phase 0 and every milestone. If a necessary deviation arises, record the reason and tests in `DECISIONS.md`.
+
+
+### Decoded storage amendment — 2026-10-23
+
+Retain decoded traffic independently per service with a256MiB budget measured on compressed record payloads, using fixed zstd level3. Session metadata, parsed events and messages are compressed at rest; JSON API/search behavior remains unchanged. SQLite pages/index overhead and captured-byte archives are separate from the decoded payload budget. Do not rotate another service to satisfy a busy service's budget. Evict oldest non-favourite closed sessions coherently with their related rows, stopping once within quota. Trim active-session tails only when necessary and visibly mark partial history; keep their session cards. Favourites remain protected with their existing finite admission bounds. Migrate existing retained JSON without dropping it; restore message indexes and session cards only where retained event records support recovery.
+
+
+### Per-condition direction amendment — 2026-10-23
+
+Every visual filter condition has an independent Both/Client→server/Server→client selector. The selected direction scopes that condition rather than the entire filter. Outside its scope, the condition is inapplicable (Unknown), including under NOT; absent fields remain Unknown. AND/OR groups keep message-local evaluation: opposite exclusive sides cannot match the same message under AND. Persist scopes in the expression AST and carry them in internal gRPC rule snapshots and previews. Preserve existing expressions; when editing legacy filter-wide guards, restore the guard on each condition without changing enforcement behavior.
+
+
+### HTTP viewer and service presentation amendment — 2026-10-23
+
+Decoded HTTP messages have readable method/target or status/reason summaries, retained headers/trailers preserving order and duplicates, decoded query parameter rows, and text/JSON body previews. JSON formatting changes whitespace only, preserving numeric tokens, duplicate keys and escapes. Capture truncation/unavailable text is explicit; packet parsing and existing framing/preview limits are unchanged. The shared viewer is reused in filter previews.
+
+Services list columns are Name, Color (a clickable square), Transport, Listener, Destination, Decoder and Buttons. Names are bounded Core-owned metadata saved atomically with service changes and audited with server-derived actors. Old clients omitting name preserve it; unnamed existing services fall back to their stable IDs. Name metadata does not enter Proxy transport configuration. Expose existing TCP mirroring/flag-substitution configuration through a visible per-service action; opening that action never enables it automatically.

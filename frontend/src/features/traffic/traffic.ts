@@ -5,8 +5,12 @@ export function direction(value: unknown) { return value === 1 ? 'Client → ser
 export function transportLabel(value:unknown):string { return value===1?'TCP':value===2?'UDP':'Unknown transport' }
 export function timestamp(value: unknown) { return typeof value === 'number' && Number.isFinite(value) ? new Date(value).toISOString() : 'Unknown time' }
 export function endpoint(value: unknown) { const v=record(value), ip=text(v.ip); return ip ? `${ip.includes(':')?'['+ip+']':ip}:${text(v.port)}` : 'Unknown endpoint' }
-export function flowRows(page: Page) { return page.items.map(item => ({ ...item, closed:item.closed, blocked:item.blocked===true, has_flag:item.has_flag===true, flow_id:text(item.flow_id), service_id:text(item.service_id), transport:Number(item.transport??0), client:endpoint(item.client), destination:endpoint(item.upstream), started:timestamp(item.occurred_ms), state:item.closed?'Closed':'Open', bytesUp:text(record(item.closed).bytes_client_to_server), bytesDown:text(record(item.closed).bytes_server_to_client) })) }
+export function flowRows(page: Page) { return page.items.map(item => ({ ...item, closed:item.closed, favorite:item.favorite===true, raw_history_state:text(item.raw_history_state), decoded_incomplete:item.decoded_incomplete===true, blocked:item.blocked===true, has_flag:item.has_flag===true, flow_id:text(item.flow_id), service_id:text(item.service_id), transport:Number(item.transport??0), client:endpoint(item.client), destination:endpoint(item.upstream), started:timestamp(item.occurred_ms), state:item.closed?'Closed':'Open', bytesUp:text(record(item.closed).bytes_client_to_server), bytesDown:text(record(item.closed).bytes_server_to_client) })) }
 export type Flow = ReturnType<typeof flowRows>[number]
+/** A favourite can outlive its last lifecycle event after a Proxy interruption. */
+export function canReadSavedHistory(flow: Pick<Flow,'state'|'favorite'|'raw_history_state'> | undefined): boolean {
+ return flow?.state==='Closed'||Boolean(flow?.favorite&&['ready','partial'].includes(flow.raw_history_state))
+}
 export function mergeFlows(current: Flow[], incoming: Flow[], older = false): Flow[] {
  const unique = new Map<string, Flow>()
  for (const flow of older ? [...current,...incoming] : [...incoming,...current]) {
@@ -14,13 +18,13 @@ export function mergeFlows(current: Flow[], incoming: Flow[], older = false): Fl
  }
  return [...unique.values()].slice(0,500)
 }
-export function messageRows(page: Page) { return page.items.map(item => ({ ...item, blocked:item.blocked===true, message_id:text(item.message_id), occurred_ms:item.occurred_ms, direction:item.direction, message_type:text(item.message_type), protocol_id:text(item.protocol_id), fields:record(item.fields), truncated:item.truncated===true })) }
+export function messageRows(page: Page) { return page.items.map(item => ({ ...item, blocked:item.blocked===true, message_id:text(item.message_id), stream_sequence:item.stream_sequence, occurred_ms:item.occurred_ms, direction:item.direction, message_type:text(item.message_type), protocol_id:text(item.protocol_id), fields:record(item.fields), truncated:item.truncated===true })) }
 export type Message = ReturnType<typeof messageRows>[number]
 export function serviceProtocol(service:{id:string;protocol_id:string},activations:{service_id:string;id:string;version:string;applied:boolean}[]):string {
  const active=activations.find(item=>item.service_id===service.id&&item.applied)
  return active?`custom:${active.id}/${active.version}`:service.protocol_id
 }
-export function initialStreamMode(protocolId: string): 'bytes'|'decoded' { return protocolId==='raw'?'bytes':'decoded' }
+export function initialStreamMode(protocolId: string): 'bytes'|'decoded'|'terminal' { return protocolId==='raw'?'bytes':protocolId==='utf8'?'terminal':'decoded' }
 export function fields(message: Pick<Message,'fields'>) { return Object.entries(message.fields).map(([key,value])=>({key,type:text(record(value).type),value:JSON.stringify(record(value).value)??''})) }
 /** Retained HTTP headers, preserving observed spelling, duplicates and whitespace. */
 export function httpHeaderLines(field: unknown): string[] | undefined {

@@ -183,7 +183,15 @@ class Browser(unittest.TestCase):
                 wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent==='Add service' && !b.disabled)")
                 cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add service').click()")
                 wait("document.querySelector('#service-form') !== null")
+                self.assertEqual(cdp.evaluate("document.querySelector('#service-forwarding').getAttribute('aria-checked')"), 'false')
+                cdp.evaluate("document.querySelector('#service-forwarding').click()")
+                wait("document.querySelector('#forward-pattern') !== null")
+                self.assertEqual(cdp.evaluate("document.querySelector('#forward-pattern').value"), '[A-Z0-9]{31}=')
+                self.assertIn('TCP message framing',cdp.evaluate("document.querySelector('#service-form').innerText"))
+                cdp.evaluate("document.querySelector('#service-forwarding').click()")
+                wait("document.querySelector('#forward-pattern') === null")
                 upstream=socket.socket();upstream.bind(('127.0.0.1',0));upstream.listen();upstream.settimeout(10)
+                http_body=b'{"message":"<b>hello</b>","items":[1,2]}'
                 release_response=threading.Event()
                 def reply():
                     try:
@@ -195,23 +203,39 @@ class Browser(unittest.TestCase):
                                 if not chunk:return
                                 data+=chunk
                             release_response.wait(5)
-                            connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\nX-Reply: visible\r\nConnection: close\r\n\r\nOK')
+                            connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(http_body)).encode()+b'\r\nContent-Type: application/json\r\nX-Reply: visible\r\nConnection: close\r\n\r\n'+http_body)
                     except OSError:
                         pass
                 threading.Thread(target=reply,daemon=True).start()
-                service = {'transport':'tcp','listen_address':f'127.0.0.1:{port()}','upstream_address':f'127.0.0.1:{upstream.getsockname()[1]}','protocol_id':'http','enabled':True}
+                service = {'name':'Browser HTTP','transport':'tcp','listen_address':f'127.0.0.1:{port()}','upstream_address':f'127.0.0.1:{upstream.getsockname()[1]}','protocol_id':'http','enabled':True}
                 def fill_service(value):
                     wait("document.querySelector('#service-save') && !document.querySelector('#service-save').disabled")
-                    for field,key in [('service-listener','listen_address'),('service-backend','upstream_address'),('service-profile','protocol_id')]:
+                    value.setdefault('name',value['listen_address'])
+                    for field,key in [('service-name','name'),('service-listener','listen_address'),('service-backend','upstream_address'),('service-profile','protocol_id')]:
                         cdp.evaluate(f"{{const e=document.querySelector('#{field}');e.value={json.dumps(value[key])};e.dispatchEvent(new Event('input',{{bubbles:true}}));}}")
                     cdp.evaluate("document.querySelector('#service-form').requestSubmit()")
                     wait(f"document.querySelector('#page').innerText.includes({json.dumps(value['listen_address'])}) && !document.querySelector('#service-form')")
+                cdp.click("document.querySelector('#service-protection')")
+                wait("document.querySelector('#protection-max_active_flows')?.value==='128'")
                 fill_service(service)
                 # A second real configured service has no sessions, to verify dropdown filtering.
                 cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add service').click()")
                 wait("document.querySelector('#service-form') !== null")
-                other={**service,'listen_address':f'127.0.0.1:{port()}'}
+                other={**service,'name':'Unused service','listen_address':f'127.0.0.1:{port()}'}
                 fill_service(other)
+                self.assertEqual(cdp.evaluate("[...document.querySelector('#page table').querySelectorAll('thead th')].map(e=>e.textContent)"),['Name','Color','Transport','Listener','Destination','Decoder','Buttons'])
+                self.assertIn('Browser HTTP',cdp.evaluate("document.querySelector('#page table').innerText"))
+                self.assertEqual(cdp.evaluate("document.querySelector('#page table [aria-label^=\"Set color for\"]').textContent.trim()"),'')
+                cdp.click("[...document.querySelectorAll('#page tr')].find(r=>r.innerText.includes('Browser HTTP')).querySelectorAll('button')[2]")
+                wait("Boolean(document.querySelector('#service-forwarding-settings'))")
+                self.assertEqual(cdp.evaluate("document.querySelector('#service-forwarding').getAttribute('aria-checked')"),'false')
+                self.assertIn('TCP mirroring',cdp.evaluate("document.querySelector('#service-forwarding-settings').textContent"))
+                cdp.call('Input.dispatchKeyEvent',{'type':'keyDown','key':'Escape','code':'Escape','windowsVirtualKeyCode':27})
+                cdp.call('Input.dispatchKeyEvent',{'type':'keyUp','key':'Escape','code':'Escape','windowsVirtualKeyCode':27})
+                wait("!document.querySelector('#service-form')")
+                pathlib.Path('/tmp/hydra-services-desktop.png').write_bytes(base64.b64decode(cdp.call('Page.captureScreenshot',{'format':'png'})['data']))
+                wait("document.querySelectorAll('[aria-label=\"Live service metrics\"] svg').length>=4", seconds=10)
+                wait("document.querySelector('[aria-label=\"Live service metrics\"]')?.innerText.includes('Live · every 2 seconds')", seconds=10)
                 cdp.click("[...document.querySelectorAll('#page tr')].find(e=>e.innerText.includes("+json.dumps(service['listen_address'])+")).querySelector('[aria-label^=\"Set color for\"]')")
                 wait("document.querySelectorAll('[role=dialog] [aria-label$=\"service color\"][aria-pressed]').length===12")
                 cdp.click("document.querySelector('[aria-label=\"Cyan service color\"]')")
@@ -226,7 +250,7 @@ class Browser(unittest.TestCase):
                     except OSError:time.sleep(.05)
                 else:self.fail('Fixture listener did not apply')
                 with connection:
-                    connection.sendall(b'GET /browser-stream HTTP/1.1\r\nHost: browser-fixture\r\nX-Fixture-Flag: FLAG123456\r\nX-Visible: one\r\nX-Visible: two\r\nConnection: close\r\n\r\n')
+                    connection.sendall(b'GET /browser-stream?tag=one&tag=two HTTP/1.1\r\nHost: browser-fixture\r\nX-Fixture-Flag: FLAG123456\r\nX-Visible: one\r\nX-Visible: two\r\nConnection: close\r\n\r\n')
                     wait("Boolean(document.querySelector('#traffic-stream [data-direction=\"1\"]'))")
                     release_response.set()
                     self.assertIn(b'200 OK',connection.recv(4096))
@@ -238,13 +262,27 @@ class Browser(unittest.TestCase):
                 self.assertEqual(cdp.evaluate("document.querySelector('#traffic-sessions [data-flow-id]').closest('[data-stream-card]').style.borderLeftColor"),'rgb(102, 217, 232)')
                 self.assertTrue(cdp.evaluate("Boolean(document.querySelector('#traffic-sessions [aria-label^=\"Select stream for filter\"]').closest('[data-stream-card]'))"))
                 self.assertEqual(cdp.evaluate("document.querySelector('#traffic-show-blocked').getAttribute('aria-checked')"), 'false')
-                self.assertIn('X-Visible: one',cdp.evaluate("document.querySelector('#traffic-stream').innerText"))
-                self.assertIn('X-Visible: two',cdp.evaluate("document.querySelector('#traffic-stream').innerText"))
+                self.assertEqual(cdp.evaluate("[...document.querySelectorAll('#traffic-stream [aria-label=\"HTTP headers\"] tr')].filter(r=>r.cells[0].textContent==='X-Visible').map(r=>r.cells[1].textContent)"),[' one',' two'])
+                self.assertEqual(cdp.evaluate("[...document.querySelectorAll('#traffic-stream [aria-label=\"HTTP query parameters\"] tr')].map(r=>r.cells[1].textContent)"),['one','two'])
                 self.assertTrue(cdp.evaluate("document.querySelector('#traffic-stream [data-direction=\"1\"]')!==null"))
                 wait("Boolean(document.querySelector('#traffic-stream [data-direction=\"2\"]'))")
-                self.assertIn('http.status_code: 200',cdp.evaluate("document.querySelector('#traffic-stream [data-direction=\"2\"]').innerText"))
-                self.assertIn('X-Reply: visible',cdp.evaluate("document.querySelector('#traffic-stream').innerText"))
-                self.assertIn('http.body_text: OK',cdp.evaluate("document.querySelector('#traffic-stream [data-direction=\"2\"]').innerText"))
+                self.assertIn('200 OK',cdp.evaluate("document.querySelector('#traffic-stream [data-direction=\"2\"] [data-http-start-line]').textContent"))
+                self.assertIn(' visible',cdp.evaluate("[...document.querySelectorAll('#traffic-stream [aria-label=\"HTTP headers\"] tr')].find(r=>r.cells[0].textContent==='X-Reply').cells[1].textContent"))
+                self.assertIn('"message": "<b>hello</b>"',cdp.evaluate("document.querySelector('#traffic-stream [data-direction=\"2\"] [data-http-body]').textContent"))
+                self.assertFalse(cdp.evaluate("Boolean(document.querySelector('#traffic-stream [data-http-body] b'))"))
+                cdp.click("[...document.querySelectorAll('#traffic-stream button')].find(b=>b.textContent==='Text')")
+                self.assertEqual(cdp.evaluate("document.querySelector('#traffic-stream [data-direction=\"2\"] [data-http-body]').textContent"),http_body.decode())
+                pathlib.Path('/tmp/hydra-http-view-desktop.png').write_bytes(base64.b64decode(cdp.call('Page.captureScreenshot',{'format':'png'})['data']))
+                cdp.click("document.querySelector('#traffic-sessions [aria-label=\"Save stream in favourites\"]')")
+                wait("document.querySelector('#traffic-sessions [aria-label=\"Remove stream from favourites\"]')?.getAttribute('aria-pressed')==='true'")
+                cdp.click("document.querySelector('#traffic-favourites-only')")
+                wait("document.querySelector('#traffic-favourites-only')?.getAttribute('aria-checked')==='true' && document.querySelectorAll('#traffic-sessions [data-flow-id]').length===1")
+                wait("[...document.querySelectorAll('#traffic-sessions button')].some(b=>b.textContent.trim()==='Refresh' && !b.disabled)")
+                cdp.evaluate("[...document.querySelectorAll('#traffic-sessions button')].find(b=>b.textContent.trim()==='Refresh').click()")
+                wait("Boolean(document.querySelector('#traffic-sessions [aria-label=\"Remove stream from favourites\"]'))")
+                self.assertIn('Saved to favourites', cdp.evaluate("document.querySelector('#traffic-stream').innerText"))
+                cdp.click("document.querySelector('#traffic-favourites-only')")
+                wait("Boolean(document.querySelector('#traffic-sessions [data-flow-id]'))")
                 cdp.evaluate("document.querySelector('#traffic-sessions [data-flow-id]').click()")
                 wait("document.querySelector('#traffic-sessions [aria-pressed=true]')!==null")
                 self.assertTrue(cdp.evaluate("(()=>{const l=document.querySelector('#traffic-sessions').getBoundingClientRect(),r=document.querySelector('#traffic-stream').getBoundingClientRect();return r.left>=l.right-1})()"))
@@ -261,7 +299,7 @@ class Browser(unittest.TestCase):
                 self.assertAlmostEqual(cdp.evaluate("document.querySelector('#traffic-sessions').getBoundingClientRect().width"),resized_width,delta=2)
                 self.assertTrue(cdp.evaluate("(()=>{const r=document.querySelector('#traffic-workspace').getBoundingClientRect();return r.x===0&&r.y===0&&r.height===innerHeight})()"))
                 # Wide panes align chronological request/response blocks left/right.
-                wait("(()=>{const l=document.querySelector('#traffic-stream [data-direction=\"1\"]').getBoundingClientRect(),r=document.querySelector('#traffic-stream [data-direction=\"2\"]').getBoundingClientRect();return r.left>l.left+20})()")
+                wait("(()=>{const l=document.querySelector('#traffic-stream [data-direction=\"1\"]')?.getBoundingClientRect(),r=document.querySelector('#traffic-stream [data-direction=\"2\"]')?.getBoundingClientRect();return Boolean(l&&r&&r.left>l.left+20)})()")
                 cdp.click("document.querySelector('#traffic-expand')")
                 wait("document.querySelector('#traffic-expand').getAttribute('aria-pressed')==='false'")
                 wait(f"Math.abs(document.querySelector('#traffic-sessions').getBoundingClientRect().width-{resized_width})<2")
@@ -284,12 +322,12 @@ class Browser(unittest.TestCase):
                 service_id=cdp.evaluate("document.querySelector('#traffic-sessions [data-service-id]').dataset.serviceId")
                 cdp.click("document.querySelector('#traffic-service')")
                 wait("document.querySelectorAll('[role=option]').length===3")
-                cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()!=='All services'&&e.textContent.trim()!=={json.dumps(service_id)})")
+                cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()!=='All services'&&e.textContent.trim()!=={json.dumps(service['name'])})")
                 wait("document.querySelector('#traffic-sessions').innerText.includes('No sessions for this service yet.')")
                 self.assertFalse(cdp.evaluate("document.querySelector('#traffic-stream').innerText.includes('/browser-stream')"))
                 cdp.click("document.querySelector('#traffic-service')")
                 wait("document.querySelectorAll('[role=option]').length===3")
-                cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==={json.dumps(service_id)})")
+                cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==={json.dumps(service['name'])})")
                 wait("document.querySelector('#traffic-stream').innerText.includes('/browser-stream')")
                 # Open the exact shared stream viewer beside an unsaved filter,
                 # switch between two selected real flows, and retain form edits.
@@ -309,7 +347,7 @@ class Browser(unittest.TestCase):
                     cdp.click(f"document.querySelector('[data-preview-flow-id=\"{selected_id}\"]')")
                     wait(f"Boolean(document.querySelector('#filter-stream-workspace #traffic-stream [title=\"{selected_id}\"]'))")
                     wait("Boolean(document.querySelector('#filter-stream-workspace #traffic-stream [data-direction=\"2\"]'))")
-                    self.assertIn('X-Reply: visible',cdp.evaluate("document.querySelector('#filter-stream-workspace #traffic-stream').innerText"))
+                    self.assertIn('X-Reply',cdp.evaluate("document.querySelector('#filter-stream-workspace #traffic-stream').innerText"))
                     self.assertEqual(cdp.evaluate("document.querySelector('#filter-name').value"),'Keep my rules')
                 cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Cancel').click()")
                 wait("!document.querySelector('[role=dialog]')")
@@ -386,7 +424,11 @@ class Browser(unittest.TestCase):
                         self.assertIn('Enforce', cdp.evaluate("document.querySelector('#filter-mode').textContent"))
                         cdp.click("document.querySelector('[aria-label=\"Filter service\"]')")
                         wait("document.querySelectorAll('[role=option]').length===2")
-                        cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==={json.dumps(service_id)})")
+                        cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==={json.dumps(service['name'])})")
+                        self.assertIn('Both directions', cdp.evaluate("document.querySelector('[aria-label=\"Rule direction\"]').textContent"))
+                        cdp.click("document.querySelector('[aria-label=\"Rule direction\"]')")
+                        wait("[...document.querySelectorAll('[role=option]')].some(e=>e.textContent.trim()==='Client → server')")
+                        cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='Client → server')")
                         cdp.click("document.querySelector('[aria-label=\"Filter action\"]')")
                         wait("document.querySelectorAll('[role=option]').length>2")
                         cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='Block HTTP request')")
@@ -394,6 +436,19 @@ class Browser(unittest.TestCase):
                         wait("[...document.querySelectorAll('[role=option]')].some(e=>e.textContent.trim()==='HTTP method')")
                         cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='HTTP method')")
                         cdp.evaluate("{const e=document.querySelector('[aria-label=\"Rule text value\"]');e.value='GET';e.dispatchEvent(new Event('input',{bubbles:true}));}")
+                        cdp.click("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Add condition')")
+                        wait("document.querySelectorAll('[aria-label=\"Rule direction\"]').length===2")
+                        cdp.click("document.querySelectorAll('[aria-label=\"Rule direction\"]')[1]")
+                        wait("[...document.querySelectorAll('[role=option]')].some(e=>e.textContent.trim()==='Server → client')")
+                        cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='Server → client')")
+                        cdp.click("document.querySelectorAll('[aria-label=\"Rule field\"]')[1]")
+                        wait("[...document.querySelectorAll('[role=option]')].some(e=>e.textContent.trim()==='HTTP method')")
+                        cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='HTTP method')")
+                        wait("document.querySelectorAll('[aria-label=\"Rule text value\"]').length===2")
+                        cdp.evaluate("{const e=document.querySelectorAll('[aria-label=\"Rule text value\"]')[1];e.value='POST';e.dispatchEvent(new Event('input',{bubbles:true}));}")
+                        cdp.click("document.querySelector('[aria-label=\"Group match mode\"]')")
+                        wait("[...document.querySelectorAll('[role=option]')].some(e=>e.textContent.trim()==='any (OR)')")
+                        cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='any (OR)')")
                         cdp.evaluate("document.querySelector('[role=dialog] form').requestSubmit()")
                         wait("!document.querySelector('[role=dialog]') && document.querySelector('#page').innerText.includes('Enforce — applies action to matches')")
                         self.assertEqual(cdp.evaluate("[...document.querySelectorAll('[data-filter-card] dd')].filter(e=>e.textContent==='alice').length"),2,'Filter author/editor must resolve to username')
@@ -405,6 +460,8 @@ class Browser(unittest.TestCase):
                         wait("document.querySelector('[data-filter-desired]').dataset.enabled==='true' && document.querySelector('[data-filter-application]').dataset.state==='enabled'")
                         cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Edit').click()")
                         wait("Boolean(document.querySelector('#filter-status'))")
+                        self.assertIn('Client → server', cdp.evaluate("document.querySelector('[aria-label=\"Rule direction\"]').textContent"))
+                        self.assertIn('Server → client',cdp.evaluate("document.querySelectorAll('[aria-label=\"Rule direction\"]')[1].textContent"))
                         cdp.evaluate("{ const e = document.querySelector('#filter-status'); e.value='402'; e.dispatchEvent(new Event('input',{bubbles:true})); }")
                         cdp.evaluate("document.querySelector('[role=dialog] form').requestSubmit()")
                         wait("!document.querySelector('[role=dialog]') && document.querySelector('#page').innerText.includes('Enforce — applies action to matches')")
@@ -494,7 +551,7 @@ class Browser(unittest.TestCase):
                         wait("document.querySelector('[role=option][data-state]') !== null")
                         cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='UDP')")
                         cdp.evaluate("{const original=window.fetch;window.fetch=async(...args)=>{const response=await original(...args);if(String(args[0]).endsWith('/protocols/browser-wasm/v1/activate')){window.fetch=original;throw new Error('Injected response loss after real activation');}return response;};}")
-                        for field,value in [('service-listener',other['listen_address']),('service-backend',other['upstream_address']),('service-profile','custom:browser-wasm/v1')]:
+                        for field,value in [('service-name','Browser UDP activation'),('service-listener',other['listen_address']),('service-backend',other['upstream_address']),('service-profile','custom:browser-wasm/v1')]:
                             cdp.evaluate(f"{{const e=document.getElementById({json.dumps(field)});e.value={json.dumps(value)};e.dispatchEvent(new Event('input',{{bubbles:true}}));}}")
                         cdp.evaluate("document.querySelector('#service-form').requestSubmit()")
                         wait("document.querySelector('#service-form').innerText.includes('Service saved; decoder was not confirmed.')")
@@ -541,7 +598,7 @@ class Browser(unittest.TestCase):
                                         peer.sendall(response_bytes)
                                 except OSError:pass
                             threading.Thread(target=decoder_reply,daemon=True).start()
-                            new_module_service={**service,'listen_address':f'127.0.0.1:{port()}','upstream_address':f'127.0.0.1:{decoder_backend.getsockname()[1]}','protocol_id':'custom:browser-wasm/v1'}
+                            new_module_service={**service,'name':'Browser decoder','listen_address':f'127.0.0.1:{port()}','upstream_address':f'127.0.0.1:{decoder_backend.getsockname()[1]}','protocol_id':'custom:browser-wasm/v1'}
                             fill_service(new_module_service)
                             with sqlite3.connect(tmp/'db') as db:
                                 activation=db.execute("SELECT service_id,protocol_id,version,applied FROM protocol_activations WHERE protocol_id='browser-wasm'").fetchone()
@@ -550,7 +607,7 @@ class Browser(unittest.TestCase):
                             wait("document.querySelector('#traffic-live-status')?.textContent==='Live'")
                             cdp.click("document.querySelector('#traffic-service')")
                             wait("document.querySelectorAll('[role=option]').length>2")
-                            cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==={json.dumps(module_service_id)})")
+                            cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==={json.dumps(new_module_service['name'])})")
                             with socket.create_connection(('127.0.0.1',int(new_module_service['listen_address'].split(':')[1])),timeout=3) as peer:
                                 peer.sendall(request_bytes);received=b''
                                 while len(received)<len(response_bytes):received+=peer.recv(4096)
@@ -589,6 +646,57 @@ class Browser(unittest.TestCase):
                         cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Next').click()")
                         wait("document.querySelector('#page').innerText.includes('Page 2') && [...document.querySelectorAll('#page table')].find(t=>[...t.querySelectorAll('th')].some(h=>h.textContent==='Flag'))?.querySelectorAll('tbody tr').length===2")
                 self.assertIn('alice',cdp.evaluate("document.querySelector('#page').innerText"))
+                # A real nc-style prompt exchange renders as a terminal while live and after closure.
+                with socket.socket() as terminal_backend:
+                    terminal_backend.bind(('127.0.0.1',0));terminal_backend.listen();terminal_backend.settimeout(10)
+                    terminal_done=threading.Event()
+                    def terminal_reply():
+                        try:
+                            connection,_=terminal_backend.accept()
+                            with connection:
+                                connection.settimeout(5);connection.sendall(b'\x1b[32mName: \x1b[0m')
+                                value=b''
+                                while not value.endswith(b'\n'):
+                                    part=connection.recv(128)
+                                    if not part:return
+                                    value+=part
+                                if value==b'alice\n':
+                                    connection.sendall(b'Loading 1%\r\x1b[2KWelcome, \xc3');time.sleep(.03);connection.sendall(b'\xa9!\nbinary: \xff\n')
+                                terminal_done.wait(5)
+                        except OSError:pass
+                    threading.Thread(target=terminal_reply,daemon=True).start()
+                    cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Services').click()")
+                    wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent==='Add service'&&!b.disabled)")
+                    cdp.click("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add service')")
+                    wait("Boolean(document.querySelector('#service-form'))")
+                    nc_service={**service,'name':'Browser terminal','protocol_id':'utf8','listen_address':f'127.0.0.1:{port()}','upstream_address':f'127.0.0.1:{terminal_backend.getsockname()[1]}'}
+                    fill_service(nc_service)
+                    with sqlite3.connect(tmp/'db') as database:
+                        nc_id=next(item['id'] for item in json.loads(database.execute('SELECT services FROM control_state').fetchone()[0]) if item['listen_address']==nc_service['listen_address'])
+                    cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Traffic').click()")
+                    wait("document.querySelector('#traffic-live-status')?.textContent==='Live'")
+                    with socket.create_connection(('127.0.0.1',int(nc_service['listen_address'].split(':')[1])),timeout=5) as nc_client:
+                        nc_client.settimeout(5);self.assertIn(b'Name:',nc_client.recv(128))
+                        selector=f'#traffic-sessions [data-service-id="{nc_id}"]'
+                        wait(f'Boolean(document.querySelector({json.dumps(selector)}))');cdp.click(f'document.querySelector({json.dumps(selector)})')
+                        wait("document.querySelector('#traffic-terminal')?.innerText.includes('Name:')")
+                        self.assertIn('Stream · terminal',cdp.evaluate("document.querySelector('[aria-label=\"Stream view\"]').textContent"))
+                        nc_client.sendall(b'alice\n');wait("document.querySelector('#traffic-terminal')?.innerText.includes('Welcome, é!')")
+                        wait("document.querySelector('#traffic-terminal')?.innerText.includes('[ff]')")
+                        screen=cdp.evaluate("document.querySelector('#traffic-terminal').innerText")
+                        self.assertIn('Name: alice',screen);self.assertNotIn('Loading 1%',screen);self.assertNotIn('utf8.text:',screen)
+                        self.assertLess(screen.index('Name:'),screen.index('Welcome,'))
+                        pathlib.Path('/tmp/hydra-terminal-desktop.png').write_bytes(base64.b64decode(cdp.call('Page.captureScreenshot',{'format':'png'})['data']))
+                        terminal_done.set()
+                    wait("document.querySelector('#traffic-stream').innerText.includes('Closed')")
+                    wait("document.querySelector('#traffic-terminal')?.innerText.includes('Welcome, é!') && document.querySelector('#traffic-terminal')?.innerText.includes('[ff]')")
+                    for label in ['Decoded conversation','Captured bytes','Stream · terminal']:
+                        cdp.click("document.querySelector('[aria-label=\"Stream view\"]')")
+                        wait(f"[...document.querySelectorAll('[role=option]')].some(e=>e.textContent.trim()==={json.dumps(label)})")
+                        cdp.click(f"[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==={json.dumps(label)})")
+                        if label=='Decoded conversation':wait("document.querySelector('#traffic-stream').innerText.includes('utf8.text:')")
+                        elif label=='Captured bytes':wait("document.querySelector('#traffic-stream').innerText.includes('1b 5b 33 32')")
+                        else:wait("document.querySelector('#traffic-terminal')?.innerText.includes('Welcome, é!')")
                 # Real UDP traffic is visible without switching away from the default list.
                 with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as udp_backend:
                     udp_backend.bind(('127.0.0.1',0));udp_backend.settimeout(10)
@@ -604,7 +712,7 @@ class Browser(unittest.TestCase):
                     cdp.click("document.querySelector('#service-transport')")
                     wait("[...document.querySelectorAll('[role=option]')].some(e=>e.textContent.trim()==='UDP')")
                     cdp.click("[...document.querySelectorAll('[role=option]')].find(e=>e.textContent.trim()==='UDP')")
-                    udp_service={**service,'transport':'udp','protocol_id':'utf8','listen_address':f'127.0.0.1:{port()}','upstream_address':f'127.0.0.1:{udp_backend.getsockname()[1]}'}
+                    udp_service={**service,'name':'Browser UDP','transport':'udp','protocol_id':'utf8','listen_address':f'127.0.0.1:{port()}','upstream_address':f'127.0.0.1:{udp_backend.getsockname()[1]}'}
                     fill_service(udp_service)
                     cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Traffic').click()")
                     wait("document.querySelector('#traffic-live-status')?.textContent==='Live'")

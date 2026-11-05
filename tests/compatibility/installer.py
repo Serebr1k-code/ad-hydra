@@ -45,8 +45,9 @@ class Installer(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(prefix='hydra-install-test-');self.addCleanup(self.temp.cleanup)
         self.directory=pathlib.Path(self.temp.name)
-    def execute(self,source=None,environment=None,target=None,stdin=None):
+    def execute(self,source=None,environment=None,target=None,stdin=None,install_source=None):
         arguments=['bash',str(SCRIPT),'--download-only',str(target or self.directory/'output')]
+        if install_source is not None: arguments+=['--source',install_source]
         if source is not None:
             path=self.directory/'input';path.write_bytes(source);arguments+=['--archive',str(path)]
         env={key:value for key,value in os.environ.items() if key not in {'HYDRA_DOWNLOAD_URL','HYDRA_ARCHIVE_SHA256','HYDRA_GITHUB_TOKEN','GH_TOKEN','GITHUB_TOKEN'}}
@@ -76,17 +77,20 @@ class Installer(unittest.TestCase):
         target=self.directory/'output';target.mkdir();(target/'keep').write_text('user data')
         result=self.execute(tar_bundle());self.assertNotEqual(result.returncode,0)
         self.assertEqual((target/'keep').read_text(),'user data')
-    def test_https_index_download_and_redirect_policy(self):
+    def test_https_and_explicit_github_artifact_download_and_redirect_policy(self):
         subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-keyout',str(self.directory/'key'),'-out',str(self.directory/'cert'),'-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1'],check=True,capture_output=True)
         output=io.BytesIO()
         with zipfile.ZipFile(output,'w') as archive:archive.writestr('hydra-linux-x86_64-musl.tar.gz',tar_bundle())
-        package=output.getvalue()
+        package=output.getvalue();authorization={}
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(inner):
+                authorization[inner.path]=inner.headers.get('Authorization')
                 if inner.path=='/index':
-                    payload=json.dumps({'artifacts':[{'name':'hydra-linux-x86_64-musl-'+'a'*40,'expired':False,'created_at':'2026-10-19T00:00:00Z','workflow_run':{'head_branch':'main'},'digest':'sha256:'+hashlib.sha256(package).hexdigest(),'archive_download_url':'https://localhost:%d/archive'%server.server_port}]}).encode()
+                    payload=json.dumps({'artifacts':[{'name':'hydra-linux-x86_64-musl-'+'a'*40,'expired':False,'created_at':'2026-10-19T00:00:00Z','workflow_run':{'head_branch':'main'},'digest':'sha256:'+hashlib.sha256(package).hexdigest(),'archive_download_url':'https://localhost:%d/artifact'%server.server_port}]}).encode()
                 elif inner.path=='/downgrade':
                     inner.send_response(302);inner.send_header('Location','http://localhost:%d/archive'%server.server_port);inner.end_headers();return
+                elif inner.path=='/artifact':
+                    inner.send_response(302);inner.send_header('Location','https://localhost:%d/archive'%server.server_port);inner.end_headers();return
                 else:payload=package
                 inner.send_response(200);inner.send_header('Content-Length',str(len(payload)));inner.end_headers();inner.wfile.write(payload)
             def log_message(self,*args):pass
@@ -97,6 +101,15 @@ class Installer(unittest.TestCase):
         try:
             env={'HYDRA_DOWNLOAD_URL':'https://localhost:%d/index'%server.server_port,'SSL_CERT_FILE':str(self.directory/'cert')}
             result=self.execute(environment=env);self.assertEqual(result.returncode,0,result.stderr)
+            gh_token='fixture-actions-read-token'
+            github_env={**env,'HYDRA_GITHUB_ARTIFACTS_URL':env['HYDRA_DOWNLOAD_URL']}
+            result=self.execute(environment=github_env,target=self.directory/'github-output',stdin=gh_token+'\n',install_source='github')
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(authorization['/index'],'Bearer '+gh_token)
+            self.assertEqual(authorization['/artifact'],'Bearer '+gh_token)
+            self.assertIsNone(authorization['/archive'])
+            self.assertIn('Verified build extracted to:',result.stdout)
+            self.assertNotIn(gh_token,result.stdout+result.stderr)
             env['HYDRA_DOWNLOAD_URL']='https://localhost:%d/downgrade'%server.server_port
             result=self.execute(environment=env,target=self.directory/'insecure-output');self.assertNotEqual(result.returncode,0)
             self.assertFalse((self.directory/'insecure-output').exists())

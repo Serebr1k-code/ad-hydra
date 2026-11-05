@@ -4,7 +4,7 @@ use crate::{
     modules::{audit::Actor, auth::AuthState},
 };
 use hydra_domain::*;
-async fn setup() -> (Control, std::path::PathBuf) {
+pub(super) async fn setup() -> (Control, std::path::PathBuf) {
     let path = std::env::temp_dir().join(format!("hydra-control-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&path).unwrap();
     use std::os::unix::fs::PermissionsExt;
@@ -23,6 +23,7 @@ fn actor(id: &str) -> Actor {
 }
 fn service() -> Service {
     Service {
+        forwarding: None,
         id: "service".into(),
         transport: Transport::Tcp,
         listen_address: "127.0.0.1:21001".parse().unwrap(),
@@ -30,7 +31,62 @@ fn service() -> Service {
         protocol_id: "http".into(),
         enabled: true,
         retain_history: true,
+        protection: None,
     }
+}
+
+#[tokio::test]
+async fn repeated_proxy_acknowledgements_do_not_write_duplicate_audit_rows() {
+    let (control, path) = setup().await;
+    control
+        .seed_snapshot(ServiceSnapshot {
+            revision: 1,
+            services: vec![service()],
+        })
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        control.mark_services(1, None).await.unwrap();
+        control.mark_rules(1, None).await.unwrap();
+        control.mark_applied(1, None).await.unwrap();
+    }
+    let count = |control: &Control| {
+        let db = control.db.clone();
+        async move {
+            db.run(|db| {
+                Ok(db.query_row(
+                    "SELECT count(*) FROM audit WHERE action='control.apply'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(count(&control).await, 2);
+    for _ in 0..3 {
+        control
+            .mark_services(1, Some("upstream unavailable".into()))
+            .await
+            .unwrap();
+    }
+    assert_eq!(count(&control).await, 3);
+    control
+        .mark_services(0, Some("stale error".into()))
+        .await
+        .unwrap();
+    control.mark_rules(2, None).await.unwrap();
+    assert_eq!(count(&control).await, 3);
+    assert_eq!(
+        control.desired().await.unwrap().apply_error.as_deref(),
+        Some("upstream unavailable")
+    );
+    control.mark_services(1, None).await.unwrap();
+    assert_eq!(count(&control).await, 4);
+    assert!(control.desired().await.unwrap().apply_error.is_none());
+    drop(control);
+    std::fs::remove_dir_all(path).unwrap();
 }
 fn rule() -> Rule {
     Rule {
@@ -467,5 +523,197 @@ async fn maximum_bulk_is_atomic_audited_and_revision_checked() {
     );
     c.db.run(|db|{let n:i64=db.query_row("SELECT count(*) FROM audit WHERE action='filter.state' AND actor_id='bob' AND request_id='maximum-bulk'",[],|r|r.get(0))?;assert_eq!(n,256);Ok(())}).await.unwrap();
     drop(c);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn forwarding_resolves_only_enabled_catalog_teams_and_rejects_bad_formats() {
+    let (control, path) = setup().await;
+    let farm = crate::modules::farm::Farm::open(
+        control.auth.clone(),
+        path.join("uploads"),
+        std::sync::Arc::new(crate::modules::farm::UnavailableRunner),
+    )
+    .await
+    .unwrap();
+    control.db.run(|db|{db.execute("INSERT INTO farm_teams(id,name,host,enabled,revision,created_at,updated_at,author_id) VALUES('two','Team two','127.0.0.3',1,1,0,0,'owner')",[])?;Ok(())}).await.unwrap();
+    let input = |pattern: &str| super::forwarding::ForwardingInput {
+        team_id: "two".into(),
+        target_port: 9000,
+        flag_pattern: pattern.into(),
+        framing: hydra_domain::ForwardFraming::Http1,
+    };
+    assert_eq!(
+        input("FLAG[A-Z0-9]{8}")
+            .resolve(&control)
+            .await
+            .unwrap()
+            .target_address,
+        "127.0.0.3:9000".parse().unwrap()
+    );
+    assert!(input("FLAG.*").resolve(&control).await.is_err());
+    control
+        .db
+        .run(|db| {
+            db.execute("UPDATE farm_teams SET enabled=0 WHERE id='two'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(input("FLAG[A-Z0-9]{8}").resolve(&control).await.is_err());
+    drop(farm);
+    drop(control);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn service_name_is_atomic_persistent_searchable_and_server_audited() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let (control, path) = setup().await;
+    let user = crate::modules::users::create(
+        &control.db,
+        &control.auth.crypto,
+        "named-operator".into(),
+        "correct horse battery".into(),
+    )
+    .await
+    .unwrap();
+    let token = control
+        .auth
+        .login(
+            "named-operator".into(),
+            "correct horse battery".into(),
+            "test".into(),
+        )
+        .await
+        .unwrap()
+        .response
+        .access_token;
+    let app = super::router(control.clone());
+    let request = |method: &str, url: &str, body: serde_json::Value| {
+        Request::builder()
+            .method(method)
+            .uri(url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let mut input = serde_json::json!({"name":"  Docs frontend  ","expected_revision":0,"transport":"tcp","listen_address":"127.0.0.1:21001","upstream_address":"127.0.0.1:21002","protocol_id":"http","enabled":true});
+    let response = app
+        .clone()
+        .oneshot(request("POST", "/api/v1/services", input.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    let id = body["id"].as_str().unwrap().to_owned();
+    let response = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/api/v1/services?q=Docs",
+            serde_json::Value::Null,
+        ))
+        .await
+        .unwrap();
+    let page: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(page["items"][0]["name"], "Docs frontend");
+    input["name"] = "Renamed docs".into();
+    input["expected_revision"] = 0.into();
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "PATCH",
+                &format!("/api/v1/services/{id}"),
+                input.clone()
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    input["expected_revision"] = 1.into();
+    input["name"] = "\n\t".into();
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "PATCH",
+                &format!("/api/v1/services/{id}"),
+                input.clone()
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(control.desired().await.unwrap().services.revision, 1);
+    input["name"] = "Renamed docs".into();
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "PATCH",
+                &format!("/api/v1/services/{id}"),
+                input.clone()
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::ACCEPTED
+    );
+    input["expected_revision"] = 2.into();
+    input.as_object_mut().unwrap().remove("name");
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "PATCH",
+                &format!("/api/v1/services/{id}"),
+                input.clone()
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::ACCEPTED
+    );
+    let reopened = Control::open(control.auth.clone()).await.unwrap();
+    assert_eq!(reopened.service_names().await.unwrap()[&id], "Renamed docs");
+    assert!(
+        serde_json::to_value(&reopened.desired().await.unwrap().services.services[0])
+            .unwrap()
+            .get("name")
+            .is_none()
+    );
+    control
+        .db
+        .run(move |db| {
+            assert_eq!(
+                db.query_row(
+                    "SELECT name FROM service_names WHERE service_id=?1",
+                    [&id],
+                    |r| r.get::<_, String>(0)
+                )?,
+                "Renamed docs"
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT actor_id FROM audit WHERE action='service.name' AND target=?1",
+                    [id],
+                    |r| r.get::<_, String>(0)
+                )?,
+                user
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(reopened);
+    drop(app);
+    drop(control);
     std::fs::remove_dir_all(path).unwrap();
 }

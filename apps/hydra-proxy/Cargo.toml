@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 [dependencies]
+hydra-rewrite.workspace = true
 sha2 = "0.10"
 anyhow.workspace = true
 clap.workspace = true
@@ -13,7 +14,7 @@ hydra-wire.workspace = true
 hydra-filter-engine.workspace = true
 hydra-protocol-runtime.workspace = true
 hydra-protocol-sdk.workspace = true
-nix.workspace = true
+nix = { workspace = true, features = ["net"] }
 prost-types.workspace = true
 prost.workspace = true
 serde.workspace = true
@@ -29,6 +30,7 @@ uuid.workspace = true
 workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 flate2 = "1.1"
 wat = "1"
 sha2 = "0.10"

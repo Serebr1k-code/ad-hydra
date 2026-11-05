@@ -11,6 +11,7 @@ use hydra_domain::{Service, Transport};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use utoipa::ToSchema;
+#[derive(Debug)]
 pub enum Error {
     Auth,
     Missing,
@@ -77,6 +78,9 @@ pub(crate) fn request() -> String {
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceInput {
+    /// Optional display name; omitted on update preserves the current name.
+    pub name: Option<String>,
+    pub forwarding: Option<super::forwarding::ForwardingInput>,
     pub expected_revision: u64,
     #[schema(value_type=String)]
     pub transport: Transport,
@@ -88,13 +92,30 @@ pub struct ServiceInput {
     pub enabled: bool,
     #[serde(default = "history_enabled")]
     pub retain_history: bool,
+    pub protection: Option<ProtectionInput>,
+}
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProtectionInput {
+    #[schema(minimum = 1)]
+    pub max_active_flows: u64,
+    pub tcp_connections_per_second: u64,
+    pub udp_datagrams_per_second: u64,
+    pub bytes_per_second: u64,
+    #[schema(minimum = 1)]
+    pub idle_timeout_ms: u64,
 }
 fn history_enabled() -> bool {
     true
 }
 impl ServiceInput {
-    fn into_service(self, id: String) -> Service {
-        Service {
+    async fn into_service(self, id: String, control: &Control) -> Result<Service, Error> {
+        let forwarding = match self.forwarding {
+            Some(f) => Some(f.resolve(control).await.map_err(Error::from)?),
+            None => None,
+        };
+        Ok(Service {
+            forwarding,
             id,
             transport: self.transport,
             listen_address: self.listen_address,
@@ -102,7 +123,14 @@ impl ServiceInput {
             protocol_id: self.protocol_id,
             enabled: self.enabled,
             retain_history: self.retain_history,
-        }
+            protection: self.protection.map(|p| hydra_domain::ServiceProtection {
+                max_active_flows: p.max_active_flows,
+                tcp_connections_per_second: p.tcp_connections_per_second,
+                udp_datagrams_per_second: p.udp_datagrams_per_second,
+                bytes_per_second: p.bytes_per_second,
+                idle_timeout_ms: p.idle_timeout_ms,
+            }),
+        })
     }
 }
 #[derive(Deserialize, utoipa::IntoParams)]
@@ -135,6 +163,11 @@ pub(crate) async fn list(
 ) -> anyhow::Result<ListResponse> {
     let desired = control.desired().await?;
     let records = control.attribution().await?;
+    let names = if kind == "service" {
+        control.service_names().await?
+    } else {
+        Default::default()
+    };
     let colors = if kind == "service" {
         control.service_colors().await?
     } else {
@@ -168,6 +201,7 @@ pub(crate) async fn list(
         let id = value["id"].as_str().unwrap_or_default().to_owned();
         if kind == "service" {
             value["color"] = colors.get(&id).cloned().into();
+            value["name"] = names.get(&id).cloned().unwrap_or_else(|| id.clone()).into();
         }
         if id <= query.after || (!q.is_empty() && !value.to_string().contains(&q)) {
             continue;
@@ -287,9 +321,12 @@ pub async fn create_service(
 ) -> Result<Response, Error> {
     let a = actor(&c, &headers).await?;
     let revision = input.expected_revision;
-    let service = input.into_service(uuid::Uuid::new_v4().to_string());
+    let name = input.name.clone();
+    let service = input
+        .into_service(uuid::Uuid::new_v4().to_string(), &c)
+        .await?;
     let id = service.id.clone();
-    c.put_service(a, revision, service, true, request())
+    c.put_named_service(a, revision, service, true, name, request())
         .await
         .map(|desired| {
             (
@@ -309,7 +346,9 @@ pub async fn update_service(
 ) -> Result<Response, Error> {
     let a = actor(&c, &headers).await?;
     let revision = input.expected_revision;
-    c.put_service(a, revision, input.into_service(id), false, request())
+    let name = input.name.clone();
+    let service = input.into_service(id, &c).await?;
+    c.put_named_service(a, revision, service, false, name, request())
         .await
         .map(|v| (StatusCode::ACCEPTED, Json(v)).into_response())
         .map_err(Error::from)
@@ -407,8 +446,9 @@ pub fn router(control: Control) -> Router {
 mod history_input_tests {
     use super::*;
 
-    #[test]
-    fn service_api_input_defaults_and_preserves_history_retention() {
+    #[tokio::test]
+    async fn service_api_input_defaults_and_preserves_history_retention() {
+        let (control, path) = crate::modules::services::tests::setup().await;
         let defaults: ServiceInput = serde_json::from_value(serde_json::json!({
             "expected_revision": 0,
             "transport": "tcp",
@@ -419,7 +459,8 @@ mod history_input_tests {
         }))
         .unwrap();
         assert_eq!(
-            serde_json::to_value(defaults.into_service("svc".into())).unwrap()["retain_history"],
+            serde_json::to_value(defaults.into_service("svc".into(), &control).await.unwrap())
+                .unwrap()["retain_history"],
             true
         );
 
@@ -434,8 +475,11 @@ mod history_input_tests {
         }))
         .unwrap();
         assert_eq!(
-            serde_json::to_value(disabled.into_service("svc".into())).unwrap()["retain_history"],
+            serde_json::to_value(disabled.into_service("svc".into(), &control).await.unwrap())
+                .unwrap()["retain_history"],
             false
         );
+        drop(control);
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

@@ -11,9 +11,30 @@ use std::{convert::Infallible, time::Duration};
 use tokio::sync::{broadcast::error::RecvError, mpsc};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 struct Error(StatusCode);
+fn query_error(operation: &'static str, error: anyhow::Error) -> Error {
+    tracing::warn!(
+        request_id = %crate::modules::audit::request_id(),
+        operation,
+        error = %error,
+        "Traffic query failed"
+    );
+    Error(StatusCode::BAD_REQUEST)
+}
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        (self.0,Json(serde_json::json!({"error":{"code":"traffic_request_failed","message":"Traffic request failed"}}))).into_response()
+        let (code, message) = if self.0 == StatusCode::NOT_FOUND {
+            (
+                "traffic_not_retained",
+                "This traffic item is no longer retained or does not exist. Refresh Traffic and select a current stream. Save streams as favourites to preserve them during rotation.",
+            )
+        } else {
+            ("traffic_request_failed", "Traffic request failed")
+        };
+        (
+            self.0,
+            Json(serde_json::json!({"error":{"code":code,"message":message}})),
+        )
+            .into_response()
     }
 }
 async fn authorize(t: &Traffic, h: &HeaderMap) -> Result<String, Error> {
@@ -38,7 +59,7 @@ async fn flows(
     t.flows(q)
         .await
         .map(Json)
-        .map_err(|_| Error(StatusCode::BAD_REQUEST))
+        .map_err(|error| query_error("flows", error))
 }
 #[utoipa::path(get,path="/api/v1/traffic/flows/{id}",params(("id"=String,Path)),responses((status=200,body=Object),(status=404)),tag="traffic")]
 async fn flow(
@@ -49,7 +70,7 @@ async fn flow(
     authorize(&t, &h).await?;
     t.flow(id)
         .await
-        .map_err(|_| Error(StatusCode::BAD_REQUEST))?
+        .map_err(|error| query_error("flow", error))?
         .map(Json)
         .ok_or(Error(StatusCode::NOT_FOUND))
 }
@@ -64,7 +85,7 @@ async fn messages(
     t.messages(id, q)
         .await
         .map(Json)
-        .map_err(|_| Error(StatusCode::BAD_REQUEST))
+        .map_err(|error| query_error("messages", error))
 }
 #[utoipa::path(get,path="/api/v1/traffic/messages/{id}",params(("id"=String,Path)),responses((status=200,body=Object),(status=404)),tag="traffic")]
 async fn message(
@@ -75,7 +96,7 @@ async fn message(
     authorize(&t, &h).await?;
     t.message(id)
         .await
-        .map_err(|_| Error(StatusCode::BAD_REQUEST))?
+        .map_err(|error| query_error("message", error))?
         .map(Json)
         .ok_or(Error(StatusCode::NOT_FOUND))
 }

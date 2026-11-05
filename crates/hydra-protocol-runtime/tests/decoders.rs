@@ -579,3 +579,37 @@ fn large_feed_still_traps_infinite_wasm_at_the_hard_fuel_cap() {
             .contains("disabled")
     );
 }
+
+#[test]
+fn utf8_invalid_spans_preserve_exact_bytes_without_confusing_real_replacement_text() {
+    let mut decoder = hydra_protocol_runtime::Utf8Decoder::default();
+    let messages = decoder
+        .feed(Direction::ServerToClient, b"A\xff\xef\xbf\xbd!")
+        .unwrap();
+    assert_eq!(
+        messages[0].fields["utf8.spans"],
+        Value::List(vec![
+            Value::String("A".into()),
+            Value::Bytes(vec![255]),
+            Value::String("�!".into())
+        ])
+    );
+    let noisy: Vec<u8> = (0..65536)
+        .map(|i| if i % 2 == 0 { b'x' } else { 255 })
+        .collect();
+    let messages = decoder.feed(Direction::ClientToServer, &noisy).unwrap();
+    assert!(messages.iter().all(|m| match &m.fields["utf8.spans"] {
+        Value::List(spans) => spans.len() <= 64,
+        _ => false,
+    }));
+    assert_eq!(
+        messages
+            .iter()
+            .map(|m| match &m.fields["utf8.text"] {
+                Value::String(s) => s.matches('�').count(),
+                _ => 0,
+            })
+            .sum::<usize>(),
+        32768
+    );
+}

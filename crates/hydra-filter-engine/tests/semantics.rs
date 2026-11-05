@@ -3,6 +3,7 @@ use hydra_filter_engine::*;
 use std::collections::BTreeMap;
 fn service() -> Service {
     Service {
+        forwarding: None,
         id: "s".into(),
         transport: Transport::Tcp,
         listen_address: "127.0.0.1:1".parse().unwrap(),
@@ -10,6 +11,7 @@ fn service() -> Service {
         protocol_id: "raw".into(),
         enabled: true,
         retain_history: true,
+        protection: None,
     }
 }
 fn predicate(op: Comparison, expected: FieldValue) -> Expression {
@@ -322,13 +324,41 @@ fn missing_any_and_all_follow_three_valued_logic() {
 }
 
 #[test]
-fn rejects_unknown_http_and_metadata_fields() {
+fn decoder_fields_compile_and_match_only_when_present() {
     for field in [
-        "http.cookie",
-        "network.anything",
-        "anything",
-        "transport.value",
+        "utf8.text",
+        "http.status_code",
+        "crypter.username",
+        "grpc.method",
+        "payload",
+        "custom_field",
     ] {
+        let mut r = rule("a", Action::DropConnection);
+        r.expression = Expression::Predicate {
+            field: field.into(),
+            op: Comparison::Eq,
+            value: FieldValue::String("needle".into()),
+        };
+        let snapshot = compile(vec![r]).unwrap();
+        let fields = BTreeMap::from([(field.into(), FieldValue::String("needle".into()))]);
+        assert_eq!(
+            snapshot.evaluate(&context(&fields)).hits.len(),
+            1,
+            "{field}"
+        );
+        assert!(
+            snapshot
+                .evaluate(&context(&BTreeMap::new()))
+                .hits
+                .is_empty(),
+            "missing {field}"
+        );
+    }
+}
+
+#[test]
+fn malformed_field_paths_are_rejected() {
+    for field in ["", ".text", "utf8.", "custom..text", &"x".repeat(257)] {
         let mut r = rule("a", Action::Allow);
         r.expression = Expression::Predicate {
             field: field.into(),
@@ -418,4 +448,58 @@ fn bounded_rate_windows_separate_keys_and_missing_fields() {
     let mut later = context(&fields);
     later.now_ms = 1100;
     assert!(snapshot.evaluate(&later).action.is_none());
+}
+
+#[test]
+fn condition_direction_scope_stays_nonmatching_on_other_side_even_under_negation() {
+    let scoped:Expression=serde_json::from_value(serde_json::json!({"direction":"client_to_server","scoped":{"field":"protocol.x","op":"eq","value":{"type":"string","value":"yes"}}})).unwrap();
+    let mut r = rule("scoped", Action::DropConnection);
+    r.expression = Expression::Not {
+        not: Box::new(scoped),
+    };
+    let compiled = compile(vec![r]).unwrap();
+    for side in [None, Some("server_to_client")] {
+        let mut fields = BTreeMap::from([("protocol.x".into(), FieldValue::String("no".into()))]);
+        if let Some(side) = side {
+            fields.insert("direction".into(), FieldValue::String(side.into()));
+        }
+        assert!(compiled.evaluate(&context(&fields)).hits.is_empty());
+    }
+    let fields = BTreeMap::from([
+        (
+            "direction".into(),
+            FieldValue::String("client_to_server".into()),
+        ),
+        ("protocol.x".into(), FieldValue::String("no".into())),
+    ]);
+    assert_eq!(compiled.evaluate(&context(&fields)).hits.len(), 1);
+}
+#[test]
+fn condition_direction_scopes_support_mixed_or_and_do_not_correlate_opposite_sides() {
+    let make = |side: &str, value: &str| {
+        serde_json::from_value::<Expression>(serde_json::json!({"direction":side,"scoped":{"field":"protocol.x","op":"eq","value":{"type":"string","value":value}}})).unwrap()
+    };
+    for (all, expected) in [(false, 1), (true, 0)] {
+        let mut r = rule("scoped", Action::DropConnection);
+        let children = vec![
+            make("client_to_server", "request"),
+            make("server_to_client", "reply"),
+        ];
+        r.expression = if all {
+            Expression::All { all: children }
+        } else {
+            Expression::Any { any: children }
+        };
+        let compiled = compile(vec![r]).unwrap();
+        for (side, value) in [
+            ("client_to_server", "request"),
+            ("server_to_client", "reply"),
+        ] {
+            let fields = BTreeMap::from([
+                ("direction".into(), FieldValue::String(side.into())),
+                ("protocol.x".into(), FieldValue::String(value.into())),
+            ]);
+            assert_eq!(compiled.evaluate(&context(&fields)).hits.len(), expected);
+        }
+    }
 }

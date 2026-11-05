@@ -16,6 +16,10 @@ pub fn timestamp() -> prost_types::Timestamp {
 }
 
 pub struct Telemetry {
+    pub forwarding: std::sync::RwLock<Option<Arc<crate::forwarding::Store>>>,
+    pub budgets: std::sync::RwLock<
+        std::collections::HashMap<String, Arc<crate::transport::protection::Budget>>,
+    >,
     pub samples: std::sync::RwLock<Option<Arc<crate::samples::SampleRing>>>,
     pub history: std::sync::RwLock<Option<Arc<crate::history::HistoryStore>>>,
     pub flows: std::sync::Mutex<std::collections::BTreeSet<String>>,
@@ -38,6 +42,8 @@ impl Telemetry {
     pub fn new(max_flows: usize) -> Arc<Self> {
         let (events, _) = broadcast::channel(1024);
         Arc::new(Self {
+            forwarding: Default::default(),
+            budgets: Default::default(),
             samples: std::sync::RwLock::new(None),
             history: std::sync::RwLock::new(None),
             flows: std::sync::Mutex::new(Default::default()),
@@ -62,6 +68,39 @@ impl Telemetry {
             permits: Arc::new(Semaphore::new(max_flows)),
             subscribers: Arc::new(Semaphore::new(4)),
         })
+    }
+    pub fn drop_udp(&self, budget: &crate::transport::protection::Budget) {
+        budget.dropped_datagram();
+        self.udp_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn configure_protection(&self, services: &[Service]) {
+        let mut budgets = self.budgets.write().unwrap_or_else(|e| e.into_inner());
+        budgets.retain(|id, b| services.iter().any(|s| s.id == *id) || Arc::strong_count(b) > 1);
+        for service in services {
+            budgets
+                .entry(service.id.clone())
+                .or_insert_with(|| crate::transport::protection::Budget::new(&service.id))
+                .configure(service.protection.clone());
+        }
+    }
+    pub fn budget(&self, service: &Service) -> Arc<crate::transport::protection::Budget> {
+        if let Some(b) = self
+            .budgets
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&service.id)
+        {
+            return b.clone();
+        }
+        let mut budgets = self.budgets.write().unwrap_or_else(|e| e.into_inner());
+        budgets
+            .entry(service.id.clone())
+            .or_insert_with(|| {
+                let b = crate::transport::protection::Budget::new(&service.id);
+                b.configure(service.protection.clone());
+                b
+            })
+            .clone()
     }
     pub fn apply_history_services(&self, services: &[Service]) {
         if let Some(history) = self
@@ -299,6 +338,7 @@ impl Telemetry {
         };
         let history_truncated = service.retain_history && history.is_none();
         let flow = Flow {
+            protection: None,
             scanner: std::sync::Mutex::new(
                 self.scanner
                     .read()
@@ -333,7 +373,7 @@ impl Telemetry {
                     Transport::Udp => 2,
                 },
                 client: Some(endpoint(client)),
-                upstream: Some(endpoint(service.upstream_address)),
+                upstream: Some(endpoint(service.effective_upstream())),
             }),
         );
         flow
@@ -346,6 +386,7 @@ fn endpoint(addr: SocketAddr) -> v1::Endpoint {
     }
 }
 pub struct Flow {
+    pub protection: Option<crate::transport::protection::Lease>,
     scanner: std::sync::Mutex<Option<crate::inspection::flags::FlagSession>>,
     transport: Transport,
     pub id: String,
@@ -361,6 +402,17 @@ pub struct Flow {
     _permit: OwnedSemaphorePermit,
 }
 impl Flow {
+    pub fn forwarded(&self, bytes: usize, up: bool) {
+        if up {
+            self.up.fetch_add(bytes as u64, Ordering::Relaxed);
+        } else {
+            self.down.fetch_add(bytes as u64, Ordering::Relaxed);
+        }
+        if let Some(lease) = &self.protection {
+            lease.0.forwarded(bytes, up);
+        }
+    }
+
     pub fn record_history(&self, direction: hydra_protocol_sdk::Direction, bytes: &[u8]) {
         if let Some(history) = self
             .history

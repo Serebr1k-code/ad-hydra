@@ -43,3 +43,56 @@ impl Control {
         }).await
     }
 }
+
+pub(super) fn normalize_name(value: String) -> anyhow::Result<String> {
+    let value = value.trim().to_owned();
+    anyhow::ensure!(
+        !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control),
+        "service name must be 1..256 UTF-8 bytes without control characters"
+    );
+    Ok(value)
+}
+pub(super) fn write_name(
+    tx: &rusqlite::Transaction<'_>,
+    actor: &Actor,
+    id: &str,
+    name: &str,
+    request: &str,
+) -> anyhow::Result<()> {
+    let before: Option<String> = tx
+        .query_row(
+            "SELECT name FROM service_names WHERE service_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if before.as_deref() == Some(name) {
+        return Ok(());
+    }
+    tx.execute("INSERT INTO service_names(service_id,name) VALUES(?1,?2) ON CONFLICT(service_id) DO UPDATE SET name=excluded.name",rusqlite::params![id,name])?;
+    audit::append_change(
+        tx,
+        actor,
+        "service.name",
+        id,
+        request,
+        true,
+        now(),
+        &serde_json::json!({"before":{"name":before},"after":{"name":name}}),
+    )?;
+    Ok(())
+}
+impl Control {
+    pub async fn service_names(&self) -> anyhow::Result<BTreeMap<String, String>> {
+        self.db
+            .run(|db| {
+                Ok(db
+                    .prepare(
+                        "SELECT service_id,name FROM service_names ORDER BY service_id LIMIT 128",
+                    )?
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<_, _>>()?)
+            })
+            .await
+    }
+}

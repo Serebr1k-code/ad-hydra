@@ -17,6 +17,7 @@ pub struct Traffic {
 pub struct Query {
     /// Include traffic blocked by enforced rules (default true for API compatibility).
     pub include_blocked: Option<bool>,
+    pub favorite: Option<bool>,
     pub after: Option<i64>,
     pub limit: Option<usize>,
     /// Descending ingestion order with an exclusive older-than cursor; default remains oldest-first.
@@ -60,6 +61,18 @@ impl Traffic {
                 include_str!("../../../../../migrations/0003_traffic.sql"),
             )
             .await?;
+        auth.db
+            .migrate(
+                24,
+                include_str!("../../../../../migrations/0024_traffic_favorites.sql"),
+            )
+            .await?;
+        auth.db
+            .migrate(
+                25,
+                include_str!("../../../../../migrations/0025_decoded_service_zstd.sql"),
+            )
+            .await?;
         let (events, _) = broadcast::channel(128);
         Ok(Self {
             auth,
@@ -84,31 +97,34 @@ impl Traffic {
             .map(convert)
             .collect::<anyhow::Result<Vec<_>>>()?;
         let (result,published)=self.auth.db.run(move|db|{let tx=db.transaction()?;
-   let incoming=rows.iter().map(|r|r.data.len() as i64*3).sum::<i64>();
-   for _ in 0..256 {
-    let used:i64=tx.query_row("SELECT bytes FROM traffic_budget WHERE id=1",[],|r|r.get(0))?;
-    if used+incoming<=64*1024*1024 {break;}
-    for table in ["traffic_events","traffic_messages","traffic_flows"] {tx.execute(&format!("DELETE FROM {table} WHERE seq IN (SELECT seq FROM {table} ORDER BY seq LIMIT 1000)"),[])?;}
-   }
-   let used:i64=tx.query_row("SELECT bytes FROM traffic_budget WHERE id=1",[],|r|r.get(0))?;
-   anyhow::ensure!(used+incoming<=64*1024*1024,"traffic storage quota exhausted");
    let mut result=IngestResult::default();let mut published=Vec::new();
    for mut row in rows {
+    {
+     let pinned:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM traffic_favorites WHERE flow_id=?1)",[&row.flow_id],|r|r.get(0))?;
+     if pinned {
+      let (bytes,count):(i64,i64)=tx.query_row("SELECT bytes,message_count FROM traffic_favorites WHERE flow_id=?1",[&row.flow_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
+      if bytes+row.data.len() as i64*2>900000 || (row.kind=="message" && count>=128) {
+       let changed=tx.execute("UPDATE traffic_favorites SET decoded_incomplete=1 WHERE flow_id=?1 AND decoded_incomplete=0",[&row.flow_id])?;
+       if changed>0 {let raw:String=tx.query_row("SELECT raw_history_state FROM traffic_favorites WHERE flow_id=?1",[&row.flow_id],|r|r.get(0))?;published.push(json!({"kind":"favorite_changed","flow_id":row.flow_id,"service_id":row.service_id,"favorite":true,"raw_history_state":raw,"decoded_incomplete":true}));}
+       if row.kind=="flow_closed" {tx.execute("UPDATE traffic_flows SET data=json_set(data,'$.closed',json(?2)) WHERE id=?1",params![row.flow_id,row.data])?;}
+       continue;
+      }
+     }
+    }
+
     let at:Option<String>=tx.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ',?1/1000.0,'unixepoch')",[row.at],|r|r.get(0))?;
     let mut data:Value=serde_json::from_str(&row.data)?;data["occurred_at"]=at.ok_or_else(||anyhow::anyhow!("event time outside supported range"))?.into();row.data=serde_json::to_string(&data)?;
-    let n=tx.execute("INSERT OR IGNORE INTO traffic_events(event_id,flow_id,kind,data) VALUES(?1,?2,?3,?4)",params![row.event_id,row.flow_id,row.kind,row.data])?;
+    let n=tx.execute("INSERT OR IGNORE INTO traffic_events_zstd(event_id,flow_id,kind,data,service_id) VALUES(?1,?2,?3,hydra_zstd(?4),?5)",params![row.event_id,row.flow_id,row.kind,row.data,row.service_id])?;
     if n==0 {result.duplicates+=1;continue;}result.accepted+=1;
     match row.kind {
-     "flow_opened"=>{tx.execute("INSERT OR IGNORE INTO traffic_flows(id,service_id,occurred_ms,client_ip,data) VALUES(?1,?2,?3,?4,?5)",params![row.flow_id,row.service_id,row.at,row.client,row.data])?;},
+     "flow_opened"=>{tx.execute("INSERT OR IGNORE INTO traffic_flows_zstd(id,service_id,occurred_ms,client_ip,data) VALUES(?1,?2,?3,?4,hydra_zstd(?5))",params![row.flow_id,row.service_id,row.at,row.client,row.data])?;},
      "flow_closed"=>{tx.execute("UPDATE traffic_flows SET data=json_set(data,'$.closed',json(?2)) WHERE id=?1",params![row.flow_id,row.data])?;},
-     "message"=>{tx.execute("INSERT OR IGNORE INTO traffic_messages(id,flow_id,service_id,occurred_ms,data) VALUES(?1,?2,?3,?4,?5)",params![row.message_id,row.flow_id,row.service_id,row.at,row.data])?;},_=>{}
+     "message"=>{let inserted=tx.execute("INSERT OR IGNORE INTO traffic_messages_zstd(id,flow_id,service_id,occurred_ms,data) VALUES(?1,?2,?3,?4,hydra_zstd(?5))",params![row.message_id,row.flow_id,row.service_id,row.at,row.data])?;if inserted==0{continue}data["stream_sequence"]=tx.last_insert_rowid().into();},_=>{}
     }
     // SSE contains parsed fields, never raw sample content.
-    published.push(serde_json::from_str::<Value>(&row.data)?);
+    published.push(data);
    }
-   tx.execute("DELETE FROM traffic_messages WHERE seq<=(SELECT COALESCE(MAX(seq),0)-100000 FROM traffic_messages)",[])?;
-   tx.execute("DELETE FROM traffic_flows WHERE seq<=(SELECT COALESCE(MAX(seq),0)-10000 FROM traffic_flows)",[])?;
-   tx.execute("DELETE FROM traffic_events WHERE seq<=(SELECT COALESCE(MAX(seq),0)-100000 FROM traffic_events)",[])?;
+   super::retention::enforce(&tx, super::retention::SERVICE_BYTES)?;
    // A critical finding or hit may arrive before the normal opening event.
    // Hydrate lifecycle notifications from committed indexes to preserve that state.
    for data in &mut published {
@@ -187,8 +203,14 @@ impl Traffic {
             let newest = q.newest_first.unwrap_or(false);
             let comparison = if newest { "<" } else { ">" };
             let blocked=super::visibility::blocked_sql(flow_ref, messages.then_some("t.id"));
-            let flagged=format!("EXISTS(SELECT 1 FROM flag_events fe WHERE fe.flow_id={flow_ref})");
-            let mut sql=format!("SELECT t.seq,json_set(t.data,'$.blocked',json(CASE WHEN {blocked} THEN 'true' ELSE 'false' END),'$.has_flag',json(CASE WHEN {flagged} THEN 'true' ELSE 'false' END)) FROM {table} t WHERE t.seq{comparison}?");
+            let flagged=format!("(EXISTS(SELECT 1 FROM flag_events fe WHERE fe.flow_id={flow_ref}) OR EXISTS(SELECT 1 FROM traffic_favorites WHERE flow_id={flow_ref} AND has_flag=1))");
+            let favorite=format!("EXISTS(SELECT 1 FROM traffic_favorites WHERE flow_id={flow_ref})");
+            let raw_history=format!("COALESCE((SELECT raw_history_state FROM traffic_favorites WHERE flow_id={flow_ref}),'not_saved')");
+            let incomplete=format!("EXISTS(SELECT 1 FROM traffic_favorites WHERE flow_id={flow_ref} AND decoded_incomplete=1)");
+            let incomplete=if messages {incomplete}else{format!("({incomplete} OR COALESCE(json_extract(t.data,'$.decoded_incomplete'),0)=1)")};
+            let ordered=if messages {"'$.stream_sequence',t.seq,"} else {""};
+            let mut sql=format!("SELECT t.seq,json_set(t.data,{ordered}'$.favorite',json(CASE WHEN {favorite} THEN 'true' ELSE 'false' END),'$.raw_history_state',{raw_history},'$.decoded_incomplete',json(CASE WHEN {incomplete} THEN 'true' ELSE 'false' END),'$.blocked',json(CASE WHEN {blocked} THEN 'true' ELSE 'false' END),'$.has_flag',json(CASE WHEN {flagged} THEN 'true' ELSE 'false' END)) FROM {table} t WHERE t.seq{comparison}?");
+            if let Some(favorite_filter)=q.favorite {sql.push_str(&format!(" AND {}({favorite})",if favorite_filter {""}else{"NOT "}));}
             if q.include_blocked == Some(false) { sql.push_str(&format!(" AND NOT ({blocked})")); }
             let mut values=vec![Sql::Integer(q.after.unwrap_or(if newest {i64::MAX}else{0}))];
             { let mut add=|clause:&str,value:Sql| {sql.push_str(clause);values.push(value);};
@@ -203,7 +225,7 @@ impl Traffic {
             if let Some(v)=q.matched_rule {add(&format!(" AND EXISTS(SELECT 1 FROM traffic_events e WHERE e.flow_id={flow_ref} AND e.kind='rule_hit' AND json_extract(e.data,'$.rule_id')=?)"),v.into());}
             }
             if let Some(v)=q.has_flag {
-                sql.push_str(&format!(" AND {}EXISTS(SELECT 1 FROM flag_events fe WHERE fe.flow_id={flow_ref})",if v {""}else{"NOT "}));
+                sql.push_str(&format!(" AND {}(EXISTS(SELECT 1 FROM flag_events fe WHERE fe.flow_id={flow_ref}) OR EXISTS(SELECT 1 FROM traffic_favorites WHERE flow_id={flow_ref} AND has_flag=1))",if v {""}else{"NOT "}));
             }
             if q.direction.is_some() || q.field_path.is_some() {
                 let predicate=if messages {"m.id=t.id".to_owned()}else{"m.flow_id=t.id".to_owned()};
@@ -232,7 +254,7 @@ impl Traffic {
         let (findings,has_flag)=self.auth.db.run(move |db| {
             let mut statement=db.prepare("SELECT data FROM traffic_events WHERE flow_id=?1 AND kind='rule_hit' ORDER BY seq LIMIT 101")?;
             let findings=statement.query_map([&id],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
-            let has_flag:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM flag_events WHERE flow_id=?1)",[id],|r|r.get(0))?;
+            let has_flag:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM flag_events WHERE flow_id=?1) OR EXISTS(SELECT 1 FROM traffic_favorites WHERE flow_id=?1 AND has_flag=1)",[id],|r|r.get(0))?;
             Ok((findings,has_flag))
         }).await?;
         let blocked = self
@@ -246,6 +268,17 @@ impl Traffic {
                 }
             })
             .await?;
+        let favorite_id = value["flow_id"].as_str().unwrap_or_default().to_owned();
+        let favorite=self.auth.db.run(move |db| { Ok(db.query_row("SELECT raw_history_state,decoded_incomplete FROM traffic_favorites WHERE flow_id=?1",[favorite_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,bool>(1)?))).optional()?) }).await?;
+        value["favorite"] = favorite.is_some().into();
+        value["raw_history_state"] = favorite
+            .as_ref()
+            .map(|v| v.0.clone())
+            .unwrap_or_else(|| "not_saved".into())
+            .into();
+        value["decoded_incomplete"] = (value["decoded_incomplete"].as_bool().unwrap_or(false)
+            || favorite.map(|v| v.1).unwrap_or(false))
+        .into();
         value["blocked"] = blocked.into();
         value["findings_truncated"] = (findings.len() > 100).into();
         value["rule_hits"] = Value::Array(
@@ -266,9 +299,14 @@ impl Traffic {
         self.auth
             .db
             .run(move |db| {
+                let projection = if table == "traffic_messages" {
+                    "json_set(data,'$.stream_sequence',seq)"
+                } else {
+                    "data"
+                };
                 let value = db
                     .query_row(
-                        &format!("SELECT data FROM {table} WHERE id=?1"),
+                        &format!("SELECT {projection} FROM {table} WHERE id=?1"),
                         [id],
                         |r| r.get::<_, String>(0),
                     )
@@ -495,10 +533,24 @@ pub async fn saved_fields(
                 _ => anyhow::bail!("unsupported stored field"),
             })
         }
-        fields
+        let mut result = fields
             .iter()
             .map(|(k, v)| Ok((k.clone(), convert(v, 0)?)))
-            .collect()
+            .collect::<anyhow::Result<std::collections::BTreeMap<_, _>>>()?;
+        // Older decoders did not emit the direction field; parsed message
+        // metadata still supplies the side for saved-message rule tests.
+        let direction = match data["direction"].as_u64() {
+            Some(1) => Some("client_to_server"),
+            Some(2) => Some("server_to_client"),
+            _ => None,
+        };
+        if let Some(direction) = direction {
+            result.insert(
+                "direction".into(),
+                hydra_domain::FieldValue::String(direction.into()),
+            );
+        }
+        Ok(result)
     })
     .await
 }

@@ -15,19 +15,23 @@ UV_SHA256="433e56874739e92c7cfd661ba9e5f287b376ca612c08c8194a41a98a13158aea"
 mode=install
 archive=""
 output=""
+source_kind=""
 while (($#)); do
   case "$1" in
     --archive) [[ $# -ge 2 ]] || { echo '--archive needs a path' >&2; exit 2; }; archive=$2; shift 2 ;;
+    --source) [[ $# -ge 2 ]] || { echo '--source needs s3 or github' >&2; exit 2; }; source_kind=$2; shift 2 ;;
     --download-only) [[ $# -ge 2 ]] || { echo '--download-only needs a new directory' >&2; exit 2; }; mode=download; output=$2; shift 2 ;;
     -h|--help)
       cat <<'HELP'
-Usage: sudo bash install-hydra.sh [--archive BUILD.tar.gz|BUILD.zip]
-       bash install-hydra.sh --download-only NEW_DIRECTORY [--archive BUILD.tar.gz|BUILD.zip]
-Default: enter S3 endpoint, region, bucket, access key ID, secret key and optional
-session token on stdin (one line each). Credential input is hidden on terminals.
-Downloads use curl; missing prerequisites are installed automatically as root.
-The S3 key needs GetObject access to hydra-core and hydra-proxy. No Git/AWS CLI.
---archive retains offline installation; HYDRA_DOWNLOAD_URL selects legacy HTTPS mode.
+Usage: sudo bash install-hydra.sh [--source s3|github] [--archive BUILD.tar.gz|BUILD.zip]
+       bash install-hydra.sh --download-only NEW_DIRECTORY [--source s3|github] [--archive BUILD.tar.gz|BUILD.zip]
+Default source is S3: enter endpoint, region, bucket, access key ID, secret key
+and optional session token on stdin. --source github selects the latest eligible
+main-branch Actions archive; enter a repository read token when prompted. You can
+set HYDRA_GITHUB_REPOSITORY for a fork. Secrets are hidden on terminals and sent
+to curl through stdin. --archive installs a downloaded archive without a network
+source; HYDRA_DOWNLOAD_URL retains the legacy HTTPS index override.
+Missing prerequisites are installed automatically as root. No Git/AWS CLI.
 Installs on x86_64 Linux with systemd; no Rust, Node or Docker is needed.
 Initial credentials are written to /root/hydra-install-credentials.json (0600).
 Existing users, configuration, certificates and database are preserved.
@@ -36,6 +40,16 @@ HELP
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+if [[ -n "$archive" && -n "$source_kind" ]]; then
+  echo '--archive cannot be combined with --source' >&2; exit 2
+fi
+if [[ -n "$source_kind" && "$source_kind" != s3 && "$source_kind" != github ]]; then
+  echo '--source must be s3 or github' >&2; exit 2
+fi
+if [[ -n "$archive" ]]; then source_kind=archive
+elif [[ -z "$source_kind" ]]; then
+  if [[ -n "$DOWNLOAD_URL" ]]; then source_kind=https; else source_kind=s3; fi
+fi
 if [[ "$mode" == install ]]; then
   [[ $EUID == 0 ]] || { echo 'Run installation as root (sudo bash install-hydra.sh).' >&2; exit 1; }
   [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'This build supports x86_64 Linux.' >&2; exit 1; }
@@ -56,10 +70,10 @@ if [[ "$mode" == install ]]; then
   fi
 fi
 command -v python3 >/dev/null || { echo 'python3 is required.' >&2; exit 1; }
-python3 - "$mode" "$archive" "$output" "$DOWNLOAD_URL" "$ARCHIVE_SHA256" "$INITIAL_USER" "$INSTALL_UV" "$UV_URL" "$UV_SHA256" 3<&0 <<'PY'
+python3 - "$mode" "$archive" "$output" "$DOWNLOAD_URL" "$ARCHIVE_SHA256" "$INITIAL_USER" "$INSTALL_UV" "$UV_URL" "$UV_SHA256" "$source_kind" 3<&0 <<'PY'
 import datetime, hashlib, json, os, pathlib, pwd, re, resource, select, shutil, signal, sqlite3, ssl, subprocess, sys, tarfile, tempfile, time, urllib.error, urllib.parse, urllib.request, uuid, zipfile
 
-mode, archive, output, source_url, expected_sha, initial_user, install_uv, uv_url, uv_sha = sys.argv[1:]
+mode, archive, output, source_url, expected_sha, initial_user, install_uv, uv_url, uv_sha, source_kind = sys.argv[1:]
 CORE='hydra-core-linux-x86_64-musl'
 PROXY='hydra-proxy-linux-x86_64-musl'
 ALLOWED={CORE,PROXY,'SHA256SUMS','BUILD.txt'}
@@ -92,7 +106,7 @@ def curl_quote(value):
     return '"'+value.replace('\\','\\\\').replace('"','\\"')+'"'
 
 
-def curl_download(url,target,limit,configuration='',follow=True):
+def curl_download(url,target,limit,configuration='',follow=True,allow_redirect=False):
     valid_url(url)
     require(shutil.which('curl'),'curl is required for downloads; install curl or run the installer as root')
     version=run('curl','--version').stdout.splitlines()[0]
@@ -113,12 +127,6 @@ def curl_download(url,target,limit,configuration='',follow=True):
     blocks=[part for part in result.stdout.replace(b'\r\n',b'\n').split(b'\n\n') if part.startswith(b'HTTP/')]
     lines=blocks[-1].decode('iso-8859-1').splitlines() if blocks else []
     status=int(lines[0].split()[1]) if lines else 0
-    if result.returncode or status!=200:
-        target.unlink(missing_ok=True)
-        if status==403: raise RuntimeError('Download denied (HTTP 403): the S3 key needs GetObject/read access to the release objects')
-        if 300<=status<400: raise RuntimeError('S3 redirect refused; enter the correct HTTPS S3 endpoint')
-        raise RuntimeError('Download failed (HTTP %s, curl exit %s)'%(status,result.returncode))
-    require(target.is_file() and target.stat().st_size<=limit,'Download exceeds size limit')
     headers={}
     for line in lines[1:]:
         name,separator,value=line.partition(':')
@@ -126,16 +134,42 @@ def curl_download(url,target,limit,configuration='',follow=True):
             name=name.lower().strip()
             require(name not in headers or not name.startswith('x-amz-meta-'),'Duplicate S3 release metadata')
             headers[name]=value.strip()
+    if allow_redirect and status==302 and headers.get('location'):
+        target.unlink(missing_ok=True)
+        return headers
+    if result.returncode or status!=200:
+        target.unlink(missing_ok=True)
+        if status==403: raise RuntimeError('Download denied (HTTP 403): the S3 key needs GetObject/read access to the release objects')
+        if 300<=status<400: raise RuntimeError('Redirect refused for this download (HTTP %s, curl exit %s)'%(status,result.returncode))
+        raise RuntimeError('Download failed (HTTP %s, curl exit %s)'%(status,result.returncode))
+    require(target.is_file() and target.stat().st_size<=limit,'Download exceeds size limit')
     return headers
 
 
-def download(url,target):
+def download(url,target,token=''):
     parsed=valid_url(url);configuration=''
-    if parsed.hostname=='api.github.com':
+    if not token and parsed.hostname=='api.github.com':
         token=os.environ.get('HYDRA_GITHUB_TOKEN') or os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
-        if token: configuration+='header = '+curl_quote('Authorization: Bearer '+token)+'\n'
+    if token:
+        configuration+='header = '+curl_quote('Authorization: Bearer '+token)+'\n'
+    if parsed.hostname=='api.github.com':
         configuration+='header = "X-GitHub-Api-Version: 2022-11-28"\n'
     curl_download(url,target,MAX_DOWNLOAD,configuration)
+
+
+def download_github_artifact(url,target,token=''):
+    parsed=valid_url(url)
+    token=token or os.environ.get('HYDRA_GITHUB_TOKEN') or os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
+    configuration=''
+    if token: configuration+='header = '+curl_quote('Authorization: Bearer '+token)+'\n'
+    if parsed.hostname=='api.github.com':
+        configuration+='header = "X-GitHub-Api-Version: 2022-11-28"\n'
+    headers=curl_download(url,target,MAX_DOWNLOAD,configuration,follow=False,allow_redirect=True)
+    if target.is_file(): return
+    location=headers.get('location')
+    require(location,'GitHub artifact download did not return a file or signed redirect')
+    valid_url(location)
+    curl_download(location,target,MAX_DOWNLOAD,follow=True)
 
 
 def read_s3_input():
@@ -165,6 +199,25 @@ def read_s3_input():
     require(re.fullmatch(r'[a-z0-9][a-z0-9-]{0,62}',region),'Invalid S3 region')
     require(re.fullmatch(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]',bucket),'Invalid S3 bucket name')
     return endpoint.rstrip('/'),region,bucket,key,secret,token
+
+
+def read_github_token():
+    token=os.environ.get('HYDRA_GITHUB_TOKEN') or os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
+    if token: return token
+    with os.fdopen(3,'r') as stream:
+        terminal=stream.isatty();previous=None
+        if terminal:
+            import termios
+            previous=termios.tcgetattr(stream.fileno());changed=previous.copy();changed[3]&=~termios.ECHO
+            termios.tcsetattr(stream.fileno(),termios.TCSANOW,changed)
+            print('GitHub token with Actions read access: ',end='',file=sys.stderr,flush=True)
+        try: token=stream.readline(4098).rstrip('\r\n')
+        finally:
+            if previous is not None:
+                import termios
+                termios.tcsetattr(stream.fileno(),termios.TCSANOW,previous);print(file=sys.stderr)
+    require(bool(token) and len(token)<=4096 and not any(ord(character)<32 or ord(character)==127 for character in token),'Missing or invalid GitHub Actions read token')
+    return token
 
 
 def verify_binaries(directory,checks):
@@ -198,9 +251,9 @@ def fetch_s3(directory):
     return bundle
 
 
-def fetch_bundle(directory):
+def fetch_bundle(directory, url=None, token=''):
     source=pathlib.Path(archive) if archive else directory/'download'
-    if not archive: download(source_url,source)
+    if not archive: download(url or source_url,source,token)
     require(source.is_file() and source.stat().st_size<=MAX_DOWNLOAD,'Archive is missing or exceeds 256 MiB')
     with open(source,'rb') as stream: prefix=stream.read(128).lstrip()
     if not archive and prefix.startswith(b'{'):
@@ -210,7 +263,7 @@ def fetch_bundle(directory):
         require(items,'No unexpired main-branch Linux build found at the configured artifact index')
         item=max(items,key=lambda item:item.get('created_at',''))
         print('Build:',item['name'],flush=True)
-        source=directory/'artifact.zip';download(item['archive_download_url'],source)
+        source=directory/'artifact.zip';download_github_artifact(item['archive_download_url'],source,token)
         if item.get('digest'):
             require(item['digest']=='sha256:'+digest(source),'GitHub artifact digest mismatch')
     if expected_sha:
@@ -487,7 +540,16 @@ signal.signal(signal.SIGINT,interrupted)
 
 try:
     with tempfile.TemporaryDirectory(prefix='hydra-install-') as temporary:
-        directory=pathlib.Path(temporary);bundle=fetch_bundle(directory) if archive or source_url else fetch_s3(directory)
+        directory=pathlib.Path(temporary)
+        if source_kind=='s3': bundle=fetch_s3(directory)
+        elif source_kind=='github':
+            token=read_github_token()
+            repository=os.environ.get('HYDRA_GITHUB_REPOSITORY','nrf24l01/ad-hydra').strip()
+            require(re.fullmatch(r'[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}',repository),'Invalid HYDRA_GITHUB_REPOSITORY; expected owner/name')
+            index=os.environ.get('HYDRA_GITHUB_ARTIFACTS_URL') or ('https://api.github.com/repos/'+repository+'/actions/artifacts?per_page=100')
+            bundle=fetch_bundle(directory,index,token)
+        elif source_kind in {'archive','https'}: bundle=fetch_bundle(directory)
+        else: raise RuntimeError('Invalid download source')
         if mode=='download':
             destination=pathlib.Path(output)
             require(not destination.exists(),'Download directory must not exist')

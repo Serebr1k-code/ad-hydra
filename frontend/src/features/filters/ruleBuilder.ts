@@ -1,3 +1,4 @@
+import {splitDirection,type FilterDirection} from './filterDirection'
 export type FieldKind = 'string' | 'number' | 'boolean' | 'bytes'
 export interface RuleField { value: string; label: string; kind: FieldKind }
 export type Join = 'all' | 'any'
@@ -8,6 +9,7 @@ export interface Condition {
   op: string
   value: string
   negate?: boolean
+  direction?: FilterDirection
 }
 export interface Group {
   id: string
@@ -84,7 +86,8 @@ function conditionExpression(node: Condition, available: RuleField[]): Expressio
     value = { type: 'bytes', value: bytesValue(node.value) }
   } else value = { type: 'string', value: node.value }
   const predicate = { field: node.field, op, value }
-  return node.op === 'not_regex' || node.negate ? { not: predicate } : predicate
+  const expression=node.op === 'not_regex' || node.negate ? { not: predicate } : predicate
+  return node.direction&&node.direction!=='both'?{direction:node.direction,scoped:expression}:expression
 }
 export function toExpression(node: RuleNode, available: RuleField[] = fields): Expression {
   if (node.kind === 'condition') return conditionExpression(node, available)
@@ -104,6 +107,10 @@ function readValue(input: unknown, type?: string): string {
 function parseNode(input: unknown): RuleNode {
   if (!input || typeof input !== 'object') throw new Error('Unsupported saved filter expression')
   const value = input as Record<string, unknown>
+  if(value.scoped&&typeof value.scoped==='object'&&(value.direction==='client_to_server'||value.direction==='server_to_client')){
+    const child=parseNode(value.scoped);applyDirection(child,value.direction);return child
+  }
+
   if (Array.isArray(value.all) || Array.isArray(value.any)) {
     const join: Join = Array.isArray(value.all) ? 'all' : 'any'
     const rawChildren = (join === 'all' ? value.all : value.any) as unknown[]
@@ -111,8 +118,8 @@ function parseNode(input: unknown): RuleNode {
   }
   if (value.not && typeof value.not === 'object') {
     const child = parseNode(value.not)
-    if (child.kind === 'condition' && child.op === 'regex') return { ...child, id: crypto.randomUUID(), op: 'not_regex' }
-    return { ...child, id: crypto.randomUUID(), negate: true }
+    if(child.kind==='condition'&&(child.op==='regex'||child.op==='not_regex'))return {...child,id:crypto.randomUUID(),op:child.op==='regex'?'not_regex':'regex'}
+    return { ...child, id: crypto.randomUUID(), negate: !child.negate }
   }
   if (typeof value.field === 'string' && typeof value.op === 'string') {
     const expected = value.value && typeof value.value === 'object' ? value.value as Record<string, unknown> : {}
@@ -124,7 +131,9 @@ function parseNode(input: unknown): RuleNode {
   throw new Error('Unsupported saved filter expression')
 }
 export function fromExpression(expression: Expression): Group {
-  const node = parseNode(expression)
+  const legacy=splitDirection(expression)
+  const node = parseNode(legacy.expression)
+  if(legacy.side!=='both')applyDirection(node,legacy.side)
   return node.kind === 'group' ? node : { id: crypto.randomUUID(), kind: 'group', join: 'all', negate: false, children: [node] }
 }
 
@@ -134,4 +143,14 @@ export function removeChild(group: Group, id: string) {
   if (index < 0) return
   group.children.splice(index, 1)
   if (!group.children.length) group.children.push(createCondition())
+}
+
+function applyDirection(node:RuleNode,side:Exclude<FilterDirection,'both'>){
+ if(node.kind==='condition'){
+  if(node.direction&&node.direction!=='both'&&node.direction!==side)throw new Error('Conflicting nested direction scopes cannot be edited visually')
+  node.direction=side
+ }else for(const child of node.children)applyDirection(child,side)
+}
+export function conditionDirections(group:RuleNode):FilterDirection[]{
+ const sides=new Set<FilterDirection>();const visit=(node:RuleNode)=>{if(node.kind==='condition')sides.add(node.direction??'both');else node.children.forEach(visit)};visit(group);return [...sides]
 }

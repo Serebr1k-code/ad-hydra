@@ -5,6 +5,7 @@ use hydra_domain::{Comparison, Expression, FieldValue, Mode, Rule, RuleSnapshot,
 async fn byte_limits_work_before_udp_decoding_and_keep_directions_separate() {
     for field in ["body.size", "transfer.bytes", "mixed"] {
         let service = Service {
+            forwarding: None,
             id: "udp".into(),
             transport: Transport::Udp,
             listen_address: "127.0.0.1:9000".parse().unwrap(),
@@ -12,6 +13,7 @@ async fn byte_limits_work_before_udp_decoding_and_keep_directions_separate() {
             protocol_id: "raw".into(),
             enabled: true,
             retain_history: false,
+            protection: None,
         };
         let telemetry = Telemetry::new(1);
         telemetry.replace_rules(
@@ -98,6 +100,7 @@ async fn saved_udp_sessions_keep_clients_binary_empty_datagrams_and_idle_closure
     let listener = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let address = listener.local_addr().unwrap();
     let service = Service {
+        forwarding: None,
         id: "udp".into(),
         transport: Transport::Udp,
         listen_address: address,
@@ -105,6 +108,13 @@ async fn saved_udp_sessions_keep_clients_binary_empty_datagrams_and_idle_closure
         protocol_id: "raw".into(),
         enabled: true,
         retain_history: true,
+        protection: Some(hydra_domain::ServiceProtection {
+            max_active_flows: 4,
+            tcp_connections_per_second: 0,
+            udp_datagrams_per_second: 100,
+            bytes_per_second: 1024,
+            idle_timeout_ms: 80,
+        }),
     };
     let telemetry = Telemetry::new(4);
     let mut events = telemetry.events.subscribe();
@@ -144,6 +154,25 @@ async fn saved_udp_sessions_keep_clients_binary_empty_datagrams_and_idle_closure
         }
         clients.push(client);
     }
+    clients[0].send(&[7; 2048]).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while telemetry.udp_dropped.load(Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let metrics = telemetry
+        .budgets
+        .read()
+        .unwrap()
+        .get("udp")
+        .unwrap()
+        .metrics();
+    assert_eq!(metrics.dropped_datagrams, 1);
+    assert_eq!(metrics.rate_limited, 1);
+    assert_eq!(metrics.bytes_client_to_server, 6);
+    assert_eq!(metrics.bytes_server_to_client, 6);
     echo.await.unwrap();
     let mut opened = Vec::new();
     let mut closed = Vec::new();

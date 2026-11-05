@@ -229,6 +229,7 @@ impl CompiledSnapshot {
 fn references_size(expression: &Expression) -> bool {
     match expression {
         Expression::All { all } | Expression::Any { any: all } => all.iter().any(references_size),
+        Expression::Scoped { scoped, .. } => references_size(scoped),
         Expression::Not { not } => references_size(not),
         Expression::Predicate { field, .. } => matches!(
             field.as_str(),

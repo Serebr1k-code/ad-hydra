@@ -98,6 +98,7 @@ async fn failed_persistence_preserves_revision_and_replay_checks_content() {
     );
     let mut conflicting = snapshot(1);
     conflicting.services.push(hydra_domain::Service {
+        forwarding: None,
         id: "disabled".into(),
         transport: hydra_domain::Transport::Tcp,
         listen_address: "127.0.0.1:23001".parse().unwrap(),
@@ -105,6 +106,7 @@ async fn failed_persistence_preserves_revision_and_replay_checks_content() {
         protocol_id: "raw".into(),
         enabled: false,
         retain_history: true,
+        protection: None,
     });
     assert!(
         state
@@ -181,6 +183,7 @@ async fn combined_snapshot_moves_dependent_rules_and_service_together() {
     let directory = Directory::new();
     let state = start(directory.0.join("saved.json")).await;
     let service = hydra_domain::Service {
+        forwarding: None,
         id: "service".into(),
         transport: hydra_domain::Transport::Tcp,
         listen_address: "127.0.0.1:24001".parse().unwrap(),
@@ -188,6 +191,7 @@ async fn combined_snapshot_moves_dependent_rules_and_service_together() {
         protocol_id: "raw".into(),
         enabled: false,
         retain_history: true,
+        protection: None,
     };
     let rule = hydra_domain::Rule {
         id: "rule".into(),

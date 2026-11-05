@@ -1,11 +1,13 @@
 use super::*;
 use hydra_wire::v1::event::Payload;
+use tokio::net::TcpStream;
 
 #[tokio::test]
 async fn raw_flow_closure_emits_testable_size_metadata_without_payloads() {
     let telemetry = Telemetry::new(1);
     let mut events = telemetry.events.subscribe();
     let service = Service {
+        forwarding: None,
         id: "raw".into(),
         transport: hydra_domain::Transport::Tcp,
         listen_address: "127.0.0.1:9000".parse().unwrap(),
@@ -13,6 +15,7 @@ async fn raw_flow_closure_emits_testable_size_metadata_without_payloads() {
         protocol_id: "raw".into(),
         enabled: true,
         retain_history: false,
+        protection: None,
     };
     let flow = telemetry.open(
         &service,
@@ -54,6 +57,7 @@ async fn raw_byte_filter_matches_across_reads_without_emitting_payload_telemetry
     let telemetry = Telemetry::new(1);
     let mut events = telemetry.events.subscribe();
     let service = Service {
+        forwarding: None,
         id: "raw-match".into(),
         transport: hydra_domain::Transport::Tcp,
         listen_address: "127.0.0.1:9001".parse().unwrap(),
@@ -61,6 +65,7 @@ async fn raw_byte_filter_matches_across_reads_without_emitting_payload_telemetry
         protocol_id: "raw".into(),
         enabled: true,
         retain_history: false,
+        protection: None,
     };
     let protocols = crate::inspection::protocols::Protocols::open(
         std::env::temp_dir().join(format!("hydra-raw-filter-{}", uuid::Uuid::new_v4())),
@@ -107,6 +112,7 @@ async fn raw_byte_filter_matches_across_reads_without_emitting_payload_telemetry
         base: crate::transport::RelayBase::new(service.clone(), client, telemetry.clone(), decoder),
         flow: &flow,
         idle: Duration::from_secs(1),
+        last_activity: Mutex::new(tokio::time::Instant::now()),
     };
     assert!(!inspect_raw(
         &context,
@@ -143,6 +149,7 @@ async fn byte_limit_stops_incomplete_uploads_before_forwarding_the_excess() {
             .await
             .unwrap();
         let service = Service {
+            forwarding: None,
             id: "upload".into(),
             transport: hydra_domain::Transport::Tcp,
             listen_address: "127.0.0.1:9000".parse().unwrap(),
@@ -150,6 +157,7 @@ async fn byte_limit_stops_incomplete_uploads_before_forwarding_the_excess() {
             protocol_id: protocol.into(),
             enabled: true,
             retain_history: false,
+            protection: None,
         };
         if profile == "wasm" {
             let module =
@@ -214,6 +222,7 @@ async fn byte_limit_stops_incomplete_uploads_before_forwarding_the_excess() {
             ),
             flow: &flow,
             idle: Duration::from_secs(5),
+            last_activity: Mutex::new(tokio::time::Instant::now()),
         };
         let (mut sender, input) = tokio::io::duplex(4096);
         let (output, mut backend) = tokio::io::duplex(4096);
@@ -271,6 +280,7 @@ async fn utf8_tcp_inspection_emits_text_events_in_both_directions() {
         .await
         .unwrap();
     let service = Service {
+        forwarding: None,
         id: "text".into(),
         transport: hydra_domain::Transport::Tcp,
         listen_address: "127.0.0.1:9000".parse().unwrap(),
@@ -278,6 +288,7 @@ async fn utf8_tcp_inspection_emits_text_events_in_both_directions() {
         protocol_id: "utf8".into(),
         enabled: true,
         retain_history: false,
+        protection: None,
     };
     let telemetry = Telemetry::new(1);
     let mut events = telemetry.events.subscribe();
@@ -299,6 +310,7 @@ async fn utf8_tcp_inspection_emits_text_events_in_both_directions() {
         ),
         flow: &flow,
         idle: Duration::from_secs(1),
+        last_activity: Mutex::new(tokio::time::Instant::now()),
     };
     assert!(!inspect_raw(
         &context,
@@ -348,4 +360,197 @@ async fn utf8_tcp_inspection_emits_text_events_in_both_directions() {
         );
     }
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn service_caps_isolate_same_ip_clients_and_global_cap_counts_rejections() {
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = backend.local_addr().unwrap();
+    let echo = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = backend.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = socket.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    if socket.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    let telemetry = Telemetry::new(2);
+    let stop = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let mut tasks = Vec::new();
+    let mut configs = Vec::new();
+    let mut senders = Vec::new();
+    for id in ["a", "b"] {
+        let listener = Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
+        let service = Service {
+            forwarding: None,
+            id: id.into(),
+            transport: hydra_domain::Transport::Tcp,
+            listen_address: listener.local_addr().unwrap(),
+            upstream_address: upstream,
+            protocol_id: "raw".into(),
+            enabled: true,
+            retain_history: false,
+            protection: Some(hydra_domain::ServiceProtection {
+                max_active_flows: 1,
+                tcp_connections_per_second: 0,
+                udp_datagrams_per_second: 0,
+                bytes_per_second: 1024,
+                idle_timeout_ms: 5000,
+            }),
+        };
+        let (sender, receiver) = watch::channel(Some(service.clone()));
+        senders.push(sender);
+        tasks.push(tokio::spawn(listen(
+            listener,
+            receiver,
+            Limits::default(),
+            telemetry.clone(),
+            stop.clone(),
+            tracker.clone(),
+        )));
+        configs.push(service);
+    }
+    async fn binary_roundtrip(address: std::net::SocketAddr) -> TcpStream {
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(&[0, 255, 128, 42]).await.unwrap();
+        let mut data = [0; 4];
+        tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut data))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(data, [0, 255, 128, 42]);
+        client
+    }
+    async fn rejected(address: std::net::SocketAddr) {
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let mut byte = [0];
+        let outcome = tokio::time::timeout(Duration::from_secs(2), client.read(&mut byte))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, Ok(0) | Err(_)));
+    }
+    let mut a = binary_roundtrip(configs[0].listen_address).await;
+    rejected(configs[0].listen_address).await; // service cap with global slot still free
+    let b = binary_roundtrip(configs[1].listen_address).await;
+    rejected(configs[1].listen_address).await; // shared global cap
+    assert_eq!(telemetry.rejected.load(Ordering::Relaxed), 2);
+    assert_eq!(telemetry.budget(&configs[0]).metrics().active_flows, 1);
+    assert_eq!(telemetry.budget(&configs[1]).metrics().accepted_flows, 1);
+    // An oversized read closes the whole connection before forwarding its contents.
+    a.write_all(&[7; 2048]).await.unwrap();
+    let mut byte = [0];
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), a.read(&mut byte))
+            .await
+            .unwrap(),
+        Ok(0) | Err(_)
+    ));
+    assert_eq!(
+        telemetry
+            .budget(&configs[0])
+            .metrics()
+            .bytes_client_to_server,
+        4
+    );
+    assert_eq!(telemetry.budget(&configs[0]).metrics().rate_limited, 1);
+    drop((a, b, senders));
+    stop.cancel();
+    for task in tasks {
+        task.await.unwrap();
+    }
+    tracker.close();
+    tracker.wait().await;
+    echo.abort();
+}
+
+#[tokio::test]
+async fn one_way_upload_keeps_connection_alive_and_true_idle_releases_slot() {
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
+    let address = listener.local_addr().unwrap();
+    let config = Service {
+        forwarding: None,
+        id: "one-way".into(),
+        transport: hydra_domain::Transport::Tcp,
+        listen_address: address,
+        upstream_address: backend.local_addr().unwrap(),
+        protocol_id: "raw".into(),
+        enabled: true,
+        retain_history: false,
+        protection: Some(hydra_domain::ServiceProtection {
+            max_active_flows: 1,
+            tcp_connections_per_second: 0,
+            udp_datagrams_per_second: 0,
+            bytes_per_second: 0,
+            idle_timeout_ms: 400,
+        }),
+    };
+    let telemetry = Telemetry::new(1);
+    let (received_tx, mut received_rx) = mpsc::channel(16);
+    let backend_task = tokio::spawn(async move {
+        // The backend deliberately never sends a response.
+        let (mut socket, _) = backend.accept().await.unwrap();
+        let mut byte = [0];
+        while socket.read_exact(&mut byte).await.is_ok() {
+            received_tx.send(byte[0]).await.unwrap();
+        }
+    });
+    let (_sender, receiver) = watch::channel(Some(config.clone()));
+    let stop = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let relay = tokio::spawn(listen(
+        listener,
+        receiver,
+        Limits::default(),
+        telemetry.clone(),
+        stop.clone(),
+        tracker.clone(),
+    ));
+    let mut client = TcpStream::connect(address).await.unwrap();
+    for value in 0..12u8 {
+        client.write_all(&[value]).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), received_rx.recv())
+                .await
+                .unwrap(),
+            Some(value)
+        );
+        assert_eq!(telemetry.budget(&config).metrics().active_flows, 1);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // More than one idle interval elapsed with only client -> upstream activity.
+    assert_eq!(
+        telemetry.budget(&config).metrics().bytes_client_to_server,
+        12
+    );
+    let mut byte = [0];
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), client.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while telemetry.budget(&config).metrics().active_flows != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(telemetry.permits.available_permits(), 1);
+    stop.cancel();
+    relay.await.unwrap();
+    tracker.close();
+    tracker.wait().await;
+    backend_task.await.unwrap();
 }

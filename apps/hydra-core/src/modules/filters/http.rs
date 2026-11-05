@@ -33,6 +33,7 @@ pub struct FilterPreviewInput {
     #[schema(value_type=String)]
     pub mode: Mode,
     pub priority: u32,
+    /// Expression AST supports all/any/not/predicate and {direction, scoped}; scoped conditions are inapplicable outside their direction, even under NOT.
     #[schema(value_type=Object)]
     pub expression: Expression,
     #[schema(value_type=Object)]
@@ -225,6 +226,7 @@ pub struct FilterInput {
     #[schema(value_type=String)]
     pub mode: Mode,
     pub priority: u32,
+    /// Expression AST supports all/any/not/predicate and {direction, scoped}; scoped conditions are inapplicable outside their direction, even under NOT.
     #[schema(value_type=Object)]
     pub expression: Expression,
     #[schema(value_type=Object)]

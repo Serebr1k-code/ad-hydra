@@ -248,7 +248,9 @@ pub async fn run() -> anyhow::Result<()> {
             let diagnostics = crate::modules::traffic::diagnostics::Diagnostics {
                 auth: auth.clone(),
                 socket: args.socket,
+                traffic: Some(traffic.clone()),
             };
+            diagnostics.resume_favorites(shutdown.clone());
             let router = api::router(
                 view,
                 api::Modules {

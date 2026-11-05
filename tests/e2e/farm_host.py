@@ -2,7 +2,7 @@
 Python dependency coverage downloads idna through uv into a temporary cache.
 Run after building binaries: python3 tests/e2e/farm_host.py
 """
-import gzip
+import io
 import json
 import os
 import pathlib
@@ -13,13 +13,14 @@ import subprocess
 import tempfile
 import time
 import unittest
+import zstandard
 import urllib.error
 import urllib.request
 from relay import BIN, port
 
 
 class HostFarm(unittest.TestCase):
-    def test_catalog_runtimes_live_gzip_logs_and_rotation(self):
+    def test_catalog_runtimes_live_zstd_logs_and_rotation(self):
         uv = shutil.which('uv')
         self.assertIsNotNone(uv, 'uv is required for the real Python runtime test')
         with tempfile.TemporaryDirectory(prefix='hydra-farm-host-') as tmp:
@@ -116,13 +117,14 @@ class HostFarm(unittest.TestCase):
                 with sqlite3.connect(f'file:{root / "db"}?mode=ro', uri=True) as db:
                     plain, compressed = db.execute('SELECT stdout,stdout_gzip FROM farm_runs WHERE id=?', (bash_id,)).fetchone()
                     self.assertEqual(plain, '')
-                    self.assertEqual(compressed[:2], b'\x1f\x8b')
-                    self.assertIn(b'OUT:127.0.0.1:12345', gzip.decompress(compressed))
+                    self.assertEqual(compressed[:4], b'\x28\xb5\x2f\xfd')
+                    with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(compressed)) as reader:
+                        self.assertIn(b'OUT:127.0.0.1:12345', reader.read())
                     self.assertGreater(db.execute("SELECT count(*) FROM flags WHERE target_id='one' AND category='captured'").fetchone()[0], 0)
                 self.assertEqual(api('GET', '/farm/runs')['items'][0]['id'], cancel_id)
                 deleted = api('DELETE', '/farm/runs?older_than_days=0')['deleted']
                 self.assertGreaterEqual(deleted, 4)
-                print('PASS: services/teams, direct/all teams, Bash, Python uv+idna pin, binary, live gzip logs, flag provenance, cancel, newest-first, rotation')
+                print('PASS: services/teams, direct/all teams, Bash, Python uv+idna pin, binary, live zstd logs, flag provenance, cancel, newest-first, rotation')
             finally:
                 for process in [core, proxy]:
                     process.terminate()

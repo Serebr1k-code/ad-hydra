@@ -2,6 +2,10 @@
 
 Authority: SPEC.md. Delivery order: IMPLEMENTATION_PLAN.md. Original repository contained untracked handoff documents and no executable implementation; those documents were preserved. Work remains uncommitted in the supplied workspace.
 
+## Latest milestone — 2026-10-22
+
+## Milestone — 2026-10-20
+
 ## Phase 0 — working foundation
 
 Implemented seven real workspace packages: independent `apps/hydra-core` and `apps/hydra-proxy`, pure `hydra-domain`, generated `hydra-wire`, `hydra-filter-engine`, independent `hydra-protocol-sdk`, and `hydra-protocol-runtime`. Thin mains; vertical Core features, explicit Proxy transport/inspection/gRPC/telemetry modules. Canonical protobuf generates only in Cargo OUT_DIR. Original OpenAPI draft preserved; active OpenAPI derives from handlers. Frontend helpers/types derive from that snapshot. Added build configuration, CI, architecture checker and deployment instructions.
@@ -196,4 +200,18 @@ Changed apps/hydra-proxy/src/main.rs, added tests/e2e/proxy_runtime.py to CI, an
 Validation: Proxy Clippy all-targets with -D warnings, formatting, dependency boundaries, Python syntax and diff checks pass. `cargo build --locked -p hydra-proxy` and `CARGO_BUILD_JOBS=2 cargo build --locked --release -p hydra-proxy` pass(release46.75s). Release CPU-aware runtime, TCP/UDP/retained-history restart, diagnostics crash replay and HTTP/filter/WASM lifecycle scripts all pass. Socket integration runs require execution outside the restricted sandbox.
 
 ## 2026-10-19 — effectiveness matrix, UDP retained history, filter cards
+
+## 2026-10-22 — nc-style terminal stream playback
+
+## 2026-10-22 — terminal direction colors
+
+## 2026-10-22 — decoder filter field rejection
+
+## 2026-10-22 — filter match direction
+
+## 2026-10-23 — per-service compressed decoded retention
+
+## 2026-10-23 — direction for every condition row
+
+## 2026-10-23 — HTTP viewer and Services UX
 

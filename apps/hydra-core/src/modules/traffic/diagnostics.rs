@@ -17,6 +17,7 @@ use utoipa::{OpenApi, ToSchema};
 pub struct Diagnostics {
     pub auth: AuthState,
     pub socket: PathBuf,
+    pub traffic: Option<super::Traffic>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct Capture {
@@ -53,7 +54,7 @@ pub struct FlowHistory {
     pub truncated_server_to_client: bool,
     pub history_truncated: bool,
 }
-async fn actor(
+pub(super) async fn actor(
     state: &Diagnostics,
     headers: &HeaderMap,
     mutation: bool,
@@ -75,7 +76,7 @@ async fn actor(
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)
 }
-async fn record(
+pub(super) async fn record(
     state: &Diagnostics,
     actor: audit::Actor,
     action: &'static str,
@@ -470,8 +471,18 @@ fn map_status(e: tonic::Status) -> StatusCode {
 }
 #[derive(OpenApi)]
 #[openapi(
-    paths(capture, sample, flow_history, probe, diagnostic_probe, test_protocol),
+    paths(
+        super::favorites::favorite,
+        capture,
+        sample,
+        flow_history,
+        probe,
+        diagnostic_probe,
+        test_protocol
+    ),
     components(schemas(
+        super::favorites::FavoriteInput,
+        super::favorites::FavoriteResult,
         Capture,
         Sample,
         FlowHistory,
@@ -485,6 +496,10 @@ fn map_status(e: tonic::Status) -> StatusCode {
 pub struct DiagnosticsApi;
 pub fn router(state: Diagnostics) -> Router {
     Router::new()
+        .route(
+            "/api/v1/traffic/flows/{id}/favorite",
+            axum::routing::put(super::favorites::favorite),
+        )
         .route("/api/v1/traffic/flows/{id}/capture", post(capture))
         .route("/api/v1/traffic/flows/{id}/history", get(flow_history))
         .route("/api/v1/traffic/samples/{id}", get(sample))
@@ -534,6 +549,7 @@ mod history_tests {
         let app = router(Diagnostics {
             auth,
             socket: directory.join("missing.sock"),
+            traffic: None,
         });
         let response = app
             .clone()

@@ -23,6 +23,14 @@ Enter these values when prompted, one line at a time:
 
 Access-key, secret and token prompts hide typed input. All S3 values are read from stdin; credentials are passed to curl through its stdin configuration, never command arguments or credential files. They are not stored in Hydra configuration, service units or installer logs. For automation, supply the same six newline-separated values from an existing secure stdin source; EOF after the fifth field also means no session token. Do not put credential literals into shell history or command arguments. Save the script first rather than piping its source into bash: stdin is needed for the S3 answers.
 
+To choose a GitHub Actions build instead of S3, run:
+
+```bash
+sudo bash install-hydra.sh --source github
+```
+
+The installer selects the newest unexpired `hydra-linux-x86_64-musl-<commit SHA>` Actions artifact from `main`. Enter a GitHub token with Actions read access when prompted. It is hidden in a terminal and sent to curl through stdin; it is not saved. Set `HYDRA_GITHUB_REPOSITORY=owner/name` for a fork (default `nrf24l01/ad-hydra`). `HYDRA_GITHUB_ARTIFACTS_URL` can override the artifact-list API URL for GitHub Enterprise. Use `--source s3` to explicitly select S3; S3 remains the default.
+
 curl downloads exactly `hydra-core` and `hydra-proxy` using path-style signed HTTPS GET requests. The key needs read/GetObject access to those objects; CI's write-only publisher key will not work. No bucket-listing or write permissions are needed.
 
 Before any installed files or services change, both downloads must pass SHA-256 checks against the `x-amz-meta-sha256` object metadata, have matching `x-amz-meta-commit` values, declare target `x86_64-unknown-linux-musl`, and contain x86_64 ELF binaries. If CI replaces one object while downloading, a mixed pair is rejected: rerun after publication finishes. Missing metadata, HTTP errors and redirects fail clearly. Each binary is limited to 64 MiB and each curl invocation to 300 seconds, with a process-level file-size bound for older curl versions too.
@@ -35,13 +43,15 @@ bash install-hydra.sh --download-only /tmp/hydra-verified
 
 The output directory must not exist. It contains the two verified binaries plus locally generated `SHA256SUMS` and `BUILD.txt`; no S3 credentials are saved.
 
-Offline installation remains available:
+For offline installation, download the `hydra-linux-x86_64-musl-<commit SHA>` artifact from a successful `Rust verification` run in the repository's Actions tab. Pass its ZIP directly, or extract the contained `hydra-linux-x86_64-musl.tar.gz` and pass that:
 
 ```bash
+sudo bash install-hydra.sh --archive /path/to/actions-artifact.zip
+# or
 sudo bash install-hydra.sh --archive /path/to/hydra-linux-x86_64-musl.tar.gz
 ```
 
-The Actions ZIP is also accepted. An explicitly set `HYDRA_DOWNLOAD_URL` retains legacy HTTPS archive/Actions-index downloads; it is unset in normal S3 mode. Legacy Actions downloads use `HYDRA_GITHUB_TOKEN`/`GH_TOKEN`/`GITHUB_TOKEN`; `HYDRA_ARCHIVE_SHA256` optionally pins their archive hash. These compatibility options are not needed for S3 installation.
+The artifact includes static x86_64 Linux binaries and SHA256 checksums. Direct `--source github` obtains the artifact ZIP URL from GitHub, follows its signed HTTPS redirect without forwarding the token, checks the artifact digest when provided by GitHub, then verifies the archive's binary checksums. For noninteractive GitHub downloads, `HYDRA_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN` can provide the Actions-read token. `HYDRA_ARCHIVE_SHA256` optionally pins an offline archive. `HYDRA_DOWNLOAD_URL` remains a legacy HTTPS index override.
 
 ## Open the console
 

@@ -15,7 +15,27 @@ impl ProxyControl for Rpc {
         _: Request<v1::GetStatusRequest>,
     ) -> Result<Response<v1::ProxyStatus>, Status> {
         let t = &self.state.telemetry;
+        let service_metrics = t
+            .budgets
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .map(|b| b.metrics())
+            .collect();
+        let forwarding_stats = t
+            .forwarding
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|store| v1::ForwardingStats {
+                mappings: store.created.load(Ordering::Relaxed),
+                reused: store.reused.load(Ordering::Relaxed),
+                restored: store.restored.load(Ordering::Relaxed),
+                errors: store.errors.load(Ordering::Relaxed),
+            });
         Ok(Response::new(v1::ProxyStatus {
+            service_metrics,
+            forwarding_stats,
             proxy_instance_id: t.epoch.clone(),
             proxy_epoch_id: t.epoch.clone(),
             applied_services_revision: self.state.revision().await,

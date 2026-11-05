@@ -106,7 +106,32 @@ impl Control {
         revision: u64,
         error: Option<String>,
     ) -> anyhow::Result<()> {
-        self.db.run(move|db|{let tx=db.transaction()?;let success=error.is_none();let column=if kind=="services"{"services_applied_revision"}else{"rules_applied_revision"};if let Some(error)=error{tx.execute("UPDATE control_state SET apply_error=?2 WHERE revision=?1",params![revision as i64,error.chars().take(2048).collect::<String>()])?;}else{tx.execute(&format!("UPDATE control_state SET {column}=MAX({column},?1),apply_error=NULL WHERE revision=?1"),[revision as i64])?;tx.execute("UPDATE control_state SET applied_revision=MIN(services_applied_revision,rules_applied_revision) WHERE id=1",[])?;}audit::append(&tx,&Actor{kind:"service".into(),id:"proxy_sync".into()},"control.apply",kind,"proxy-sync",success,crate::modules::auth::now())?;tx.commit()?;Ok(())}).await
+        anyhow::ensure!(revision <= i64::MAX as u64, "revision too large");
+        self.db.run(move |db| {
+            let tx = db.transaction()?;
+            let desired = load(&tx)?;
+            if desired.services.revision != revision {
+                return Ok(());
+            }
+            let error = error.map(|e| e.chars().take(2048).collect::<String>());
+            let applied = if kind == "services" { desired.services_applied_revision } else { desired.rules_applied_revision };
+            if (error.is_none() && desired.apply_error.is_none() && applied >= revision)
+                || (error.is_some() && error == desired.apply_error)
+            {
+                return Ok(());
+            }
+            let success = error.is_none();
+            if let Some(error) = error {
+                tx.execute("UPDATE control_state SET apply_error=?1 WHERE id=1", params![error])?;
+            } else {
+                let column = if kind == "services" { "services_applied_revision" } else { "rules_applied_revision" };
+                tx.execute(&format!("UPDATE control_state SET {column}=MAX({column},?1),apply_error=NULL WHERE id=1"), [revision as i64])?;
+                tx.execute("UPDATE control_state SET applied_revision=MIN(services_applied_revision,rules_applied_revision) WHERE id=1", [])?;
+            }
+            audit::append(&tx, &Actor { kind: "service".into(), id: "proxy_sync".into() }, "control.apply", kind, "proxy-sync", success, crate::modules::auth::now())?;
+            tx.commit()?;
+            Ok(())
+        }).await
     }
     pub async fn observe_counters(
         &self,
@@ -151,6 +176,11 @@ impl Control {
             include_str!("../../../../../migrations/0022_service_colors.sql"),
         )
         .await?;
+        db.migrate(
+            26,
+            include_str!("../../../../../migrations/0026_service_names.sql"),
+        )
+        .await?;
         Ok(Self {
             db,
             auth,
@@ -161,7 +191,26 @@ impl Control {
         self.db.run(|db| load(db)).await
     }
     pub async fn mark_applied(&self, revision: u64, error: Option<String>) -> anyhow::Result<()> {
-        self.db.run(move|db|{let error=error.map(|s|s.chars().take(2048).collect::<String>());let tx=db.transaction()?;if error.is_none(){tx.execute("UPDATE control_state SET applied_revision=MAX(applied_revision,?1),apply_error=NULL WHERE revision=?1",[revision as i64])?;}else{tx.execute("UPDATE control_state SET apply_error=?2 WHERE revision=?1",params![revision as i64,error])?;}audit::append(&tx,&Actor{kind:"service".into(),id:"proxy_sync".into()},"control.apply","snapshot","proxy-sync",error.is_none(),crate::modules::auth::now())?;tx.commit()?;Ok(())}).await
+        anyhow::ensure!(revision <= i64::MAX as u64, "revision too large");
+        self.db.run(move |db| {
+            let error = error.map(|s| s.chars().take(2048).collect::<String>());
+            let tx = db.transaction()?;
+            let desired = load(&tx)?;
+            if desired.services.revision != revision
+                || (error.is_none() && desired.apply_error.is_none() && desired.applied_revision >= revision)
+                || (error.is_some() && error == desired.apply_error)
+            {
+                return Ok(());
+            }
+            if error.is_none() {
+                tx.execute("UPDATE control_state SET applied_revision=MAX(applied_revision,?1),apply_error=NULL WHERE id=1", [revision as i64])?;
+            } else {
+                tx.execute("UPDATE control_state SET apply_error=?1 WHERE id=1", params![error])?;
+            }
+            audit::append(&tx, &Actor { kind: "service".into(), id: "proxy_sync".into() }, "control.apply", "snapshot", "proxy-sync", error.is_none(), crate::modules::auth::now())?;
+            tx.commit()?;
+            Ok(())
+        }).await
     }
     pub async fn attribution(&self) -> anyhow::Result<Vec<Record>> {
         self.db.run(|db|{Ok(db.prepare("SELECT kind,id,created_by,updated_by,strftime('%Y-%m-%dT%H:%M:%SZ',created_at,'unixepoch'),strftime('%Y-%m-%dT%H:%M:%SZ',updated_at,'unixepoch'),hit_count FROM control_attribution ORDER BY kind,id LIMIT 384")?.query_map([],|r|Ok(Record{kind:r.get(0)?,id:r.get(1)?,created_by:r.get(2)?,updated_by:r.get(3)?,created_at:r.get(4)?,updated_at:r.get(5)?,hit_count:r.get::<_,i64>(6)? as u64}))?.collect::<Result<Vec<_>,_>>()?)}).await
@@ -174,6 +223,20 @@ impl Control {
         create: bool,
         request: String,
     ) -> anyhow::Result<Desired> {
+        self.put_named_service(actor, expected, service, create, None, request)
+            .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub async fn put_named_service(
+        &self,
+        actor: Actor,
+        expected: u64,
+        service: Service,
+        create: bool,
+        name: Option<String>,
+        request: String,
+    ) -> anyhow::Result<Desired> {
+        let name = name.map(super::appearance::normalize_name).transpose()?;
         self.mutate(
             actor,
             expected,
@@ -182,6 +245,7 @@ impl Control {
             create,
             false,
             request,
+            name,
             move |d| {
                 if let Some(old) = d.services.services.iter_mut().find(|s| s.id == service.id) {
                     anyhow::ensure!(!create, "service already exists");
@@ -211,6 +275,7 @@ impl Control {
             create,
             false,
             request,
+            None,
             move |d| {
                 if let Some(old) = d.rules.rules.iter_mut().find(|r| r.id == rule.id) {
                     anyhow::ensure!(!create, "filter already exists");
@@ -269,18 +334,28 @@ impl Control {
         request: String,
     ) -> anyhow::Result<Desired> {
         let key = id.clone();
-        self.mutate(actor, expected, kind, id, false, true, request, move |d| {
-            if kind == "service" {
-                let n = d.services.services.len();
-                d.services.services.retain(|s| s.id != key);
-                anyhow::ensure!(n != d.services.services.len(), "service not found");
-            } else {
-                let n = d.rules.rules.len();
-                d.rules.rules.retain(|r| r.id != key);
-                anyhow::ensure!(n != d.rules.rules.len(), "filter not found");
-            }
-            Ok(())
-        })
+        self.mutate(
+            actor,
+            expected,
+            kind,
+            id,
+            false,
+            true,
+            request,
+            None,
+            move |d| {
+                if kind == "service" {
+                    let n = d.services.services.len();
+                    d.services.services.retain(|s| s.id != key);
+                    anyhow::ensure!(n != d.services.services.len(), "service not found");
+                } else {
+                    let n = d.rules.rules.len();
+                    d.rules.rules.retain(|r| r.id != key);
+                    anyhow::ensure!(n != d.rules.rules.len(), "filter not found");
+                }
+                Ok(())
+            },
+        )
         .await
     }
     #[allow(clippy::too_many_arguments)]
@@ -293,13 +368,15 @@ impl Control {
         create: bool,
         delete: bool,
         request: String,
+        service_name: Option<String>,
         change: F,
     ) -> anyhow::Result<Desired>
     where
         F: FnOnce(&mut Desired) -> anyhow::Result<()> + Send + 'static,
     {
-        let result=self.db.run(move|db|{let tx=db.transaction()?;let mut desired=load(&tx)?;if desired.services.revision!=expected{return Err(Conflict.into())}let before=serde_json::to_value(&desired)?;change(&mut desired)?;desired.services.revision=desired.services.revision.checked_add(1).filter(|v|*v<=i64::MAX as u64).ok_or_else(||anyhow::anyhow!("revision exhausted"))?;desired.rules.revision=desired.services.revision;desired.apply_error=None;desired.services.validate().map_err(anyhow::Error::msg)?;hydra_filter_engine::CompiledSnapshot::compile(desired.rules.clone(),&desired.services.services)?;
+        let result=self.db.run(move|db|{let tx=db.transaction()?;let mut desired=load(&tx)?;if desired.services.revision!=expected{return Err(Conflict.into())}let before=serde_json::to_value(&desired)?;change(&mut desired)?;desired.services.revision=desired.services.revision.checked_add(1).filter(|v|*v<=i64::MAX as u64).ok_or_else(||anyhow::anyhow!("revision exhausted"))?;desired.rules.revision=desired.services.revision;desired.apply_error=None;desired.services.validate().map_err(anyhow::Error::msg)?;for service in &desired.services.services {if let Some(config)=&service.forwarding {hydra_rewrite::validate(config)?;}}hydra_filter_engine::CompiledSnapshot::compile(desired.rules.clone(),&desired.services.services)?;
  let services=serde_json::to_string(&desired.services.services)?;let rules=serde_json::to_string(&desired.rules.rules)?;anyhow::ensure!(services.len()+rules.len()<=1024*1024,"snapshot quota exceeded");tx.execute("UPDATE control_state SET revision=?1,services=?2,rules=?3,apply_error=NULL WHERE id=1",params![desired.services.revision as i64,services,rules])?;let now=crate::modules::auth::now();if create{tx.execute("INSERT INTO control_attribution(kind,id,created_by,updated_by,created_at,updated_at) VALUES(?1,?2,?3,?3,?4,?4)",params![kind,id,actor.id,now])?;}else if delete{tx.execute("DELETE FROM rule_tests WHERE id=?1",[&id])?;tx.execute("DELETE FROM control_attribution WHERE kind=?1 AND id=?2",params![kind,id])?;}else{tx.execute("UPDATE control_attribution SET updated_by=?3,updated_at=?4 WHERE kind=?1 AND id=?2",params![kind,id,actor.id,now])?;}
+ if kind=="service" && let Some(name)=service_name {super::appearance::write_name(&tx,&actor,&id,&name,&request)?;}
  // Snapshot content may contain sensitive filter literals; only revisions and counts are audited.
  let metadata=serde_json::json!({"before":{"revision":before["services"]["revision"]},"after":{"revision":desired.services.revision,"service_count":desired.services.services.len(),"filter_count":desired.rules.rules.len()},"source":"http"});audit::append_change(&tx,&actor,if delete{"control.delete"}else if create{"control.create"}else{"control.update"},&id,&request,true,now,&metadata)?;tx.commit()?;Ok(desired)}).await?;
         self.changed.notify_one();

@@ -28,23 +28,23 @@ impl Utf8Decoder {
         input.extend_from_slice(tail);
         input.extend_from_slice(bytes);
         tail.clear();
-        let mut decoded = String::with_capacity(input.len());
+        let mut decoded = TextMessages::new(direction);
         let mut offset = 0;
         while offset < input.len() {
             match std::str::from_utf8(&input[offset..]) {
                 Ok(valid) => {
-                    decoded.push_str(valid);
+                    decoded.text(valid);
                     break;
                 }
                 Err(error) => {
                     let valid_end = offset + error.valid_up_to();
-                    decoded.push_str(
+                    decoded.text(
                         std::str::from_utf8(&input[offset..valid_end])
                             .map_err(|error| DecodeError(error.to_string()))?,
                     );
                     offset = valid_end;
                     if let Some(invalid_len) = error.error_len() {
-                        decoded.push('\u{fffd}');
+                        decoded.invalid(&input[offset..offset + invalid_len]);
                         offset += invalid_len;
                     } else {
                         tail.extend_from_slice(&input[offset..]);
@@ -58,27 +58,8 @@ impl Utf8Decoder {
                 }
             }
         }
-        let mut messages = Vec::with_capacity(decoded.len().div_ceil(TEXT_CHUNK));
-        let mut start = 0;
-        while start < decoded.len() {
-            let mut end = (start + TEXT_CHUNK).min(decoded.len());
-            while !decoded.is_char_boundary(end) {
-                end -= 1;
-            }
-            let mut fields = BTreeMap::new();
-            fields.insert(
-                "utf8.text".into(),
-                Value::String(decoded[start..end].into()),
-            );
-            messages.push(ParsedMessage {
-                protocol: "utf8".into(),
-                message_type: "text".into(),
-                direction,
-                fields,
-            });
-            start = end;
-        }
-        Ok(messages)
+        decoded.flush();
+        Ok(decoded.messages)
     }
 }
 
@@ -91,9 +72,82 @@ impl ProtocolDecoder for Utf8Decoder {
         Utf8Decoder::feed(self, direction, bytes)
     }
     fn field_schema(&self) -> Vec<FieldSchema> {
-        vec![FieldSchema {
-            path: "utf8.text".into(),
-            field_type: FieldType::String,
-        }]
+        vec![
+            FieldSchema {
+                path: "utf8.text".into(),
+                field_type: FieldType::String,
+            },
+            FieldSchema {
+                path: "utf8.spans".into(),
+                field_type: FieldType::List,
+            },
+        ]
+    }
+}
+
+/// Bound annotation cardinality as well as text size, even for alternating valid/invalid bytes.
+struct TextMessages {
+    direction: Direction,
+    messages: Vec<ParsedMessage>,
+    text: String,
+    spans: Vec<Value>,
+    invalid: bool,
+}
+impl TextMessages {
+    fn new(direction: Direction) -> Self {
+        Self {
+            direction,
+            messages: Vec::new(),
+            text: String::new(),
+            spans: Vec::new(),
+            invalid: false,
+        }
+    }
+    fn text(&mut self, mut value: &str) {
+        while !value.is_empty() {
+            if self.spans.len() >= 64 || self.text.len() >= TEXT_CHUNK {
+                self.flush();
+            }
+            let mut end = value.len().min(TEXT_CHUNK - self.text.len());
+            while !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end == 0 {
+                self.flush();
+                continue;
+            }
+            self.text.push_str(&value[..end]);
+            self.spans.push(Value::String(value[..end].into()));
+            value = &value[end..];
+        }
+    }
+    fn invalid(&mut self, bytes: &[u8]) {
+        if self.spans.len() >= 64 || self.text.len() + 3 > TEXT_CHUNK {
+            self.flush();
+        }
+        self.text.push('\u{fffd}');
+        self.spans.push(Value::Bytes(bytes.to_vec()));
+        self.invalid = true;
+    }
+    fn flush(&mut self) {
+        if self.text.is_empty() {
+            return;
+        }
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "utf8.text".into(),
+            Value::String(std::mem::take(&mut self.text)),
+        );
+        let spans = std::mem::take(&mut self.spans);
+        if self.invalid {
+            fields.insert("utf8.spans".into(), Value::List(spans));
+        }
+        self.invalid = false;
+        self.messages.push(ParsedMessage {
+            protocol: "utf8".into(),
+            message_type: "text".into(),
+            direction: self.direction,
+            fields,
+        });
     }
 }

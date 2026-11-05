@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 [dependencies]
+hydra-rewrite.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 axum-server.workspace = true
@@ -32,7 +33,7 @@ workspace = true
 
 [dependencies.rusqlite]
 version = "0.38"
-features = ["bundled"]
+features = ["bundled", "functions"]
 [dependencies.argon2]
 version = "0.5"
 [dependencies.rand]

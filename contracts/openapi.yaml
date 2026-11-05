@@ -1643,6 +1643,11 @@ paths:
         required: false
         schema:
           type: boolean
+      - name: favorite
+        in: query
+        required: false
+        schema:
+          type: boolean
       - name: after
         in: query
         required: false
@@ -1783,6 +1788,40 @@ paths:
           description: ''
         '503':
           description: ''
+  /api/v1/traffic/flows/{id}/favorite:
+    put:
+      tags:
+      - traffic
+      operationId: favorite
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FavoriteInput'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FavoriteResult'
+        '401':
+          description: ''
+        '403':
+          description: ''
+        '404':
+          description: ''
+        '409':
+          description: Favorite capacity or retained decoded data exceeds archive bounds
+        '503':
+          description: ''
   /api/v1/traffic/flows/{id}/history:
     get:
       tags:
@@ -1823,6 +1862,11 @@ paths:
       - name: include_blocked
         in: query
         description: Include traffic blocked by enforced rules (default true for API compatibility).
+        required: false
+        schema:
+          type: boolean
+      - name: favorite
+        in: query
         required: false
         schema:
           type: boolean
@@ -2545,6 +2589,30 @@ components:
           type: integer
           format: int64
       additionalProperties: false
+    FavoriteInput:
+      type: object
+      required:
+      - favorite
+      properties:
+        favorite:
+          type: boolean
+      additionalProperties: false
+    FavoriteResult:
+      type: object
+      required:
+      - flow_id
+      - favorite
+      - raw_history_state
+      - decoded_incomplete
+      properties:
+        decoded_incomplete:
+          type: boolean
+        favorite:
+          type: boolean
+        flow_id:
+          type: string
+        raw_history_state:
+          type: string
     FilterInput:
       type: object
       required:
@@ -2579,6 +2647,7 @@ components:
           minimum: 0
         expression:
           type: object
+          description: Expression AST supports all/any/not/predicate and {direction, scoped}; scoped conditions are inapplicable outside their direction, even under NOT.
         mode:
           type: string
         name:
@@ -2620,6 +2689,7 @@ components:
           minimum: 0
         expression:
           type: object
+          description: Expression AST supports all/any/not/predicate and {direction, scoped}; scoped conditions are inapplicable outside their direction, even under NOT.
         flow_ids:
           type: array
           items:
@@ -2768,6 +2838,50 @@ components:
           type: boolean
         truncated_server_to_client:
           type: boolean
+    ForwardingInput:
+      type: object
+      required:
+      - team_id
+      - target_port
+      - flag_pattern
+      - framing
+      properties:
+        flag_pattern:
+          type: string
+        framing:
+          type: object
+        target_port:
+          type: integer
+          format: int32
+          maximum: 65535
+          minimum: 1
+        team_id:
+          type: string
+      additionalProperties: false
+    ForwardingStats:
+      type: object
+      required:
+      - mappings
+      - reused
+      - restored
+      - errors
+      properties:
+        errors:
+          type: integer
+          format: int64
+          minimum: 0
+        mappings:
+          type: integer
+          format: int64
+          minimum: 0
+        restored:
+          type: integer
+          format: int64
+          minimum: 0
+        reused:
+          type: integer
+          format: int64
+          minimum: 0
     FramingInput:
       oneOf:
       - type: object
@@ -3077,6 +3191,36 @@ components:
             minimum: 0
         truncated:
           type: boolean
+    ProtectionInput:
+      type: object
+      required:
+      - max_active_flows
+      - tcp_connections_per_second
+      - udp_datagrams_per_second
+      - bytes_per_second
+      - idle_timeout_ms
+      properties:
+        bytes_per_second:
+          type: integer
+          format: int64
+          minimum: 0
+        idle_timeout_ms:
+          type: integer
+          format: int64
+          minimum: 1
+        max_active_flows:
+          type: integer
+          format: int64
+          minimum: 1
+        tcp_connections_per_second:
+          type: integer
+          format: int64
+          minimum: 0
+        udp_datagrams_per_second:
+          type: integer
+          format: int64
+          minimum: 0
+      additionalProperties: false
     ProtocolTest:
       type: object
       required:
@@ -3091,6 +3235,7 @@ components:
     ProxyView:
       type: object
       required:
+      - service_metrics
       - connected
       - history_per_service_bytes
       - history_dropped
@@ -3137,6 +3282,10 @@ components:
           type: integer
           format: int64
           minimum: 0
+        forwarding_stats:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ForwardingStats'
         history_compression_level:
           type:
           - integer
@@ -3164,6 +3313,10 @@ components:
           type: integer
           format: int64
           minimum: 0
+        service_metrics:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServiceMetrics'
         telemetry_dropped:
           type: integer
           format: int64
@@ -3293,8 +3446,21 @@ components:
           type: integer
           format: int64
           minimum: 0
+        forwarding:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ForwardingInput'
         listen_address:
           type: string
+        name:
+          type:
+          - string
+          - 'null'
+          description: Optional display name; omitted on update preserves the current name.
+        protection:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ProtectionInput'
         protocol_id:
           type: string
         retain_history:
@@ -3304,6 +3470,48 @@ components:
         upstream_address:
           type: string
       additionalProperties: false
+    ServiceMetrics:
+      type: object
+      required:
+      - service_id
+      - active_flows
+      - accepted_flows
+      - rejected_flows
+      - bytes_client_to_server
+      - bytes_server_to_client
+      - dropped_datagrams
+      - rate_limited
+      properties:
+        accepted_flows:
+          type: integer
+          format: int64
+          minimum: 0
+        active_flows:
+          type: integer
+          format: int64
+          minimum: 0
+        bytes_client_to_server:
+          type: integer
+          format: int64
+          minimum: 0
+        bytes_server_to_client:
+          type: integer
+          format: int64
+          minimum: 0
+        dropped_datagrams:
+          type: integer
+          format: int64
+          minimum: 0
+        rate_limited:
+          type: integer
+          format: int64
+          minimum: 0
+        rejected_flows:
+          type: integer
+          format: int64
+          minimum: 0
+        service_id:
+          type: string
     ServiceProbeInput:
       type: object
       required:

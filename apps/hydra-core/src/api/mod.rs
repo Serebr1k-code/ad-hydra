@@ -18,7 +18,27 @@ use tokio::sync::RwLock;
 use utoipa::{OpenApi, ToSchema};
 
 #[derive(Clone, Debug, Default, Serialize, ToSchema)]
+pub struct ServiceMetrics {
+    pub service_id: String,
+    pub active_flows: u64,
+    pub accepted_flows: u64,
+    pub rejected_flows: u64,
+    pub bytes_client_to_server: u64,
+    pub bytes_server_to_client: u64,
+    pub dropped_datagrams: u64,
+    pub rate_limited: u64,
+}
+#[derive(Clone, Debug, Default, Serialize, ToSchema)]
+pub struct ForwardingStats {
+    pub mappings: u64,
+    pub reused: u64,
+    pub restored: u64,
+    pub errors: u64,
+}
+#[derive(Clone, Debug, Default, Serialize, ToSchema)]
 pub struct ProxyView {
+    pub forwarding_stats: Option<ForwardingStats>,
+    pub service_metrics: Vec<ServiceMetrics>,
     pub connected: bool,
     pub history_per_service_bytes: u64,
     pub history_compression_level: Option<i32>,
@@ -39,6 +59,26 @@ pub struct ProxyView {
 impl ProxyView {
     pub fn from_status(s: v1::ProxyStatus) -> Self {
         Self {
+            forwarding_stats: s.forwarding_stats.map(|m| ForwardingStats {
+                mappings: m.mappings,
+                reused: m.reused,
+                restored: m.restored,
+                errors: m.errors,
+            }),
+            service_metrics: s
+                .service_metrics
+                .into_iter()
+                .map(|m| ServiceMetrics {
+                    service_id: m.service_id,
+                    active_flows: m.active_flows,
+                    accepted_flows: m.accepted_flows,
+                    rejected_flows: m.rejected_flows,
+                    bytes_client_to_server: m.bytes_client_to_server,
+                    bytes_server_to_client: m.bytes_server_to_client,
+                    dropped_datagrams: m.dropped_datagrams,
+                    rate_limited: m.rate_limited,
+                })
+                .collect(),
             connected: true,
             history_per_service_bytes: s.history_per_service_bytes,
             history_compression_level: (s.history_compression_level > 0)

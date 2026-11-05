@@ -5,7 +5,7 @@ Only synthetic flags are printed; no checker or target connections are made.
 uv downloads idna==3.10 into the temporary runtime cache. SQL updates advance
 only the fixture's durable dispatch clock to exercise retry backoff without sleeping.
 """
-import gzip
+import io
 import json
 import os
 import pathlib
@@ -17,6 +17,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import zstandard
 from relay import BIN, port
 
 
@@ -194,9 +195,11 @@ class PythonSubmitter(unittest.TestCase):
                         self.assertIn(flag, batch[stream])
                 out, err = db_query('SELECT stdout_gzip,stderr_gzip FROM flag_submitter_batches WHERE id=?', (batch['id'],))[0]
                 for compressed in (out, err):
-                    self.assertEqual(compressed[:2], b'\x1f\x8b')
-                    self.assertNotIn(b'[redacted flag]', gzip.decompress(compressed))
-                    self.assertIn(b'TESTFLAG_', gzip.decompress(compressed))
+                    self.assertEqual(compressed[:4], b'\x28\xb5\x2f\xfd')
+                    with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(compressed)) as reader:
+                        decoded = reader.read()
+                    self.assertNotIn(b'[redacted flag]', decoded)
+                    self.assertIn(b'TESTFLAG_', decoded)
                 configure(False, good_source)
                 second_run=capture('second', b'printf "TESTFLAG_ALPHA TESTFLAG_DELTA\\n"')
                 self.assertEqual((second_run['new_flags'],second_run['existing_flags']),(1,1))
@@ -224,7 +227,7 @@ class PythonSubmitter(unittest.TestCase):
                 self.assertEqual(final['queued_flags'], 0)
                 self.assertEqual(db_query("SELECT count(*) FROM submissions WHERE state='accepted'")[0][0], 4)
                 self.assertEqual(db_query('SELECT max(attempts) FROM submissions')[0][0], 2)
-                print('PASS: real uv+idna, Farm stdout/stderr regex, durable automatic queue, immediate dispatch, whole-batch acceptance, original gzip input/output logs, restart, pause, failure and retry')
+                print('PASS: real uv+idna, Farm stdout/stderr regex, durable automatic queue, immediate dispatch, whole-batch acceptance, zstd input/output logs, restart, pause, failure and retry')
             finally:
                 for process in reversed(processes):
                     if process.poll() is not None:

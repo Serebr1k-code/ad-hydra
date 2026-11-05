@@ -152,9 +152,9 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
         <p v-if="form.mode === 'enforce'" role="status" class="rounded-md border p-3 text-sm">Saving applies this rule as soon as the proxy acknowledges the new revision. No traffic test is required.</p>
 
         <section class="space-y-2" :aria-disabled="!expressionEditable">
-          <div><h3 class="font-medium">Match conditions</h3><p class="text-sm text-muted-foreground">Groups add parentheses. Choose whether all or any conditions inside a group must match.</p></div>
+          <div><h3 class="font-medium">Match conditions</h3><p class="text-sm text-muted-foreground">Groups add parentheses. Choose whether all or any conditions inside a group must match. Each condition has its own direction. Conditions evaluate one message at a time; use OR to match either a client-only or a server-only condition.</p></div>
           <RuleGroupEditor :group="form.rules" :fields="availableFields" />
-          <p class="text-xs text-muted-foreground">Live byte limits count bytes as they arrive. HTTP counts body bytes per request; other TCP profiles count each stream direction, and UDP counts each datagram. Use Block transfer to stop the upload immediately.</p>
+          <p class="text-xs text-muted-foreground">Live byte limits count bytes as they arrive. HTTP counts body bytes per request; other TCP profiles count each stream direction, and UDP counts each datagram. Use Block transfer to stop the selected direction immediately; on TCP this closes the whole connection. Block HTTP request is for client requests.</p>
         </section>
 
         <div class="grid gap-4 md:grid-cols-2">

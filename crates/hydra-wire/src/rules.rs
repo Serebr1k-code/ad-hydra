@@ -111,6 +111,16 @@ fn expression_to_wire(e: &Expression) -> p::RuleExpression {
         children: v.iter().map(expression_to_wire).collect(),
     };
     let node = match e {
+        Expression::Scoped { direction, scoped } => N::DirectionScoped(
+            p::DirectionScope {
+                direction: match direction {
+                    hydra_domain::RuleDirection::ClientToServer => 1,
+                    hydra_domain::RuleDirection::ServerToClient => 2,
+                },
+                expression: Some(expression_to_wire(scoped).into()),
+            }
+            .into(),
+        ),
         Expression::All { all } => N::All(group(all)),
         Expression::Any { any } => N::Any(group(any)),
         Expression::Not { not } => N::Negated(Box::new(expression_to_wire(not))),
@@ -234,6 +244,18 @@ fn expression_from_wire(
     *nodes += 1;
     use p::rule_expression::Node as N;
     Ok(match e.node.as_ref().ok_or("missing node")? {
+        N::DirectionScoped(v) => Expression::Scoped {
+            direction: match v.direction {
+                1 => hydra_domain::RuleDirection::ClientToServer,
+                2 => hydra_domain::RuleDirection::ServerToClient,
+                _ => return Err("invalid condition direction".into()),
+            },
+            scoped: Box::new(expression_from_wire(
+                v.expression.as_ref().ok_or("missing scoped expression")?,
+                depth + 1,
+                nodes,
+            )?),
+        },
         N::All(v) => Expression::All {
             all: v
                 .children
@@ -299,6 +321,25 @@ pub fn value_from_wire(v: &p::FieldValue, depth: usize) -> Result<FieldValue, St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scoped_direction_roundtrips_and_invalid_wire_direction_is_rejected() {
+        let original = Expression::Scoped {
+            direction: hydra_domain::RuleDirection::ServerToClient,
+            scoped: Box::new(Expression::Not {
+                not: Box::new(Expression::Predicate {
+                    field: "utf8.text".into(),
+                    op: Comparison::Regex,
+                    value: FieldValue::String("secret".into()),
+                }),
+            }),
+        };
+        let mut wire = expression_to_wire(&original);
+        assert_eq!(expression_from_wire(&wire, 1, &mut 0).unwrap(), original);
+        if let Some(p::rule_expression::Node::DirectionScoped(scope)) = &mut wire.node {
+            scope.direction = 0;
+        }
+        assert!(expression_from_wire(&wire, 1, &mut 0).is_err());
+    }
     #[test]
     fn typed_rule_round_trip_preserves_u64_and_nested_expression() {
         let snapshot = RuleSnapshot {

@@ -322,6 +322,10 @@ CI should include code boundary checks for prohibited cross-dependencies and ens
 - **Testing:** unit at module/crate, Cargo integration in each app, explicit full-system fixtures in root tests, benchmarks tied to 2 vCPU/2 GiB.
 - **Low overhead:** two long-lived binaries, no database or event-broker process, no full raw traffic over gRPC, no mandatory Docker/eBPF/Suricata.
 
+## Forwarding extension amendment (2026-10-22)
+
+`crates/hydra-rewrite` is a justified pure shared library for fixed-width flag format validation, byte-preserving message framing and replacement spans. It depends on `hydra-domain`, never on an application, networking, SQLite, Tokio or the WASM host. Core and Proxy may both consume it. Proxy owns durable mappings under `src/forwarding/`; Core resolves configured team destinations within the services feature; the frontend uses public HTTP only. Existing dependency directions remain intact. See DECISIONS028.
+
 ## 11. Acceptance criteria for the coding agent
 
 Phase 0 is **not accepted** until it contains:

@@ -3,6 +3,10 @@ use regex::{Regex, RegexBuilder};
 use std::{cmp::Ordering, collections::BTreeMap};
 #[derive(Debug)]
 pub(crate) enum CompiledExpression {
+    Scoped {
+        direction: hydra_domain::RuleDirection,
+        child: Box<Self>,
+    },
     All(Vec<Self>),
     Any(Vec<Self>),
     Not(Box<Self>),
@@ -44,33 +48,17 @@ impl CompiledExpression {
                     Self::Any(children)
                 }
             }
+            Expression::Scoped { direction, scoped } => Self::Scoped {
+                direction: *direction,
+                child: Box::new(Self::compile(scoped, depth + 1, nodes)?),
+            },
             Expression::Not { not } => Self::Not(Box::new(Self::compile(not, depth + 1, nodes)?)),
             Expression::Predicate { field, op, value } => {
                 if field.is_empty() || field.len() > 256 || field.split('.').any(str::is_empty) {
                     return Err(invalid("invalid field path"));
                 }
-                let registered = matches!(
-                    field.as_str(),
-                    "http.method"
-                        | "http.path"
-                        | "http.user_agent"
-                        | "http.body_text"
-                        | "http.body_length"
-                        | "packet.size"
-                        | "body.size"
-                        | "body.size_scope"
-                        | "transfer.bytes"
-                        | "network.src_ip"
-                        | "network.src_port"
-                        | "network.dst_ip"
-                        | "network.dst_port"
-                        | "transport.kind"
-                        | "direction"
-                        | "raw.bytes"
-                ) || field.starts_with("protocol.");
-                if !registered {
-                    return Err(invalid("unknown field path"));
-                }
+                // Decoder schemas are hot-loaded and owned outside this pure engine.
+                // Accept bounded field paths; absent fields evaluate to Unknown.
                 if !bounded(value, 1, &mut 0) {
                     return Err(invalid("expected value exceeds limits"));
                 }
@@ -122,6 +110,13 @@ impl CompiledExpression {
     }
     fn evaluate(&self, fields: &BTreeMap<String, FieldValue>) -> Truth {
         match self {
+            Self::Scoped { direction, child } => {
+                if !matches!(fields.get("direction"),Some(FieldValue::String(actual)) if actual==direction.as_str())
+                {
+                    return Truth::Unknown;
+                }
+                child.evaluate(fields)
+            }
             Self::All(children) => {
                 let mut unknown = false;
                 for child in children {

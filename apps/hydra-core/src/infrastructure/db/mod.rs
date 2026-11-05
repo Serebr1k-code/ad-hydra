@@ -1,3 +1,4 @@
+mod compression;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::{
@@ -18,10 +19,14 @@ impl Database {
         tokio::task::spawn_blocking(move || {
             protect_storage(&path)?;
             let mut connection = Connection::open(path)?;
+            compression::register(&connection)?;
             connection.busy_timeout(std::time::Duration::from_secs(3))?;
             connection.pragma_update(None,"journal_mode","WAL")?;
             connection.pragma_update(None,"foreign_keys",true)?;
-            connection.pragma_update(None,"max_page_count",65536)?;
+            // Do not impose an application-wide page ceiling: retained audit
+            // records must not prevent authentication from writing sessions.
+            // Explicitly clear ceilings persisted by an older installation.
+            connection.pragma_update(None,"max_page_count",4_294_967_294_i64)?;
             connection.pragma_update(None,"wal_autocheckpoint",1000)?;
             connection.pragma_update(None,"journal_size_limit",16*1024*1024)?;
             let tx=connection.transaction()?;

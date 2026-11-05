@@ -32,6 +32,7 @@ service ProxyDiagnostics {
   rpc CaptureSample(CaptureSampleRequest) returns (CaptureSampleReply);
   rpc GetSample(GetSampleRequest) returns (GetSampleReply);
   rpc GetFlowHistory(GetFlowHistoryRequest) returns (GetFlowHistoryReply);
+  rpc SetFlowFavorite(SetFlowFavoriteRequest) returns (SetFlowFavoriteReply);
   // Replays retained flows locally and returns only filter outcome metadata.
   rpc PreviewFilter(PreviewFilterRequest) returns (PreviewFilterReply);
   // ONLY to a configured service upstream on the competition allowlist.
@@ -115,12 +116,18 @@ message Predicate {
   FieldValue expected = 3;
 }
 message RuleGroup { repeated RuleExpression children = 1; }
+// Direction-scoped expressions are inapplicable outside their side, including under NOT.
+message DirectionScope {
+  Direction direction = 1;
+  RuleExpression expression = 2;
+}
 message RuleExpression {
   oneof node {
     RuleGroup all = 1;
     RuleGroup any = 2;
     RuleExpression negated = 3;
     Predicate predicate = 4;
+    DirectionScope direction_scoped = 5;
   }
 }
 message RateLimitOptions {
@@ -157,6 +164,25 @@ message ServiceConfig {
   string protocol_id = 5;
   bool enabled = 6;
   bool retain_history = 7;
+  ServiceProtection protection = 8;
+  ForwardingConfig forwarding = 9;
+}
+message ServiceProtection {
+  uint64 max_active_flows = 1;
+  uint64 tcp_connections_per_second = 2;
+  uint64 udp_datagrams_per_second = 3;
+  uint64 bytes_per_second = 4;
+  uint64 idle_timeout_ms = 5;
+}
+message ServiceMetrics {
+  string service_id = 1;
+  uint64 active_flows = 2;
+  uint64 accepted_flows = 3;
+  uint64 rejected_flows = 4;
+  uint64 bytes_client_to_server = 5;
+  uint64 bytes_server_to_client = 6;
+  uint64 dropped_datagrams = 7;
+  uint64 rate_limited = 8;
 }
 // Persistent per-service disk budget for completed compressed traffic, including metadata.
 message ConfigureHistoryRequest {
@@ -187,6 +213,8 @@ message ProxyStatus {
   uint64 history_per_service_bytes = 14;
   uint64 history_dropped = 15;
   int32 history_compression_level = 16;
+  repeated ServiceMetrics service_metrics = 17;
+  ForwardingStats forwarding_stats = 18;
 }
 message ApplyServiceSnapshotRequest {
   uint64 revision = 1;
@@ -394,4 +422,39 @@ message DeactivateProtocolRequest {
   string service_id = 1;
   string request_id = 2;
   Actor actor = 3;
+}
+
+// Idempotent raw archive mutation; capacity errors never evict existing pins.
+message SetFlowFavoriteRequest {
+  string flow_id = 1;
+  bool favorite = 2;
+  Actor actor = 3;
+  string request_id = 4;
+}
+message SetFlowFavoriteReply { string state = 1; } // ready, pending, partial (interrupted active snapshot), unavailable, removed
+
+// Opt-in application forwarding; destination was resolved from a Core team record.
+message ForwardingConfig {
+  string team_id = 1;
+  string target_address = 2;
+  string flag_pattern = 3;
+  oneof framing {
+    bool http1 = 4;
+    string delimiter = 5;
+    ForwardLengthPrefix length_prefix = 6;
+    bool datagram = 7;
+  }
+}
+message ForwardLengthPrefix {
+  uint32 offset = 1;
+  uint32 width = 2;
+  bool little_endian = 3;
+  bool length_includes_header = 4;
+}
+
+message ForwardingStats {
+  uint64 mappings = 1;
+  uint64 reused = 2;
+  uint64 restored = 3;
+  uint64 errors = 4;
 }

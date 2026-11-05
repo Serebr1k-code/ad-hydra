@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import {directionLabel} from './filterDirection'
+import {fromExpression,conditionDirections} from './ruleBuilder'
 import { CheckCircle2, CircleAlert, Clock3, XCircle } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -10,6 +12,7 @@ import { filterApplication, type FilterRule } from './filterState'
 
 const props = defineProps<{ filter: FilterRule; serviceName: string; serviceColor: string; selected: boolean; disabled: boolean; saving: boolean; applyStatus: string }>()
 const emit = defineEmits<{ select: [checked: boolean]; state: [enabled: boolean]; edit: []; test: []; enforce: []; remove: [] }>()
+const directions=computed(()=>{try{const sides=conditionDirections(fromExpression(props.filter.expression));return sides.length===1?directionLabel(sides[0]??'both'):'Direction varies by condition'}catch{return 'Advanced direction conditions'}})
 const application = computed(() => filterApplication(props.filter, props.applyStatus))
 const statusId = computed(() => `filter-application-${props.filter.id}`)
 </script>
@@ -21,7 +24,7 @@ const statusId = computed(() => `filter-application-${props.filter.id}`)
         <Checkbox class="mt-1" :model-value="selected" :disabled="disabled" :aria-label="'Select ' + filter.name" @update:model-value="emit('select', $event === true)" />
         <div class="min-w-0 space-y-1">
           <h2 class="break-words font-medium">{{ filter.name }}</h2>
-          <p class="text-sm text-muted-foreground">{{ serviceName }}</p>
+          <p class="text-sm text-muted-foreground">{{ serviceName }} · {{ directions }}</p>
           <p class="text-sm">{{ filter.mode === 'shadow' ? 'Shadow — observes only; traffic passes' : 'Enforce — applies action to matches' }}</p>
         </div>
       </div>

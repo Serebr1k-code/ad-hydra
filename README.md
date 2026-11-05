@@ -7,6 +7,8 @@ Read [PROGRESS.md](PROGRESS.md) for verified scope and limitations, [SPEC.md](SP
 
 Successful main builds also replace the latest Core and Proxy binaries in S3; see [CI releases](docs/CI_RELEASES.md) for the destination, credentials setup and publication checks.
 
+For per-service overload limits, live connection/traffic charts, and favourite streams that survive normal rotation, see [service protection and saved favourites](docs/traffic-protection.md).
+
 The `Rust verification` GitHub Actions run builds static `x86_64-unknown-linux-musl` Core and Proxy binaries after verification succeeds. Download `hydra-linux-x86_64-musl-<commit-sha>` from that run's **Artifacts** section; the archive includes SHA-256 checksums and build commit metadata.
 
 ## Build and verify
@@ -103,10 +105,12 @@ Exploit execution requires bubblewrap, iproute2, user namespaces and a delegated
 
 ## Data and bounds
 
-Only Core opens SQLite; WAL, private files, a bounded database size and traffic retention are enforced. Proxy has bounded connections, parser sessions, message buffers, telemetry queues, plugin versions and a finite durable critical spool. Loss counters are visible through status. No raw packet stream crosses gRPC. HTTP enforcement is limited to completely framed supported HTTP/1.1 requests before forwarding; unsupported framing and opaque encrypted traffic pass through, with diagnostic loss metadata for parser fallback. See [docs/protocol-integration.md](docs/protocol-integration.md).
+Only Core opens SQLite; WAL, private files and bounded traffic retention are enforced. There is no application-wide SQLite file-size ceiling: audit growth must not prevent login from saving sessions. Proxy has bounded connections, parser sessions, message buffers, telemetry queues, plugin versions and a finite durable critical spool. Loss counters are visible through status. No raw packet stream crosses gRPC. HTTP enforcement is limited to completely framed supported HTTP/1.1 requests before forwarding; unsupported framing and opaque encrypted traffic pass through, with diagnostic loss metadata for parser fallback. See [docs/protocol-integration.md](docs/protocol-integration.md).
 
 For backups, stop Core and copy its entire private state directory, including SQLite sidecars, signing key, immutable protocol/exploit files; preserve ownership/modes. Copy Proxy state separately. Treat both backups as secrets. Do not copy a live SQLite database file alone.
 
-The console includes service-colored filter cards with per-rule switches and explicit applied status, bulk filter toggles, saved-field rule creation, protocol framing profiles/schema inspection, traffic field/rule/flag search and comparison, paginated flags and submissions, triage, run retry, and an audited settings/configuration export. Filter changes display desired and applied revisions separately. Farm includes an exploit × team effectiveness matrix with latest logs, per-target outcomes and attributed flag counts; see [Farm](docs/farm.md). TCP and UDP both retain bounded gzip traffic history and support saved-history filter preview; see [Traffic](docs/traffic-view.md). Configuration export covers services and rules; use the backup procedure for full recovery.
+The console includes service-colored filter cards with per-rule switches and explicit applied status, bulk filter toggles, saved-field rule creation, protocol framing profiles/schema inspection, traffic field/rule/flag search and comparison, paginated flags and submissions, triage, run retry, and an audited settings/configuration export. Filter changes display desired and applied revisions separately. Farm includes an exploit × team effectiveness matrix with latest logs, per-target outcomes and attributed flag counts; see [Farm](docs/farm.md). TCP and UDP both retain bounded checksummed zstd traffic history (legacy gzip remains readable) and support saved-history filter preview; see [Traffic](docs/traffic-view.md). Configuration export covers services and rules; use the backup procedure for full recovery.
 
 See [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for the reproducible bounded loopback load measurement and its limits. Production systemd setup uses separate Core/Proxy users: [deploy/README.md](deploy/README.md).
+
+Opt-in [service forwarding with reversible flag substitution](docs/flag-forwarding.md) is configured under Services using an enabled Farm team and explicit message framing.

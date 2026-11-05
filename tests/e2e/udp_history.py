@@ -140,6 +140,14 @@ class UdpHistory(unittest.TestCase):
                         self.assertEqual(preview['results'][0]['state'], 'ready')
                         self.assertTrue(preview['results'][0]['matched'])
                         self.assertTrue(preview['results'][0]['would_block'])
+                        # Whole-filter direction guards also work on retained UDP datagrams.
+                        original_expression=candidate['expression']
+                        for side in ['client_to_server','server_to_client']:
+                            candidate['expression']={'direction':side,'scoped':original_expression}
+                            status, directional_preview=request('POST','/filters/preview',candidate,token)
+                            self.assertEqual(status,200,directional_preview)
+                            self.assertTrue(directional_preview['results'][0]['would_block'],side)
+                        candidate['expression']=original_expression
                         # Datagram-size preview must not see the concatenated six-byte stream.
                         candidate['expression']['value']['value'] = 6
                         status, preview = request('POST', '/filters/preview', candidate, token)
@@ -232,14 +240,39 @@ class UdpHistory(unittest.TestCase):
                         self.assertEqual(preview['results'][0]['state'], 'ready')
                         self.assertTrue(preview['results'][0]['matched'])
                         self.assertTrue(preview['results'][0]['would_block'])
-                        # Restart imports gzip history and preserves exact framing/metadata.
+                        # A real favourite keeps its raw zstd archive even after
+                        # the ordinary sidecar expires during restart recovery.
+                        favorite_path = f'/traffic/flows/{first_id}/favorite'
+                        for _ in range(2):
+                            status, favorite = request('PUT', favorite_path, {'favorite': True}, token)
+                            self.assertEqual(status, 200, favorite)
+                            self.assertTrue(favorite['favorite'])
+                            self.assertEqual(favorite['raw_history_state'], 'ready')
+                        saved_rows = request('GET', '/traffic/flows?favorite=true&include_blocked=true', token=token)[1]['items']
+                        self.assertEqual([row['flow_id'] for row in saved_rows], [first_id])
+                        self.assertEqual(saved_rows[0]['raw_history_state'], 'ready')
+                        archive = root/'history'/'favorites'/f'{first_id}.zst'
+                        self.assertEqual(archive.read_bytes()[:4], b'\x28\xb5\x2f\xfd')
+                        metrics = request('GET', '/system/proxy', token=token)[1]['service_metrics']
+                        self.assertGreaterEqual(next(row for row in metrics if row['service_id'] == 'udp')['accepted_flows'], 2)
                         pp.terminate()
                         pp.wait(timeout=8)
+                        metadata_path = root/'history'/f'hydra-history-{first_id}.json'
+                        metadata = json.loads(metadata_path.read_text())
+                        metadata['closed_at_ms'] = 1
+                        metadata_path.write_text(json.dumps(metadata))
                         proxy()
                         wait(lambda: history(first_id))
                         for flow_id, saved in expected.items():
                             self.assertEqual(history(flow_id), saved)
-                        print('UDP saved datagrams: two clients, binary/empty, idle close, preview, truncation, enforcement, restart: OK')
+                        self.assertFalse(metadata_path.exists())
+                        self.assertTrue(archive.exists())
+                        status, favorite = request('PUT', favorite_path, {'favorite': False}, token)
+                        self.assertEqual(status, 200, favorite)
+                        self.assertFalse(favorite['favorite'])
+                        self.assertEqual(request('GET', '/traffic/flows?favorite=true', token=token)[1]['items'], [])
+                        self.assertEqual(request('GET', f'/traffic/flows/{first_id}/history', token=token)[0], 404)
+                        print('UDP saved datagrams: binary/empty, preview, enforcement, metrics, favourite survives TTL rotation/restart, unpin: OK')
                     finally:
                         for client in clients:
                             client.close()

@@ -1,3 +1,5 @@
+pub(crate) mod protection;
+mod routing;
 mod session;
 mod tcp;
 mod udp;
@@ -39,6 +41,12 @@ impl Manager {
         }
     }
     pub async fn prepare(&self, snapshot: &ServiceSnapshot) -> anyhow::Result<Prepared> {
+        routing::reject_local_loops(snapshot)?;
+        for service in &snapshot.services {
+            if let Some(f) = &service.forwarding {
+                hydra_rewrite::validate(f)?;
+            }
+        }
         let mut prepared = Vec::new();
         for s in snapshot.services.iter().filter(|s| s.enabled) {
             let key = (s.transport, s.listen_address);
@@ -54,6 +62,18 @@ impl Manager {
         Ok(Prepared(prepared))
     }
     pub async fn activate(&mut self, snapshot: &ServiceSnapshot, prepared: Prepared) {
+        self.telemetry.configure_protection(&snapshot.services);
+        if let Some(store) = self
+            .telemetry
+            .forwarding
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            store
+                .configure(&snapshot.services)
+                .expect("validated forwarding formats");
+        }
         let desired: HashMap<_, _> = snapshot
             .services
             .iter()

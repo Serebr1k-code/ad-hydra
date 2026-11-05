@@ -27,7 +27,7 @@ test('Raw profile opens the session in hex capture mode', () => {
  expect(traffic).toHaveProperty('initialStreamMode')
  const mode = Reflect.get(traffic,'initialStreamMode') as (protocolId:string)=>string
  expect(mode('raw')).toBe('bytes')
- expect(mode('utf8')).toBe('decoded')
+ expect(mode('utf8')).toBe('terminal')
  expect(mode('http')).toBe('decoded')
 })
 

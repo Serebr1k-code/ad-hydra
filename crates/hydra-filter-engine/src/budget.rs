@@ -34,6 +34,7 @@ impl Budget {
                     self.visit(child, depth + 1, rule_nodes)?;
                 }
             }
+            Expression::Scoped { scoped, .. } => self.visit(scoped, depth + 1, rule_nodes)?,
             Expression::Not { not } => self.visit(not, depth + 1, rule_nodes)?,
             Expression::Predicate { op, value, .. } => {
                 if *op == Comparison::Regex {

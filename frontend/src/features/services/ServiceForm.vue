@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, nextTick, reactive, ref } from 'vue'
 import type { ServiceInput } from '@/generated/contracts'
 import { api, errorMessage } from '@/shared/api/client'
 import { Button } from '@/components/ui/button'
@@ -7,13 +7,18 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import ForwardingForm from './ForwardingForm.vue'
+import {forwardingDraft,validateForwarding} from './forwarding'
+import ServiceProtectionForm from './ServiceProtectionForm.vue'
+import { validateProtection, type ProtectionService, type ServiceProtection } from './protection'
 import { validateEndpoints } from './endpoints'
 import {decoderChoices,selectedDecoder,saveWithDecoder,type DecoderCatalog} from './decoders'
 
-const props = defineProps<{ service?: Omit<ServiceInput, 'expected_revision'> & { id: string }; revision: number }>()
+const props = defineProps<{ service?: Omit<ServiceInput, 'expected_revision'> & { id: string;name?:string } & ProtectionService; revision: number;initialSection?:'general'|'forwarding' }>()
 const emit = defineEmits<{ saved: []; busy: [value: boolean] }>()
 const initial = props.service
 const form = reactive({
+  name:initial?.name??initial?.id??'',
   transport: initial?.transport ?? 'tcp',
   listen_address: initial?.listen_address ?? '0.0.0.0:9000',
   upstream_address: initial?.upstream_address ?? '127.0.0.1:19000',
@@ -21,20 +26,23 @@ const form = reactive({
   enabled: initial?.enabled ?? true,
   retain_history: initial?.retain_history ?? true,
 })
+const forwarding=ref(forwardingDraft(initial?.forwarding))
+const protection = ref<ServiceProtection | null>(initial?.protection ? { ...initial.protection } : null)
 const catalog=ref<DecoderCatalog>({items:[],activations:[]})
 const loadingDecoders=ref(true), decodersReady=ref(false)
 const savedId=ref(initial?.id), savedRevision=ref(props.revision)
 onMounted(async()=>{try{catalog.value=await api<DecoderCatalog>('/protocols');decodersReady.value=true;if(initial)form.protocol_id=selectedDecoder(initial,catalog.value)}catch(cause){error.value=errorMessage(cause)}finally{loadingDecoders.value=false}})
+onMounted(async()=>{if(props.initialSection==='forwarding'){await nextTick();requestAnimationFrame(()=>{const panel=document.getElementById('service-forwarding-settings');panel?.scrollIntoView({block:'start'});panel?.focus({preventScroll:true})})}})
 const saving = ref(false)
 const error = ref('')
 async function save() {
   if (saving.value || !decodersReady.value) return
-  error.value = validateEndpoints(form.listen_address, form.upstream_address)
+  error.value = !form.name.trim()||new TextEncoder().encode(form.name.trim()).length>256?'Enter a service name up to 256 UTF-8 bytes.':validateEndpoints(form.listen_address, form.upstream_address) || validateProtection(protection.value) || validateForwarding(forwarding.value)
   if (error.value) return
   saving.value = true
   emit('busy', true)
   try {
-    const input: ServiceInput = { ...form, listen_address: form.listen_address.trim(), upstream_address: form.upstream_address.trim(), protocol_id: form.protocol_id.trim(), expected_revision: savedRevision.value }
+    const input: ServiceInput & ProtectionService & {name?:string} = { ...form, name:form.name.trim(), forwarding:forwarding.value, protection: protection.value, listen_address: form.listen_address.trim(), upstream_address: form.upstream_address.trim(), protocol_id: form.protocol_id.trim(), expected_revision: savedRevision.value }
     await saveWithDecoder(input,savedId.value,input.protocol_id,catalog.value,(id,revision)=>{savedId.value=id;savedRevision.value=revision})
     emit('saved')
   } catch (cause) { error.value = errorMessage(cause) }
@@ -44,6 +52,7 @@ async function save() {
 
 <template>
   <form id="service-form" class="space-y-4" @submit.prevent="save">
+    <div class="space-y-2"><Label for="service-name">Name</Label><Input id="service-name" v-model="form.name" required maxlength="256" :disabled="saving" placeholder="e.g. Aquarius" /></div>
     <div class="space-y-2">
       <Label for="service-transport">Transport</Label>
       <Select v-model="form.transport" :disabled="saving">
@@ -79,6 +88,8 @@ async function save() {
       </div>
       <p class="text-sm text-muted-foreground">Keeps a compressed tail (up to 64 KiB per direction) for 24 hours so finished TCP streams remain inspectable.</p>
     </div>
+    <ForwardingForm v-model="forwarding" :disabled="saving" :transport="form.transport" :listen-address="form.listen_address" />
+    <ServiceProtectionForm v-model="protection" :disabled="saving" :transport="form.transport" />
     <p v-if="error" role="alert" class="text-sm text-destructive">{{ error }}</p>
     <Button id="service-save" type="submit" :disabled="saving || !decodersReady">{{ saving ? 'Saving…' : 'Save service' }}</Button>
   </form>

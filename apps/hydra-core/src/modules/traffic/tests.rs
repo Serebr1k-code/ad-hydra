@@ -4,7 +4,7 @@ use crate::{
     modules::auth::AuthState,
 };
 use hydra_wire::v1::{self as proto, event::Payload};
-async fn setup() -> (Traffic, std::path::PathBuf) {
+pub(super) async fn setup() -> (Traffic, std::path::PathBuf) {
     let path = std::env::temp_dir().join(format!("hydra-traffic-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&path).unwrap();
     use std::os::unix::fs::PermissionsExt;
@@ -520,5 +520,401 @@ async fn blocked_visibility_is_applied_before_pagination_and_ignores_shadow() {
         true
     );
     drop(t);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn favorite_decoded_rows_survive_restart_with_finite_live_messages() {
+    let (traffic, path) = setup().await;
+    let id = uuid::Uuid::new_v4().to_string();
+    traffic
+        .ingest(proto::EventBatch {
+            events: vec![proto::Event {
+                event_id: "favorite-open".into(),
+                flow_id: id.clone(),
+                service_id: "svc".into(),
+                payload: Some(Payload::FlowOpened(proto::FlowOpened {
+                    transport: 1,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    traffic
+        .auth
+        .db
+        .run({
+            let id = id.clone();
+            move |db| {
+                db.execute(
+                    "INSERT INTO traffic_favorites(flow_id,raw_history_state) VALUES(?1,'pending')",
+                    [id],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let messages = (0..140)
+        .map(|i| proto::Event {
+            event_id: format!("favorite-event-{i}"),
+            flow_id: id.clone(),
+            service_id: "svc".into(),
+            payload: Some(Payload::Message(proto::ParsedMessage {
+                message_id: format!("favorite-message-{i}"),
+                protocol_id: "raw".into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+        .collect();
+    traffic
+        .ingest(proto::EventBatch {
+            events: messages,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    traffic
+        .ingest(proto::EventBatch {
+            events: vec![proto::Event {
+                event_id: "ordinary-open".into(),
+                flow_id: "ordinary-flow".into(),
+                service_id: "svc".into(),
+                payload: Some(Payload::FlowOpened(proto::FlowOpened::default())),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let flow = traffic.flow(id.clone()).await.unwrap().unwrap();
+    assert_eq!(flow["favorite"], true);
+    assert_eq!(flow["decoded_incomplete"], true);
+    let (count, bytes) = traffic
+        .auth
+        .db
+        .run({
+            let id = id.clone();
+            move |db| {
+                Ok(db.query_row(
+                    "SELECT message_count,bytes FROM traffic_favorites WHERE flow_id=?1",
+                    [id],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                )?)
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(count, 128);
+    assert!(bytes < 900000);
+    let restarted = Traffic::open(traffic.auth.clone()).await.unwrap();
+    let page = restarted
+        .flows(serde_json::from_value(serde_json::json!({"favorite":true})).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0]["flow_id"], id);
+    assert_eq!(page.items[0]["raw_history_state"], "pending");
+    assert_eq!(page.items[0]["decoded_incomplete"], true);
+    assert_eq!(
+        restarted
+            .messages(
+                id.clone(),
+                Query {
+                    limit: Some(100),
+                    ..Default::default()
+                }
+            )
+            .await
+            .unwrap()
+            .items
+            .len(),
+        100
+    );
+    restarted
+        .auth
+        .db
+        .run({
+            let id = id.clone();
+            move |db| {
+                db.execute("DELETE FROM traffic_favorites WHERE flow_id=?1", [id])?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted.flow(id).await.unwrap().unwrap()["favorite"],
+        false
+    );
+    drop(restarted);
+    drop(traffic);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn favorite_api_auth_origin_failed_raw_pin_and_audit_are_explicit_and_idempotent() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let (traffic, path) = setup().await;
+    crate::modules::users::create(
+        &traffic.auth.db,
+        &traffic.auth.crypto,
+        "owner".into(),
+        "correct horse battery".into(),
+    )
+    .await
+    .unwrap();
+    let token = traffic
+        .auth
+        .login(
+            "owner".into(),
+            "correct horse battery".into(),
+            "test".into(),
+        )
+        .await
+        .unwrap()
+        .response
+        .access_token;
+    let id = uuid::Uuid::new_v4().to_string();
+    traffic
+        .ingest(proto::EventBatch {
+            events: vec![proto::Event {
+                event_id: "favorite-api-open".into(),
+                flow_id: id.clone(),
+                service_id: "svc".into(),
+                payload: Some(Payload::FlowOpened(proto::FlowOpened::default())),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let app = super::diagnostics::router(super::diagnostics::Diagnostics {
+        auth: traffic.auth.clone(),
+        socket: path.join("missing.sock"),
+        traffic: Some(traffic.clone()),
+    });
+    let request = |authenticated: bool, origin: &str| {
+        let mut request = Request::put(format!("/api/v1/traffic/flows/{id}/favorite"))
+            .header("origin", origin)
+            .header("content-type", "application/json");
+        if authenticated {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        request.body(Body::from("{\"favorite\":true}")).unwrap()
+    };
+    assert_eq!(
+        app.clone()
+            .oneshot(request(false, "https://hydra.test"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(true, "https://other.test"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(request(true, "https://hydra.test"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], "favorite_pending");
+    }
+    let unpin = Request::put(format!("/api/v1/traffic/flows/{id}/favorite"))
+        .header("origin", "https://hydra.test")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from("{\"favorite\":false}"))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(unpin).await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        traffic.flow(id.clone()).await.unwrap().unwrap()["raw_history_state"],
+        "removing"
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(true, "https://hydra.test"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let restarted = Traffic::open(traffic.auth.clone()).await.unwrap();
+    assert_eq!(
+        restarted.flow(id.clone()).await.unwrap().unwrap()["raw_history_state"],
+        "pending"
+    );
+    let (count,failed)=traffic.auth.db.run({let id=id.clone();move |db| {Ok((db.query_row("SELECT count(*) FROM traffic_favorites WHERE flow_id=?1",[&id],|r|r.get::<_,i64>(0))?,db.query_row("SELECT count(*) FROM audit WHERE target=?1 AND action='traffic.favorite.result' AND success=0 AND actor_kind='user'",[id],|r|r.get::<_,i64>(0))?))}}).await.unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(failed, 4);
+    let saved = traffic.flow(id).await.unwrap().unwrap();
+    assert_eq!(saved["favorite"], true);
+    assert_eq!(saved["raw_history_state"], "pending");
+    drop(app);
+    drop(traffic);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn expired_filter_preview_stream_explains_missing_retained_history() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let (traffic, path) = setup().await;
+    crate::modules::users::create(
+        &traffic.auth.db,
+        &traffic.auth.crypto,
+        "preview-owner".into(),
+        "correct horse battery".into(),
+    )
+    .await
+    .unwrap();
+    let token = traffic
+        .auth
+        .login(
+            "preview-owner".into(),
+            "correct horse battery".into(),
+            "test".into(),
+        )
+        .await
+        .unwrap()
+        .response
+        .access_token;
+    let app = super::router(traffic.clone());
+    for route in [
+        "/api/v1/traffic/flows/expired-stream",
+        "/api/v1/traffic/messages/expired-message",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(route)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], "traffic_not_retained");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("retained")
+        );
+    }
+    drop(app);
+    drop(traffic);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn saved_and_live_text_messages_share_stable_capture_order_at_equal_timestamps() {
+    let (t, path) = setup().await;
+    let mut events = t.events.subscribe();
+    t.ingest(proto::EventBatch {
+        events: (0..3)
+            .map(|i| proto::Event {
+                event_id: format!("terminal-event-{i}"),
+                flow_id: "terminal-flow".into(),
+                service_id: "nc".into(),
+                payload: Some(Payload::Message(proto::ParsedMessage {
+                    message_id: format!("terminal-message-{i}"),
+                    protocol_id: "utf8".into(),
+                    direction: if i == 1 { 1 } else { 2 },
+                    message_type: "text".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let mut live = Vec::new();
+    for _ in 0..3 {
+        live.push(
+            events.recv().await.unwrap()["stream_sequence"]
+                .as_i64()
+                .unwrap(),
+        );
+    }
+    assert!(live.windows(2).all(|pair| pair[0] < pair[1]));
+    let page = t
+        .messages(
+            "terminal-flow".into(),
+            serde_json::from_value(serde_json::json!({"newest_first":true})).unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut saved = page
+        .items
+        .iter()
+        .map(|m| m["stream_sequence"].as_i64().unwrap())
+        .collect::<Vec<_>>();
+    saved.reverse();
+    assert_eq!(saved, live);
+    drop(t);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn saved_direction_scope_uses_message_metadata_for_legacy_decoder_fields() {
+    let (traffic, path) = setup().await;
+    traffic
+        .ingest(proto::EventBatch {
+            events: vec![proto::Event {
+                event_id: "legacy-side-event".into(),
+                flow_id: "legacy-side-flow".into(),
+                service_id: "service".into(),
+                payload: Some(Payload::Message(proto::ParsedMessage {
+                    message_id: "legacy-side-message".into(),
+                    direction: 2,
+                    fields: Some(proto::FieldObject {
+                        fields: std::collections::HashMap::new(),
+                    }),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let fields = super::saved_fields(&traffic.auth.db, "legacy-side-message".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        fields.get("direction"),
+        Some(&hydra_domain::FieldValue::String("server_to_client".into()))
+    );
+    drop(traffic);
     std::fs::remove_dir_all(path).unwrap();
 }

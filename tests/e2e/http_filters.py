@@ -329,6 +329,58 @@ class Filters(unittest.TestCase):
                 good('PUT', '/filters/state', {'expected_revision':rev + 1,'ids':[instant_id],'enabled':True}, alice)
                 wait_revision(rev + 2, alice)
                 self.assertEqual(proxied('/instant')[0], 402)
+                # Decoder-selected fields must compile in Core and Proxy, not just the UI.
+                revision = good('GET', '/filters', token=alice)['revision']
+                text_port = port()
+                made_service = good('POST', '/services', dict(service, expected_revision=revision,
+                    protocol_id='utf8', listen_address=f'127.0.0.1:{text_port}'), alice)
+                text_sid = made_service['services']['services'][-1]['id']
+                revision = made_service['services']['revision']; wait_revision(revision, alice)
+                text_rule = dict(instant, expected_revision=revision, service_id=text_sid, name='UTF-8 decoder field',
+                    expression={'direction':'client_to_server','scoped':{'field':'utf8.text','op':'contains','value':{'type':'string','value':'field-regression'}}},
+                    action={'type':'drop_connection'})
+                made = good('POST', '/filters', text_rule, alice)
+                revision = made['rules']['revision']; wait_revision(revision, alice)
+                with socket.create_connection(('127.0.0.1', text_port), timeout=3) as connection:
+                    connection.sendall(b'GET /field-regression HTTP/1.1\r\nHost: localhost\r\n\r\n')
+                    try: self.assertEqual(connection.recv(4096), b'')
+                    except ConnectionResetError: pass
+                self.assertNotIn('/field-regression', seen)
+                text_rule_id=made['rules']['rules'][-1]['id']
+                text_rule['expected_revision']=revision
+                text_rule['expression']['direction']='server_to_client'
+                made=good('PATCH','/filters/'+text_rule_id,text_rule,alice)
+                revision=made['rules']['revision'];wait_revision(revision,alice)
+                with socket.create_connection(('127.0.0.1',text_port),timeout=3) as connection:
+                    connection.sendall(b'GET /field-regression HTTP/1.1\r\nHost: localhost\r\n\r\n')
+                    response=b''
+                    try:
+                        while part:=connection.recv(4096):response+=part
+                    except ConnectionResetError:pass
+                self.assertIn('/field-regression',seen,'Server-side rule must permit the client request')
+                self.assertNotIn(b'backend:/field-regression',response,'Server-side rule must stop matching output')
+
+                # Independent rows with opposite directions in one OR group.
+                text_rule['expected_revision']=revision
+                text_rule['expression']={'any':[
+                    {'direction':'client_to_server','scoped':{'field':'utf8.text','op':'contains','value':{'type':'string','value':'/request-only'}}},
+                    {'direction':'server_to_client','scoped':{'field':'utf8.text','op':'contains','value':{'type':'string','value':'backend:/response-only'}}}]}
+                made=good('PATCH','/filters/'+text_rule_id,text_rule,alice)
+                revision=made['rules']['revision'];wait_revision(revision,alice)
+                for path,backend_seen,body_seen in [('/request-only',False,False),('/response-only',True,False),('/allowed-direction',True,True)]:
+                    with socket.create_connection(('127.0.0.1',text_port),timeout=3) as connection:
+                        connection.sendall(('GET '+path+' HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n').encode())
+                        response=b''
+                        try:
+                            while part:=connection.recv(4096):response+=part
+                        except ConnectionResetError:pass
+                    self.assertEqual(path in seen,backend_seen,path)
+                    self.assertEqual(('backend:'+path).encode() in response,body_seen,path)
+                for field in ['crypter.username', 'http.status_code', 'payload']:
+                    candidate = dict(text_rule, expected_revision=revision, name='Decoder field '+field,
+                        expression={'field':field,'op':'eq','value':{'type':'string','value':'unused'}},action={'type':'alert'})
+                    made = good('POST', '/filters', candidate, alice)
+                    revision = made['rules']['revision']; wait_revision(revision, alice)
                 print('Auth, optional tests, immediate enforcement/create/edit/bulk-enable, framing/restore and traffic persistence: OK')
             finally:
                 for p in processes:

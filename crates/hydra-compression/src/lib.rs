@@ -35,7 +35,11 @@ pub fn encode(bytes: &[u8]) -> Result<Vec<u8>> {
     encode_at_level(bytes, level())
 }
 
-fn encode_at_level(bytes: &[u8], level: i32) -> Result<Vec<u8>> {
+pub fn encode_at_level(bytes: &[u8], level: i32) -> Result<Vec<u8>> {
+    ensure!(
+        (MIN_LEVEL..=MAX_LEVEL).contains(&level),
+        "compression level must be 1..=19"
+    );
     let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), level)?;
     encoder.window_log(WINDOW_LOG)?;
     encoder.include_checksum(true)?;

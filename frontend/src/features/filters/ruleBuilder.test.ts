@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { fromExpression, toExpression, type Group } from './ruleBuilder'
+import { fromExpression, toExpression, createGroup, createCondition, type Condition, type Group } from './ruleBuilder'
 
 describe('visual filter expression builder', () => {
   test('serializes nested AND/OR groups, regex negation and byte units into the API tree', () => {
@@ -79,4 +79,20 @@ test('removes nested groups without changing siblings and keeps an editable last
   expect(root.children).toHaveLength(1)
   expect(root.children[0]!.kind).toBe('condition')
   expect(() => toExpression(root)).not.toThrow()
+})
+
+test('each condition stores its own side, with inversion inside the scope',()=>{
+ const group=createGroup();const first=group.children[0] as Condition
+ first.field='utf8.text';first.op='not_regex';first.value='secret';first.direction='client_to_server'
+ group.join='any';const second=createCondition('utf8.text');second.value='reply';second.direction='server_to_client';group.children.push(second)
+ const expression=toExpression(group)
+ expect(expression).toEqual({any:[{direction:'client_to_server',scoped:{not:{field:'utf8.text',op:'regex',value:{type:'string',value:'secret'}}}},{direction:'server_to_client',scoped:{field:'utf8.text',op:'eq',value:{type:'string',value:'reply'}}}]})
+ expect(toExpression(fromExpression(expression))).toEqual(expression)
+})
+test('old whole-filter direction migrates to each condition preserving negated groups',()=>{
+ const source={all:[{field:'direction',op:'eq',value:{type:'string',value:'server_to_client'}},{not:{any:[{field:'utf8.text',op:'contains',value:{type:'string',value:'one'}},{field:'utf8.text',op:'contains',value:{type:'string',value:'two'}}]}}]}
+ const restored=fromExpression(source)
+ const node=restored.children[0] as Condition
+ expect(node.direction).toBe('server_to_client')
+ expect(toExpression(restored)).toEqual({not:{any:[{direction:'server_to_client',scoped:{field:'utf8.text',op:'contains',value:{type:'string',value:'one'}}},{direction:'server_to_client',scoped:{field:'utf8.text',op:'contains',value:{type:'string',value:'two'}}}]}})
 })

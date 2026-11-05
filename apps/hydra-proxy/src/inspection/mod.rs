@@ -20,11 +20,11 @@ pub fn network_fields(
         ),
         (
             "network.dst_ip".into(),
-            FieldValue::String(service.upstream_address.ip().to_string()),
+            FieldValue::String(service.effective_upstream().ip().to_string()),
         ),
         (
             "network.dst_port".into(),
-            FieldValue::Uint(service.upstream_address.port().into()),
+            FieldValue::Uint(service.effective_upstream().port().into()),
         ),
         (
             "transport.kind".into(),

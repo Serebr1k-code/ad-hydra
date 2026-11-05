@@ -96,7 +96,7 @@ async fn preview_history(
     }
     let udp = history.transport == "udp";
     let mut frames = Vec::new();
-    if udp {
+    if udp || !history.datagrams.is_empty() {
         frames.extend(history.datagrams.iter().map(|d| {
             (
                 if d.direction == 1 {
@@ -294,6 +294,7 @@ mod history_tests {
                 .unwrap(),
         };
         let service = Service {
+            forwarding: None,
             id: "udp".into(),
             transport: Transport::Udp,
             listen_address: "127.0.0.1:23001".parse().unwrap(),
@@ -301,6 +302,7 @@ mod history_tests {
             protocol_id: "raw".into(),
             enabled: true,
             retain_history: true,
+            protection: None,
         };
         history.apply_services(std::slice::from_ref(&service));
         let flow_id = uuid::Uuid::new_v4().to_string();
@@ -399,6 +401,36 @@ mod history_tests {
 
 #[tonic::async_trait]
 impl ProxyDiagnostics for Rpc {
+    async fn set_flow_favorite(
+        &self,
+        request: Request<v1::SetFlowFavoriteRequest>,
+    ) -> Result<Response<v1::SetFlowFavoriteReply>, Status> {
+        let input = request.into_inner();
+        check_provenance(input.actor.as_ref(), &input.request_id)?;
+        if uuid::Uuid::parse_str(&input.flow_id).is_err() {
+            return Err(Status::invalid_argument("invalid flow id"));
+        }
+        let store = self
+            .state
+            .telemetry
+            .history
+            .read()
+            .map_err(|_| Status::internal("history unavailable"))?
+            .clone()
+            .ok_or_else(|| Status::unavailable("history disabled"))?;
+        let state = store
+            .set_favorite(&input.flow_id, input.favorite)
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("capacity") {
+                    Status::resource_exhausted("favorite archive capacity exhausted")
+                } else {
+                    Status::unavailable("favorite storage failed")
+                }
+            })?;
+        Ok(Response::new(v1::SetFlowFavoriteReply { state }))
+    }
+
     async fn preview_filter(
         &self,
         request: Request<v1::PreviewFilterRequest>,
@@ -604,13 +636,11 @@ impl ProxyDiagnostics for Rpc {
             .await
             .map_err(history_status)?
             .ok_or_else(|| Status::not_found("flow history is unavailable or expired"))?;
-        let total = history.client_to_server.len()
-            + history.server_to_client.len()
-            + history
-                .datagrams
-                .iter()
-                .map(|d| d.data.len())
-                .sum::<usize>();
+        let total = if history.datagrams.is_empty() {
+            history.client_to_server.len() + history.server_to_client.len()
+        } else {
+            history.datagrams.iter().map(|d| d.data.len()).sum()
+        };
         if total > crate::history::MAX_HISTORY_BYTES {
             return Err(Status::resource_exhausted("history exceeds response limit"));
         }
@@ -625,14 +655,14 @@ impl ProxyDiagnostics for Rpc {
             transport: if history.transport == "udp" { 2 } else { 1 },
             datagrams_client_to_server: history.datagrams_client_to_server,
             datagrams_server_to_client: history.datagrams_server_to_client,
-            segments: if history.transport == "udp" {
+            segments: if history.transport == "udp" || !history.datagrams.is_empty() {
                 history
                     .datagrams
                     .into_iter()
                     .map(|d| v1::HistorySegment {
                         direction: d.direction.into(),
                         data: d.data,
-                        datagram: true,
+                        datagram: history.transport == "udp",
                         occurred_at_ms: d.occurred_at_ms,
                         sequence: d.sequence,
                     })

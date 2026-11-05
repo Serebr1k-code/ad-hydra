@@ -12,7 +12,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     sync::{mpsc, watch},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -36,23 +36,30 @@ pub async fn listen(
             accepted=listener.accept()=>{
                 let (client,addr)=match accepted{Ok(v)=>v,Err(error)=>{tracing::warn!(%error,"TCP accept failed");tokio::time::sleep(Duration::from_millis(50)).await;continue}};
                 let Some(config)=service.borrow().clone() else{break};
-                let Ok(permit)=telemetry.permits.clone().try_acquire_owned() else{telemetry.rejected.fetch_add(1,Ordering::Relaxed);continue};
+                let budget=telemetry.budget(&config);
+                let Ok(permit)=telemetry.permits.clone().try_acquire_owned() else{budget.reject();telemetry.rejected.fetch_add(1,Ordering::Relaxed);continue};
+                let Some(lease)=budget.admit(true) else{telemetry.rejected.fetch_add(1,Ordering::Relaxed);continue};
                 let flow=telemetry.open(&config,addr,permit);
                 let limits=limits.clone();let shutdown=shutdown.clone();let telemetry=telemetry.clone();
                 tasks.spawn(async move{
                     let mut flow=flow;
+                    flow.protection=Some(lease);
                     let mut session=telemetry.protocols.read().unwrap_or_else(|e|e.into_inner()).as_ref().and_then(|p|match p.session(&config.id,&config.protocol_id){Ok(s)=>Some(s),Err(_)=>{telemetry.decoder_error(&config.id,&flow.id,"decoder_initialization_failed");None}});
                     flow.body_sizes.lock().unwrap_or_else(|e|e.into_inner()).set_http(session.as_mut().is_some_and(|s|s.http_mut().is_some()));
                     let decoder=Arc::new(Mutex::new(session));
                     let work=async{
                         if matches!(telemetry.evaluate(&config,&flow.id,&network_fields(&config,addr,"client_to_server"),false,""),Some(Action::DropConnection)){return Err(std::io::ErrorKind::PermissionDenied.into())}
-                        let mut upstream=tokio::time::timeout(Duration::from_millis(limits.connect_timeout_ms),TcpStream::connect(config.upstream_address)).await??;
+                        let forwarding_store=telemetry.forwarding.read().unwrap_or_else(|e|e.into_inner()).clone();
+                        let upstream=tokio::time::timeout(Duration::from_millis(limits.connect_timeout_ms),crate::forwarding::connect(&config, forwarding_store)).await??;
                         let mut client=client;
-                        let(cr,cw)=client.split();let(ur,uw)=upstream.split();
-                        let idle=Duration::from_millis(limits.tcp_idle_ms);
+                        let(cr,cw)=client.split();let(ur,uw)=tokio::io::split(upstream);
+                        let idle=Duration::from_millis(budget.idle(limits.tcp_idle_ms));
                         let (block_tx,block_rx)=mpsc::channel(1);
-                        let context=Context{base:RelayBase::new(config.clone(),addr,telemetry.clone(),decoder.clone()),flow:&flow,idle};
-                        tokio::try_join!(client_to_server(cr,uw,&context,block_tx),server_to_client(ur,cw,&context,block_rx))?;
+                        let context=Context{base:RelayBase::new(config.clone(),addr,telemetry.clone(),decoder.clone()),flow:&flow,idle,last_activity:Mutex::new(tokio::time::Instant::now())};
+                        tokio::select! {
+                            result=async { tokio::try_join!(client_to_server(cr,uw,&context,block_tx),server_to_client(ur,cw,&context,block_rx)) } => { result?; },
+                            _=context.expire_when_idle()=>return Err(std::io::ErrorKind::TimedOut.into()),
+                        }
                         Ok::<_,std::io::Error>(())
                     };
                     flow.reason=tokio::select!{_=shutdown.cancelled()=>"shutdown".into(),result=work=>match result{Ok(())=>"eof".into(),Err(error)=>format!("io:{:?}",error.kind())}};
@@ -65,6 +72,26 @@ struct Context<'a> {
     base: RelayBase,
     flow: &'a Flow,
     idle: Duration,
+    last_activity: Mutex<tokio::time::Instant>,
+}
+impl Context<'_> {
+    fn activity(&self) {
+        *self.last_activity.lock().unwrap_or_else(|e| e.into_inner()) = tokio::time::Instant::now();
+    }
+    async fn expire_when_idle(&self) {
+        loop {
+            let elapsed = self
+                .last_activity
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .elapsed();
+            let remaining = self.idle.saturating_sub(elapsed);
+            if remaining.is_zero() {
+                return;
+            }
+            tokio::time::sleep(remaining).await;
+        }
+    }
 }
 impl RelayTransport for Context<'_> {
     fn base(&self) -> &RelayBase {
@@ -77,6 +104,21 @@ impl std::ops::Deref for Context<'_> {
         &self.base
     }
 }
+async fn write_active(
+    c: &Context<'_>,
+    write: &mut (impl AsyncWrite + Unpin),
+    mut bytes: &[u8],
+) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        let n = write.write(bytes).await?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        c.activity();
+        bytes = &bytes[n..];
+    }
+    Ok(())
+}
 async fn client_to_server(
     mut read: impl AsyncRead + Unpin,
     mut write: impl AsyncWrite + Unpin,
@@ -86,14 +128,13 @@ async fn client_to_server(
     let mut buf = [0; 16384];
     let mut pending_since: Option<tokio::time::Instant> = None;
     loop {
-        let wait = pending_since
-            .map(|start| {
-                Duration::from_secs(5)
-                    .saturating_sub(start.elapsed())
-                    .min(c.idle)
-            })
-            .unwrap_or(c.idle);
-        let n = match tokio::time::timeout(wait, read.read(&mut buf)).await {
+        // HTTP buffering keeps its fixed parser deadline independently of connection activity.
+        let read_result = if let Some(start) = pending_since {
+            tokio::time::timeout_at(start + Duration::from_secs(5), read.read(&mut buf)).await
+        } else {
+            Ok(read.read(&mut buf).await)
+        };
+        let n = match read_result {
             Ok(result) => result?,
             Err(_) if pending_since.is_some() => {
                 let pending = {
@@ -108,8 +149,9 @@ async fn client_to_server(
                 };
                 c.telemetry
                     .decoder_error(&c.config.id, &c.flow.id, "http_buffer_deadline");
-                tokio::time::timeout(c.idle, write.write_all(&pending)).await??;
-                c.flow.up.fetch_add(pending.len() as u64, Ordering::Relaxed);
+                write_active(c, &mut write, &pending).await?;
+                c.activity();
+                c.flow.forwarded(pending.len(), true);
                 pending_since = None;
                 continue;
             }
@@ -126,11 +168,22 @@ async fn client_to_server(
                 .map(|h| h.take_pending())
                 .unwrap_or_default();
             if !pending.is_empty() {
-                tokio::time::timeout(c.idle, write.write_all(&pending)).await??;
-                c.flow.up.fetch_add(pending.len() as u64, Ordering::Relaxed);
+                write_active(c, &mut write, &pending).await?;
+                c.activity();
+                c.flow.forwarded(pending.len(), true);
             }
             write.shutdown().await?;
             return Ok(());
+        }
+        c.activity();
+        if !c
+            .flow
+            .protection
+            .as_ref()
+            .is_none_or(|lease| lease.0.transfer(n, false))
+        {
+            c.telemetry.rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(std::io::ErrorKind::PermissionDenied.into());
         }
         c.flow.record_history(Direction::ClientToServer, &buf[..n]);
         c.flow.scan(Direction::ClientToServer, &buf[..n]);
@@ -183,26 +236,24 @@ async fn client_to_server(
                             return Err(std::io::ErrorKind::PermissionDenied.into());
                         }
                         _ => {
-                            tokio::time::timeout(c.idle, write.write_all(&frame.bytes)).await??;
-                            c.flow
-                                .up
-                                .fetch_add(frame.bytes.len() as u64, Ordering::Relaxed);
+                            write_active(c, &mut write, &frame.bytes).await?;
+                            c.flow.forwarded(frame.bytes.len(), true);
                         }
                     }
                 }
                 if let Some(bytes) = fallback {
                     c.telemetry
                         .decoder_error(&c.config.id, &c.flow.id, "http_decoder_disabled");
-                    tokio::time::timeout(c.idle, write.write_all(&bytes)).await??;
-                    c.flow.up.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    write_active(c, &mut write, &bytes).await?;
+                    c.flow.forwarded(bytes.len(), true);
                 }
             }
             Inspected::Raw => {
                 if inspect_raw(c, Direction::ClientToServer, &buf[..n]) {
                     return Err(std::io::ErrorKind::PermissionDenied.into());
                 }
-                tokio::time::timeout(c.idle, write.write_all(&buf[..n])).await??;
-                c.flow.up.fetch_add(n as u64, Ordering::Relaxed);
+                write_active(c, &mut write, &buf[..n]).await?;
+                c.flow.forwarded(n, true);
             }
         }
     }
@@ -221,10 +272,10 @@ async fn server_to_client(
             status=block.recv(),if block_open=>{
                 if let Some(status)=status{
                     let response=format!("HTTP/1.1 {status} Blocked\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-                    tokio::time::timeout(c.idle,write.write_all(response.as_bytes())).await??;write.shutdown().await?;return Ok(())
+                    write_active(c, &mut write, response.as_bytes()).await?;write.shutdown().await?;return Ok(())
                 }else{block_open=false;continue}
             },
-            result=tokio::time::timeout(c.idle,read.read(&mut buf))=>result??,
+            result=read.read(&mut buf)=>result?,
         };
         if n == 0 {
             let result = c
@@ -251,13 +302,24 @@ async fn server_to_client(
             write.shutdown().await?;
             return Ok(());
         }
+        c.activity();
+        if !c
+            .flow
+            .protection
+            .as_ref()
+            .is_none_or(|lease| lease.0.transfer(n, false))
+        {
+            c.telemetry.rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
         c.flow.record_history(Direction::ServerToClient, &buf[..n]);
         c.flow.scan(Direction::ServerToClient, &buf[..n]);
         if inspect_raw(c, Direction::ServerToClient, &buf[..n]) {
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
-        tokio::time::timeout(c.idle, write.write_all(&buf[..n])).await??;
-        c.flow.down.fetch_add(n as u64, Ordering::Relaxed);
+        write_active(c, &mut write, &buf[..n]).await?;
+        c.activity();
+        c.flow.forwarded(n, false);
     }
 }
 fn inspect_message(

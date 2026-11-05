@@ -1,6 +1,8 @@
 //! Bounded, zstd-compressed tails of completed TCP and UDP flows. Capture never writes
 //! to disk on the relay task; one bounded worker owns persistence and cleanup.
+mod favorites;
 mod storage;
+mod tcp;
 use hydra_domain::Service;
 use hydra_protocol_sdk::Direction;
 use serde::{Deserialize, Serialize};
@@ -62,6 +64,8 @@ pub struct FlowHistory {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Metadata {
+    #[serde(default)]
+    ordered_tcp: bool,
     #[serde(default = "tcp_transport")]
     transport: String,
     #[serde(default)]
@@ -89,8 +93,6 @@ struct Buffer {
     service_id: String,
     protocol_id: String,
     opened_at_ms: i64,
-    client: Vec<u8>,
-    server: Vec<u8>,
     truncated_client: bool,
     truncated_server: bool,
     discarded: bool,
@@ -101,6 +103,12 @@ struct Buffer {
 }
 
 enum WriteCommand {
+    Favorite {
+        id: String,
+        favorite: bool,
+        snapshot: Option<Box<FlowHistory>>,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     Persist(Box<FlowHistory>),
     SetQuota {
         bytes: u64,
@@ -197,7 +205,26 @@ impl HistoryStore {
                 let applied_level = worker_level.clone();
                 let completed = tokio::task::spawn_blocking(move || {
                     let result = match item {
-                        Some(WriteCommand::Persist(history)) => disk.persist(*history),
+                        Some(WriteCommand::Persist(history)) => {
+                            let archive = favorites::update(&disk.directory_path(), &history);
+                            let ordinary = disk.persist(*history);
+                            archive.and(ordinary)
+                        }
+                        Some(WriteCommand::Favorite {
+                            id,
+                            favorite,
+                            snapshot,
+                            reply,
+                        }) => {
+                            let result = favorites::set(
+                                &disk.directory_path(),
+                                &id,
+                                favorite,
+                                snapshot.map(|v| *v),
+                            );
+                            let _ = reply.send(result.map_err(|e| e.to_string()));
+                            Ok(())
+                        }
                         Some(WriteCommand::SetQuota { bytes, reply }) => {
                             let result = disk.set_quota(bytes);
                             if result.is_ok() {
@@ -400,6 +427,55 @@ impl HistoryStore {
         self.0.dropped.load(Ordering::Relaxed)
     }
 
+    pub async fn set_favorite(&self, flow_id: &str, favorite: bool) -> anyhow::Result<String> {
+        anyhow::ensure!(uuid::Uuid::parse_str(flow_id).is_ok(), "invalid flow id");
+        let snapshot = self
+            .0
+            .active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(flow_id)
+            .map(|buffer| {
+                let b = buffer.lock().unwrap_or_else(|e| e.into_inner());
+                let (client, server) = b.tcp_payloads();
+                Box::new(FlowHistory {
+                    transport: if b.udp { "udp" } else { "tcp" }.into(),
+                    datagrams: b.datagrams.iter().cloned().collect(),
+                    datagrams_client_to_server: if b.udp { b.datagram_totals[0] } else { 0 },
+                    datagrams_server_to_client: if b.udp { b.datagram_totals[1] } else { 0 },
+                    flow_id: flow_id.into(),
+                    service_id: b.service_id.clone(),
+                    protocol_id: b.protocol_id.clone(),
+                    opened_at_ms: b.opened_at_ms,
+                    closed_at_ms: 0,
+                    // Final forwarded counters are supplied only on completion.
+                    // A capture tail includes blocked observations and cannot
+                    // substitute for those totals in an interrupted snapshot.
+                    bytes_client_to_server: 0,
+                    bytes_server_to_client: 0,
+                    client_to_server: client,
+                    server_to_client: server,
+                    truncated_client_to_server: true,
+                    truncated_server_to_client: true,
+                    history_truncated: true,
+                })
+            });
+        let (reply, rx) = oneshot::channel();
+        self.0
+            .writer
+            .send(WriteCommand::Favorite {
+                id: flow_id.into(),
+                favorite,
+                snapshot,
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("history worker unavailable"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("history worker unavailable"))?
+            .map_err(anyhow::Error::msg)
+    }
+
     pub async fn get(&self, flow_id: &str) -> Result<Option<FlowHistory>, HistoryReadError> {
         if flow_id.len() > 128 || uuid::Uuid::parse_str(flow_id).is_err() {
             return Ok(None);
@@ -436,10 +512,15 @@ impl HistoryStore {
         }
         let directory = self.0.directory.clone();
         let id = flow_id.to_owned();
-        tokio::task::spawn_blocking(move || read_record(&directory, &id))
-            .await
-            .map_err(|error| HistoryReadError::Storage(error.into()))?
-            .map_err(HistoryReadError::Storage)
+        tokio::task::spawn_blocking(move || {
+            if let Some(record) = favorites::get(&directory, &id)? {
+                return Ok(Some(record));
+            }
+            read_record(&directory, &id)
+        })
+        .await
+        .map_err(|error| HistoryReadError::Storage(error.into()))?
+        .map_err(HistoryReadError::Storage)
     }
 }
 
@@ -486,20 +567,7 @@ impl HistoryWriter {
             });
             return;
         }
-        if bytes.is_empty() {
-            return;
-        }
-        let Buffer {
-            client,
-            server,
-            truncated_client,
-            truncated_server,
-            ..
-        } = &mut *buffer;
-        match direction {
-            Direction::ClientToServer => append_tail(client, truncated_client, bytes),
-            Direction::ServerToClient => append_tail(server, truncated_server, bytes),
-        }
+        buffer.record_tcp(direction, bytes);
     }
 
     /// Returns true if the retained history is incomplete or could not be queued.
@@ -521,11 +589,22 @@ impl HistoryWriter {
         if buffer.discarded {
             return false;
         }
+        let (client, server) = buffer.tcp_payloads();
+        let client_len = client.len();
+        let server_len = server.len();
         let history = FlowHistory {
             transport: if buffer.udp { "udp" } else { "tcp" }.into(),
             datagrams: buffer.datagrams.iter().cloned().collect(),
-            datagrams_client_to_server: buffer.datagram_totals[0],
-            datagrams_server_to_client: buffer.datagram_totals[1],
+            datagrams_client_to_server: if buffer.udp {
+                buffer.datagram_totals[0]
+            } else {
+                0
+            },
+            datagrams_server_to_client: if buffer.udp {
+                buffer.datagram_totals[1]
+            } else {
+                0
+            },
             flow_id: self.flow_id.clone(),
             service_id: buffer.service_id.clone(),
             protocol_id: buffer.protocol_id.clone(),
@@ -533,16 +612,16 @@ impl HistoryWriter {
             closed_at_ms,
             bytes_client_to_server,
             bytes_server_to_client,
-            client_to_server: buffer.client.clone(),
-            server_to_client: buffer.server.clone(),
+            client_to_server: client,
+            server_to_client: server,
             truncated_client_to_server: buffer.truncated_client
-                || (!buffer.udp && bytes_client_to_server > buffer.client.len() as u64),
+                || (!buffer.udp && bytes_client_to_server > client_len as u64),
             truncated_server_to_client: buffer.truncated_server
-                || (!buffer.udp && bytes_server_to_client > buffer.server.len() as u64),
+                || (!buffer.udp && bytes_server_to_client > server_len as u64),
             history_truncated: buffer.truncated_client
                 || buffer.truncated_server
-                || (!buffer.udp && bytes_client_to_server > buffer.client.len() as u64)
-                || (!buffer.udp && bytes_server_to_client > buffer.server.len() as u64),
+                || (!buffer.udp && bytes_client_to_server > client_len as u64)
+                || (!buffer.udp && bytes_server_to_client > server_len as u64),
         };
         store
             .pending
@@ -566,24 +645,6 @@ impl HistoryWriter {
             }
         }
     }
-}
-
-fn append_tail(target: &mut Vec<u8>, truncated: &mut bool, bytes: &[u8]) {
-    if bytes.len() >= MAX_DIRECTION_BYTES {
-        target.clear();
-        target.extend_from_slice(&bytes[bytes.len() - MAX_DIRECTION_BYTES..]);
-        *truncated = true;
-        return;
-    }
-    let overflow = target
-        .len()
-        .saturating_add(bytes.len())
-        .saturating_sub(MAX_DIRECTION_BYTES);
-    if overflow > 0 {
-        target.drain(..overflow.min(target.len()));
-        *truncated = true;
-    }
-    target.extend_from_slice(bytes);
 }
 
 #[cfg(test)]
@@ -615,6 +676,7 @@ mod tests {
     }
     fn service(retain_history: bool) -> Service {
         Service {
+            forwarding: None,
             id: "svc".into(),
             transport: Transport::Tcp,
             listen_address: "127.0.0.1:23001".parse::<SocketAddr>().unwrap(),
@@ -622,6 +684,7 @@ mod tests {
             protocol_id: "raw".into(),
             enabled: true,
             retain_history,
+            protection: None,
         }
     }
     async fn stored(store: &HistoryStore, id: &str) -> FlowHistory {
@@ -934,6 +997,7 @@ mod tests {
 
         let oversized_id = uuid::Uuid::new_v4().to_string();
         let details = Metadata {
+            ordered_tcp: false,
             transport: "tcp".into(),
             datagram_count: 0,
             datagrams_client_to_server: 0,
@@ -1033,5 +1097,53 @@ mod tests {
         let (payload, metadata) = paths(&dir.0, &id);
         assert!(!payload.exists());
         assert!(!metadata.exists());
+    }
+}
+
+#[cfg(test)]
+mod terminal_history_tests {
+    use super::*;
+    #[tokio::test]
+    async fn tcp_history_keeps_client_server_interleaving_after_restart() {
+        let dir =
+            std::env::temp_dir().join(format!("hydra-terminal-history-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = HistoryStore::open(dir.clone()).await.unwrap();
+        store.apply_services(&[serde_json::from_value(serde_json::json!({"id":"nc","transport":"tcp","listen_address":"127.0.0.1:7117","upstream_address":"127.0.0.1:17117","protocol_id":"utf8","enabled":true})).unwrap()]);
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut writer = store.begin(id.clone(), "nc".into(), "utf8".into()).unwrap();
+        writer.record(Direction::ServerToClient, b"Name: ");
+        writer.record(Direction::ClientToServer, b"Alice\n");
+        writer.record(Direction::ServerToClient, b"Hello Alice\n");
+        assert!(!writer.finish(now_ms(), 6, 18));
+        let mut found = None;
+        for _ in 0..100 {
+            found = store.get(&id).await.unwrap();
+            if found.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let history = found.unwrap();
+        assert_eq!(
+            history
+                .datagrams
+                .iter()
+                .map(|s| s.direction)
+                .collect::<Vec<_>>(),
+            vec![2, 1, 2]
+        );
+        assert_eq!(history.client_to_server, b"Alice\n");
+        assert_eq!(history.server_to_client, b"Name: Hello Alice\n");
+        drop(store);
+        let restarted = HistoryStore::open(dir.clone()).await.unwrap();
+        assert_eq!(
+            restarted.get(&id).await.unwrap().unwrap().datagrams,
+            history.datagrams
+        );
+        drop(restarted);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

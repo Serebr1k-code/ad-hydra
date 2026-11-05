@@ -51,6 +51,8 @@ function setNegate(node: Condition | Group, value: boolean | 'indeterminate') { 
     </div>
     <div v-for="(node, index) in group.children" :key="node.id" class="space-y-2">
       <template v-if="node.kind === 'condition'">
+        <div class="flex flex-wrap items-center gap-2"><span class="text-xs text-muted-foreground">Direction</span><Select :model-value="node.direction??'both'" @update:model-value="value => node.direction=value==='client_to_server'||value==='server_to_client'?value:'both'"><SelectTrigger aria-label="Rule direction" class="w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="both">Both directions</SelectItem><SelectItem value="client_to_server">Client → server</SelectItem><SelectItem value="server_to_client">Server → client</SelectItem></SelectContent></Select></div>
+
         <div class="grid gap-2 md:grid-cols-[1.1fr_1.1fr_1.2fr_auto]">
           <Select :model-value="node.field" @update:model-value="value => setField(node, value)">
             <SelectTrigger aria-label="Rule field"><SelectValue /></SelectTrigger>

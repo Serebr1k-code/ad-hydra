@@ -19,8 +19,8 @@ async function checkHistory(){
 }
 const rows = computed(() => settings.value ? [
   { key:'Applied traffic history per service',value:settings.value.traffic_history_per_service_mib_applied==null?'Proxy unavailable / pending':`${settings.value.traffic_history_per_service_mib_applied} MiB` },
-  { key:'Applied zstd level in Core',value:String(settings.value.core_compression_level_applied) },
-  { key:'Applied zstd level in Proxy',value:settings.value.traffic_history_compression_level_applied==null?'Proxy unavailable / pending':String(settings.value.traffic_history_compression_level_applied) },
+  { key:'Applied farm log zstd level in Core',value:String(settings.value.core_compression_level_applied) },
+  { key:'Applied captured-byte zstd level in Proxy',value:settings.value.traffic_history_compression_level_applied==null?'Proxy unavailable / pending':String(settings.value.traffic_history_compression_level_applied) },
   { key: 'Flag format', value: settings.value.flag_pattern || 'Not configured' },
   { key: 'Automatic captured submission', value: String(settings.value.automatic_submission) },
   { key: 'Checker', value: settings.value.checker_adapter || 'Not configured' },
@@ -63,6 +63,7 @@ onUnmounted(()=>{disposed=true;clearInterval(timer)})
 <template>
   <section class="space-y-4">
     <h1 class="text-2xl font-semibold">Settings</h1>
+    <p class="text-sm text-muted-foreground">Decoded traffic retains up to 256 MiB of compressed records per service using zstd level 3. Captured byte history has its own limit below.</p>
     <p class="text-muted-foreground">Current installation settings. Checker credentials and signing keys stay on the server. Traffic retention and zstd compression apply live. Other operator configuration changes take effect after Core restart.</p>
     <Alert v-if="error" variant="destructive"><AlertDescription>{{ error }}</AlertDescription></Alert>
     <p v-if="loading" role="status">Loading settings…</p>

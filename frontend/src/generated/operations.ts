@@ -112,6 +112,10 @@ export const operations = {
     "method": "PUT",
     "path": "/api/v1/farm/exploits/{id}/versions/{version}"
   },
+  "favorite": {
+    "method": "PUT",
+    "path": "/api/v1/traffic/flows/{id}/favorite"
+  },
   "filter_state": {
     "method": "PUT",
     "path": "/api/v1/filters/{id}/state"
