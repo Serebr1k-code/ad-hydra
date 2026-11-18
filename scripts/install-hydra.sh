@@ -10,7 +10,7 @@ INITIAL_USER="${HYDRA_INITIAL_USER:-hydra-admin}"
 INSTALL_UV="${HYDRA_INSTALL_UV:-true}"
 UV_URL="https://github.com/astral-sh/uv/releases/download/0.10.9/uv-x86_64-unknown-linux-musl.tar.gz"
 UV_SHA256="433e56874739e92c7cfd661ba9e5f287b376ca612c08c8194a41a98a13158aea"
-# Actions downloads use HYDRA_GITHUB_TOKEN, GH_TOKEN or GITHUB_TOKEN from the environment.
+# Actions downloads use a token only for unexpired workflow artifacts.
 
 mode=install
 archive=""
@@ -19,17 +19,17 @@ source_kind=""
 while (($#)); do
   case "$1" in
     --archive) [[ $# -ge 2 ]] || { echo '--archive needs a path' >&2; exit 2; }; archive=$2; shift 2 ;;
-    --source) [[ $# -ge 2 ]] || { echo '--source needs s3 or github' >&2; exit 2; }; source_kind=$2; shift 2 ;;
+    --source) [[ $# -ge 2 ]] || { echo '--source needs s3, github, or github-auth' >&2; exit 2; }; source_kind=$2; shift 2 ;;
     --download-only) [[ $# -ge 2 ]] || { echo '--download-only needs a new directory' >&2; exit 2; }; mode=download; output=$2; shift 2 ;;
     -h|--help)
       cat <<'HELP'
-Usage: sudo bash install-hydra.sh [--source s3|github] [--archive BUILD.tar.gz|BUILD.zip]
-       bash install-hydra.sh --download-only NEW_DIRECTORY [--source s3|github] [--archive BUILD.tar.gz|BUILD.zip]
+Usage: sudo bash install-hydra.sh [--source s3|github|github-auth] [--archive BUILD.tar.gz|BUILD.zip]
+       bash install-hydra.sh --download-only NEW_DIRECTORY [--source s3|github|github-auth] [--archive BUILD.tar.gz|BUILD.zip]
 Default source is S3: enter endpoint, region, bucket, access key ID, secret key
 and optional session token on stdin. --source github selects the latest eligible
-main-branch Actions archive; enter a repository read token when prompted. You can
-set HYDRA_GITHUB_REPOSITORY for a fork. Secrets are hidden on terminals and sent
-to curl through stdin. --archive installs a downloaded archive without a network
+main-branch GitHub Release, without credentials. --source github-auth selects
+the latest Actions archive and requires a repository read token. Set
+HYDRA_GITHUB_REPOSITORY to select a fork. --archive installs a downloaded archive without a network
 source; HYDRA_DOWNLOAD_URL retains the legacy HTTPS index override.
 Missing prerequisites are installed automatically as root. No Git/AWS CLI.
 Installs on x86_64 Linux with systemd; no Rust, Node or Docker is needed.
@@ -43,8 +43,8 @@ done
 if [[ -n "$archive" && -n "$source_kind" ]]; then
   echo '--archive cannot be combined with --source' >&2; exit 2
 fi
-if [[ -n "$source_kind" && "$source_kind" != s3 && "$source_kind" != github ]]; then
-  echo '--source must be s3 or github' >&2; exit 2
+if [[ -n "$source_kind" && "$source_kind" != s3 && "$source_kind" != github && "$source_kind" != github-actions ]]; then
+  echo '--source must be s3, github, or github-auth' >&2; exit 2
 fi
 if [[ -n "$archive" ]]; then source_kind=archive
 elif [[ -z "$source_kind" ]]; then
@@ -257,15 +257,21 @@ def fetch_bundle(directory, url=None, token=''):
     require(source.is_file() and source.stat().st_size<=MAX_DOWNLOAD,'Archive is missing or exceeds 256 MiB')
     with open(source,'rb') as stream: prefix=stream.read(128).lstrip()
     if not archive and prefix.startswith(b'{'):
-        require(source.stat().st_size<=2*1024*1024,'Artifact index exceeds 2 MiB')
+        require(source.stat().st_size<=2*1024*1024,'Release metadata exceeds 2 MiB')
         catalog=json.loads(source.read_text())
-        items=[item for item in catalog.get('artifacts',[]) if re.fullmatch(r'hydra-linux-x86_64-musl-[0-9a-f]{40}',item.get('name','')) and not item.get('expired',True) and item.get('workflow_run',{}).get('head_branch')=='main']
-        require(items,'No unexpired main-branch Linux build found at the configured artifact index')
-        item=max(items,key=lambda item:item.get('created_at',''))
-        print('Build:',item['name'],flush=True)
-        source=directory/'artifact.zip';download_github_artifact(item['archive_download_url'],source,token)
-        if item.get('digest'):
-            require(item['digest']=='sha256:'+digest(source),'GitHub artifact digest mismatch')
+        if 'assets' in catalog:
+            require(catalog.get('tag_name')=='hydra-latest','Unexpected release tag')
+            asset=next((item for item in catalog['assets'] if item.get('name')=='hydra-linux-x86_64-musl.tar.gz'),None)
+            require(asset is not None,'Latest public GitHub release has no Hydra Linux archive')
+            source=directory/'release.tar.gz';download(asset['browser_download_url'],source)
+        else:
+            items=[item for item in catalog.get('artifacts',[]) if re.fullmatch(r'hydra-linux-x86_64-musl-[0-9a-f]{40}',item.get('name','')) and not item.get('expired',True) and item.get('workflow_run',{}).get('head_branch')=='main']
+            require(items,'No unexpired main-branch Linux build found at the configured artifact index')
+            item=max(items,key=lambda item:item.get('created_at',''))
+            print('Build:',item['name'],flush=True)
+            source=directory/'artifact.zip';download_github_artifact(item['archive_download_url'],source,token)
+            if item.get('digest'):
+                require(item['digest']=='sha256:'+digest(source),'GitHub artifact digest mismatch')
     if expected_sha:
         require(re.fullmatch(r'[0-9a-fA-F]{64}',expected_sha) and digest(source)==expected_sha.lower(),'Archive SHA-256 mismatch')
     if zipfile.is_zipfile(source):
@@ -543,6 +549,11 @@ try:
         directory=pathlib.Path(temporary)
         if source_kind=='s3': bundle=fetch_s3(directory)
         elif source_kind=='github':
+            repository=os.environ.get('HYDRA_GITHUB_REPOSITORY','nrf24l01/ad-hydra').strip()
+            require(re.fullmatch(r'[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}',repository),'Invalid HYDRA_GITHUB_REPOSITORY; expected owner/name')
+            index='https://api.github.com/repos/'+repository+'/releases/latest'
+            bundle=fetch_bundle(directory,index)
+        elif source_kind=='github-auth':
             token=read_github_token()
             repository=os.environ.get('HYDRA_GITHUB_REPOSITORY','nrf24l01/ad-hydra').strip()
             require(re.fullmatch(r'[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}',repository),'Invalid HYDRA_GITHUB_REPOSITORY; expected owner/name')

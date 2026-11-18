@@ -187,3 +187,45 @@ jobs:
           HYDRA_S3_ENDPOINT: ${{ secrets.HYDRA_S3_ENDPOINT }}
           HYDRA_S3_BUCKET: ${{ secrets.HYDRA_S3_BUCKET }}
         run: scripts/publish-s3.sh "$RUNNER_TEMP/hydra-linux-artifact/hydra-linux-x86_64-musl.tar.gz"
+
+  publish-github-release:
+    name: Publish public GitHub install archive
+    needs: verify
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: hydra-github-latest
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download this verified build
+        uses: actions/download-artifact@v4
+        with:
+          name: hydra-linux-x86_64-musl-${{ github.sha }}
+          path: ${{ runner.temp }}/hydra-linux-artifact
+      - name: Skip superseded builds
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [[ "$current" == "$GITHUB_SHA" ]]; then
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Replace public latest release
+        if: steps.latest.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete hydra-latest --yes --cleanup-tag || true
+          git tag -f hydra-latest "$GITHUB_SHA"
+          git push --force origin refs/tags/hydra-latest
+          gh release create hydra-latest \
+            "$RUNNER_TEMP/hydra-linux-artifact/hydra-linux-x86_64-musl.tar.gz" \
+            --title "Hydra latest ($GITHUB_SHA)" --notes "Verified full Hydra x86_64 Linux build from $GITHUB_SHA." --latest
