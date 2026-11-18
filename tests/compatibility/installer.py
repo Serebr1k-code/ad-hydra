@@ -103,7 +103,7 @@ class Installer(unittest.TestCase):
             result=self.execute(environment=env);self.assertEqual(result.returncode,0,result.stderr)
             gh_token='fixture-actions-read-token'
             github_env={**env,'HYDRA_GITHUB_ARTIFACTS_URL':env['HYDRA_DOWNLOAD_URL']}
-            result=self.execute(environment=github_env,target=self.directory/'github-output',stdin=gh_token+'\n',install_source='github')
+            result=self.execute(environment=github_env,target=self.directory/'github-output',stdin=gh_token+'\n',install_source='github-auth')
             self.assertEqual(result.returncode,0,result.stderr)
             self.assertEqual(authorization['/index'],'Bearer '+gh_token)
             self.assertEqual(authorization['/artifact'],'Bearer '+gh_token)

@@ -43,7 +43,7 @@ done
 if [[ -n "$archive" && -n "$source_kind" ]]; then
   echo '--archive cannot be combined with --source' >&2; exit 2
 fi
-if [[ -n "$source_kind" && "$source_kind" != s3 && "$source_kind" != github && "$source_kind" != github-actions ]]; then
+if [[ -n "$source_kind" && "$source_kind" != s3 && "$source_kind" != github && "$source_kind" != github-auth ]]; then
   echo '--source must be s3, github, or github-auth' >&2; exit 2
 fi
 if [[ -n "$archive" ]]; then source_kind=archive
