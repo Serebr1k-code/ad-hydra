@@ -17,7 +17,10 @@ received if Show blocked is unchecked.
 
 Connections with a retained flag finding have an amber highlight and **Flag**
 label; their conversation header shows **Flag detected**. Findings follow the
-configured Proxy flag regex. This classification does not imply submission or
+Proxy's flag regex. If `flag_pattern` is omitted from Proxy's JSON configuration,
+the scanner uses the ForcAD format `[A-Z0-9]{31}=`. Set a custom regex for a
+different format or set `"flag_pattern": null` to disable these markers.
+Proxy reads this setting at startup. This classification does not imply submission or
 expose flag values in the new notification. Blocked streams can also contain
 findings: check Show blocked to inspect them. Defensive findings retain value-free flow/service metadata only; own_exposed flag values and digests are removed from the flag vault. Captured conversation bytes, traffic history and pre-migration backups can still contain observed traffic bytes.
 

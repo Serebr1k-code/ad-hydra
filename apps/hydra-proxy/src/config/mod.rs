@@ -32,7 +32,7 @@ impl Limits {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    #[serde(default)]
+    #[serde(default = "default_flag_pattern")]
     pub flag_pattern: Option<String>,
     #[serde(default = "socket_mode")]
     pub socket_mode: u32,
@@ -44,6 +44,10 @@ pub struct Config {
     pub limits: Limits,
     #[serde(default)]
     pub snapshot: ServiceSnapshot,
+}
+
+fn default_flag_pattern() -> Option<String> {
+    Some("[A-Z0-9]{31}=".into())
 }
 fn socket_mode() -> u32 {
     0o600

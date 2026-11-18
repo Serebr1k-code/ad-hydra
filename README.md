@@ -1,116 +1,102 @@
 # Hydra
 
-Hydra is a two-process operations platform for authorized Attack/Defense CTF infrastructure. `hydra-proxy` forwards TCP/UDP and hosts bounded protocol decoders; `hydra-core` owns SQLite, accounts, the HTTPS console, filters, traffic, exploit scheduling, and flag submission. Unknown protocols retain their original bytes. Ordinary reverse proxying changes the source address seen by upstream services.
+Hydra is a lightweight operations console for authorized Attack/Defense CTF competitions. Use it to put a TCP or UDP proxy in front of your own services, inspect both sides of a conversation, and apply defensive filters without restarting the proxy.
 
-Read [PROGRESS.md](PROGRESS.md) for verified scope and limitations, [SPEC.md](SPEC.md) for product requirements, and [DECISIONS.md](DECISIONS.md) for implementation choices. The original handoff README is preserved in `docs/ORIGINAL_HANDOFF_README.md`.
+Hydra runs as two native processes on x86_64 Linux. Its design target is **2 vCPU and 2 GiB RAM**. The Vue console is built into the Core binary, and Core uses local SQLite. The VM needs no frontend runtime, external database, or container daemon.
 
+## What you can do
 
-Successful main builds also replace the latest Core and Proxy binaries in S3; see [CI releases](docs/CI_RELEASES.md) for the destination, credentials setup and publication checks.
+- **Inspect traffic.** Follow live and saved TCP streams and UDP conversations. View decoded fields, HTTP headers, terminal-style text, or captured bytes in hex. Favourite a stream to preserve it through normal rotation.
+- **Decode your protocols.** Use built-in HTTP, UTF-8, and raw profiles or upload a WASM decoder. Ordinary proxying passes unknown protocols through unchanged.
+- **Filter traffic.** Build rules with nested AND/OR groups, per-condition direction, and fields from the active decoder. Preview against saved traffic or apply rules live. See desired and applied revisions, match counts, and author history.
+- **Protect services under load.** Set per-service connection and traffic limits and monitor their effect in the console.
+- **Manage the workspace.** Manage users and settings through the console, review audit events, and use the documented HTTPS API.
 
-For per-service overload limits, live connection/traffic charts, and favourite streams that survive normal rotation, see [service protection and saved favourites](docs/traffic-protection.md).
+## Architecture
 
-The `Rust verification` GitHub Actions run builds static `x86_64-unknown-linux-musl` Core and Proxy binaries after verification succeeds. Download `hydra-linux-x86_64-musl-<commit-sha>` from that run's **Artifacts** section; the archive includes SHA-256 checksums and build commit metadata.
+```mermaid
+flowchart LR
+    Client["TCP or UDP client"] <-->|Service traffic| Proxy["hydra-proxy"]
+    Proxy <-->|Service traffic| Backend["Your upstream services"]
+    Operator["Operator browser"] <-->|HTTPS on loopback via SSH tunnel| Core["hydra-core"]
+    Core -->|Configuration and rules over local gRPC| Proxy
+    Proxy -->|Parsed events and counters over local gRPC| Core
+    Core --> DB[("SQLite: users, configuration, audit, traffic index")]
+    Proxy --> History[("Local stream history and last applied configuration")]
+```
 
-## Build and verify
+**Proxy** owns listeners, connection limits, decoding, and rule enforcement. It can continue forwarding with its last applied configuration while Core is unavailable. For ordinary reverse proxying, the upstream sees the proxy's address as the peer address.
 
-Linux, Rust 1.99.0, Bun 1.4.3, Node 22.18+, a C/C++ linker and `protoc` are required to build. CI pins Node22.23.3 for the frontend tooling. SQLite and Swagger assets are bundled. Vue assets are embedded into the Core executable; deployment needs no Bun, Node, frontend directory, Redis, PostgreSQL, containers, or Docker daemon.
+**Core** serves the console and API, manages configuration, and indexes telemetry. Core and Proxy communicate over a Unix socket. Normal telemetry sends parsed metadata, not a raw packet feed. Swagger is available at `/docs/` and the OpenAPI contract at `/openapi.yaml`.
 
-```sh
-(cd frontend && bun install --frozen-lockfile && bun run typecheck && bun run test && bun run build)
+## Install and open the console
+
+On an **x86_64 Linux VM running systemd**, download the installer from GitHub:
+
+```bash
+wget -O install-hydra.sh https://raw.githubusercontent.com/nrf24l01/ad-hydra/main/scripts/install-hydra.sh
+```
+
+Put your verified build archive in the same directory and run the installer as root.
+
+```bash
+sudo bash install-hydra.sh --archive ./hydra-linux-x86_64-musl.tar.gz
+```
+
+The installer validates the archive before replacing binaries. It installs missing prerequisites on supported apt or dnf systems. See the [installation guide](docs/INSTALL.md) for source options, prerequisites, and recovery details. Hydra expects your upstream services to be running separately.
+
+On first install, read the generated administrator credentials on the VM.
+
+```bash
+sudo cat /root/hydra-install-credentials.json
+```
+
+From your workstation, open an SSH tunnel. Replace `user@your-vm` with your SSH login.
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 user@your-vm
+```
+
+Open **https://localhost:8080** and log in. A fresh install uses a self-signed localhost certificate. Follow the [configuration guide](docs/CONFIGURATION.md) to connect your first service, check captured traffic, and set up filters and retention.
+
+## Maintain an installation
+
+| Installed item | Purpose or location |
+| --- | --- |
+| `hydra-core.service` | Runs the HTTPS console and API on `127.0.0.1:8080` under the `hydra-core` account. |
+| `hydra-proxy.service` | Runs the TCP and UDP listeners under the `hydra-proxy` account. |
+| Binaries and unit files | `/usr/local/bin/hydra-{core,proxy}` and `/etc/systemd/system/hydra-{core,proxy}.service`. |
+| Core state | SQLite, the signing key, and other private files under `/var/lib/hydra-core/`. |
+| Proxy state | Retained traffic and the last applied configuration under `/var/lib/hydra-proxy/`. |
+| Configuration | `/etc/hydra/proxy.json`, `/etc/hydra/core-settings/operations.json`, and TLS files under `/etc/hydra/`. |
+| Local control socket | `/run/hydra-proxy/proxy.sock`. The installer creates a `hydra-control` group for socket access. |
+| Python runtime tooling | The installer reuses an available `uv` or installs its pinned version to `/usr/local/bin/uv` by default. It is not a systemd service. |
+
+Check unit health and follow logs from the VM.
+
+```bash
+sudo systemctl status hydra-core hydra-proxy
+sudo journalctl -u hydra-core -u hydra-proxy -f
+```
+
+Use the console to change service listeners, rules, and traffic retention. Proxy reads `/etc/hydra/proxy.json` at startup. When `flag_pattern` is omitted, the Proxy scanner uses ForcAD's `[A-Z0-9]{31}=` pattern to highlight traffic. Set a custom pattern for a different format or set it to `null` to disable these markers.
+
+For a standard installation, rerun the installer with the new verified archive to upgrade. It preserves existing users, settings, certificates, and systemd units. It backs up the existing database and installation files under `/var/backups/hydra/`, checks both services and the console, and restores the prior installation if the health check fails. For full recovery, also back up the private Core and Proxy state directories and `/etc/hydra/` with ownership and permissions intact. Stop Core before taking file copies of its state, including SQLite sidecar files. Use the deployment procedure for your installation if you customized Core's paths.
+
+## Build from source
+
+Development requires Linux, the pinned Rust and Bun versions, Node 22.18 or later, a native linker, and `protoc`. Build the frontend before Cargo so Core can embed the console.
+
+```bash
+(cd frontend && bun install --frozen-lockfile && bun run build)
 cargo build --locked --workspace
-cargo fmt --all -- --check
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo test --locked --workspace
-scripts/check-contracts.sh
-python3 -m pip install -r scripts/requirements.txt
-python3 scripts/generate-frontend.py --check
-python3 tests/e2e/relay.py
-python3 tests/e2e/udp_history.py
-python3 tests/e2e/http_filters.py
-python3 tests/e2e/operations.py
-python3 tests/e2e/diagnostics.py
-HYDRA_VERIFY_EMBEDDED=1 python3 tests/e2e/browser.py
-cargo build --release --locked --workspace
 ```
 
-Build the frontend before every Cargo build after changing frontend source, configuration, package manifest or lockfile. Cargo rejects missing or older bundles. See [docs/vue-frontend.md](docs/vue-frontend.md) for the Vue layout and development workflow.
+## Further reading
 
-The Rust checker-adapter tests need OpenSSL and owned loopback sockets. The browser test also needs Chromium. Network integration tests bind local ephemeral ports. Kernel sandbox integration has additional prerequisites in [docs/sandbox-integration.md](docs/sandbox-integration.md); an ignored kernel test is not evidence that isolation passed.
-
-Build the actual Rust WASM sample with a matching upstream Rust compiler and target standard library:
-
-```sh
-rustup target add wasm32-unknown-unknown --toolchain 1.99.0
-cargo build --locked --release --manifest-path plugins/examples/length-prefixed/Cargo.toml --target wasm32-unknown-unknown
-HYDRA_WASM_SAMPLE="$PWD/plugins/examples/length-prefixed/target/wasm32-unknown-unknown/release/hydra_length_prefixed_example.wasm" python3 tests/e2e/http_filters.py
-```
-
-Distribution-patched compilers may require their matching target standard library; mixing different compiler builds produces E0514. The WASM sample is an independent workspace. Guest ABI v1 uses bounded JSON in guest memory; parsed events use typed protobuf fields over gRPC.
-
-## Run locally
-
-Use a private state directory. Start upstream toy services separately; the example maps TCP 9000 to 9001 and UDP 9002 to 9003. Substitute competition endpoints explicitly.
-
-```sh
-mkdir -p /tmp/hydra-demo
-chmod 700 /tmp/hydra-demo
-python3 - <<'PY'
-import json,pathlib
-root=pathlib.Path('/tmp/hydra-demo')
-v=json.loads(pathlib.Path('config/proxy.example.json').read_text())
-v['socket']=str(root/'proxy.sock')
-v['state_file']=str(root/'last-good.json')
-(root/'proxy.json').write_text(json.dumps(v))
-(root/'seed.json').write_text(json.dumps(v['snapshot']))
-PY
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -keyout /tmp/hydra-demo/tls.key -out /tmp/hydra-demo/tls.crt -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1
-target/debug/hydra-core --database /tmp/hydra-demo/core.sqlite3 --key /tmp/hydra-demo/jwt.pem create user alice
-```
-
-In separate terminals:
-
-```sh
-target/debug/hydra-proxy --config /tmp/hydra-demo/proxy.json
-```
-
-```sh
-target/debug/hydra-core --socket /tmp/hydra-demo/proxy.sock --database /tmp/hydra-demo/core.sqlite3 --key /tmp/hydra-demo/jwt.pem serve --snapshot /tmp/hydra-demo/seed.json --listen 127.0.0.1:8080 --origin https://localhost:8080 --tls-cert /tmp/hydra-demo/tls.crt --tls-key /tmp/hydra-demo/tls.key
-```
-
-Trust the development certificate and open `https://localhost:8080`. Swagger is `/docs`, generated OpenAPI is `/openapi.yaml`. Bootstrap snapshots initialize an empty Core; subsequent changes belong to the authenticated UI/API. `hydra-core apply` is an offline maintenance tool for use while Core is stopped; pass the same `--database` path so its intent/result are audited. Direct maintenance can diverge from Core desired revisions and needs deliberate reconciliation. Proxy restores its last accepted snapshot independently when Core is unavailable.
-
-Bootstrap the first account through CLI; authenticated users can create additional accounts from Users / audit or `POST /api/v1/users`. Every authenticated account has full equal privileges. Access tokens expire after 60 seconds; rotating refresh cookies retain the original absolute ten-hour session end. The console keeps access tokens in memory. Secure cookies require HTTPS. Omit the optional CLI password argument to use the hidden prompt; passwords supplied in argv may appear in process listings or shell history. Users can edit accounts, reset passwords, deactivate and reactivate through the console; account creation is also available there.
-
-## Operations configuration
-
-Pass `serve --operations /private/operations.json`. This file must be private (0600), regular and <=64 KiB. The Settings page edits validated values and atomically saves this actual file. The saved traffic-history budget applies live over the control socket (default 128 MiB per service, configurable from 1 to 1024 MiB); other changes require a Core restart. For UI writes, its directory must be owned and writable by Core (0700), with systemd write access; team-1 uses `/etc/hydra/core-settings/operations.json`. Hidden checker credentials are preserved unless explicitly replaced or cleared. Concurrent changes return a conflict requiring refresh. Defaults disable pattern matching, automatic submission and exploit execution; they do not invent competition settings.
-
-```json
-{
-  "flag_pattern": "FLAG\\{[A-Za-z0-9_]{1,64}\\}",
-  "auto_submit_captured": false,
-  "checker": {"kind":"tcp", "address":"127.0.0.1:19000", "secret":null},
-  "sandbox": {
-    "delegated_cgroup":"/sys/fs/cgroup/OPERATOR-DELEGATION",
-    "runtime_dir":"/run/hydra/jobs",
-    "bwrap":"/usr/bin/bwrap",
-    "ip":"/usr/bin/ip"
-  }
-}
-```
-
-Configure the same optional `flag_pattern` in Proxy JSON for defensive findings. Proxy defensive findings retain value-free detection metadata and never enter the submission vault. Farm captures require an enabled explicit target; pasted manual imports can omit target provenance. Checker endpoints and credentials are operator configuration, never worker environment variables or public request parameters. Built-in adapters support bounded HTTP JSON, verified HTTPS with an operator-pinned CA, TCP JSON lines, and declarative CustomTcp atomic batches. Checker replies retain redacted status/body evidence. See [docs/flags-integration.md](docs/flags-integration.md) and [docs/farm-integration.md](docs/farm-integration.md).
-
-Exploit execution requires bubblewrap, iproute2, user namespaces and a delegated writable cgroup v2 subtree. The adapter supports numeric IPv4 TCP/UDP targets, per-target and batch jobs, and one worker. Unsupported networking and missing isolation fail visibly; no unsandboxed fallback exists. See [docs/sandbox-integration.md](docs/sandbox-integration.md) and [docs/farm-execution.md](docs/farm-execution.md). New batch/UDP worker paths have safe validation tests, but were not executed after the instruction to avoid exploit-execution tests.
-
-## Data and bounds
-
-Only Core opens SQLite; WAL, private files and bounded traffic retention are enforced. There is no application-wide SQLite file-size ceiling: audit growth must not prevent login from saving sessions. Proxy has bounded connections, parser sessions, message buffers, telemetry queues, plugin versions and a finite durable critical spool. Loss counters are visible through status. No raw packet stream crosses gRPC. HTTP enforcement is limited to completely framed supported HTTP/1.1 requests before forwarding; unsupported framing and opaque encrypted traffic pass through, with diagnostic loss metadata for parser fallback. See [docs/protocol-integration.md](docs/protocol-integration.md).
-
-For backups, stop Core and copy its entire private state directory, including SQLite sidecars, signing key, immutable protocol/exploit files; preserve ownership/modes. Copy Proxy state separately. Treat both backups as secrets. Do not copy a live SQLite database file alone.
-
-The console includes service-colored filter cards with per-rule switches and explicit applied status, bulk filter toggles, saved-field rule creation, protocol framing profiles/schema inspection, traffic field/rule/flag search and comparison, paginated flags and submissions, triage, run retry, and an audited settings/configuration export. Filter changes display desired and applied revisions separately. Farm includes an exploit × team effectiveness matrix with latest logs, per-target outcomes and attributed flag counts; see [Farm](docs/farm.md). TCP and UDP both retain bounded checksummed zstd traffic history (legacy gzip remains readable) and support saved-history filter preview; see [Traffic](docs/traffic-view.md). Configuration export covers services and rules; use the backup procedure for full recovery.
-
-See [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for the reproducible bounded loopback load measurement and its limits. Production systemd setup uses separate Core/Proxy users: [deploy/README.md](deploy/README.md).
-
-Opt-in [service forwarding with reversible flag substitution](docs/flag-forwarding.md) is configured under Services using an enabled Farm team and explicit message framing.
+- [Traffic viewer](docs/traffic-view.md) and [service limits and favourites](docs/traffic-protection.md)
+- [Custom WASM decoders](docs/CUSTOM_DECODERS.md)
+- [Installation and recovery](docs/INSTALL.md) and [manual systemd deployment](deploy/README.md)
+- [CI builds and release archives](docs/CI_RELEASES.md)
+- [Frontend development](docs/vue-frontend.md), [verification](docs/VERIFICATION.md), and [performance measurements](docs/PERFORMANCE.md)
+- [Product specification](SPEC.md) and [engineering decisions](DECISIONS.md)
