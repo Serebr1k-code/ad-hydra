@@ -6,9 +6,9 @@ umask 077
 [[ $# == 1 ]] || { echo 'Usage: publish-s3.sh VERIFIED_BUILD.tar.gz' >&2; exit 2; }
 : "${AWS_ACCESS_KEY_ID:?Set the S3 access key through the environment}"
 : "${AWS_SECRET_ACCESS_KEY:?Set the S3 secret key through the environment}"
-: "${AWS_DEFAULT_REGION:=example-region}"
-: "${HYDRA_S3_ENDPOINT:=https://s3.example.com}"
-: "${HYDRA_S3_BUCKET:=example-hydra-bucket}"
+: "${AWS_DEFAULT_REGION:?Set AWS_DEFAULT_REGION through the environment}"
+: "${HYDRA_S3_ENDPOINT:?Set HYDRA_S3_ENDPOINT through the environment}"
+: "${HYDRA_S3_BUCKET:?Set HYDRA_S3_BUCKET through the environment}"
 : "${GITHUB_SHA:?Set the verified build commit}"
 [[ "$HYDRA_S3_ENDPOINT" == https://* && "$HYDRA_S3_ENDPOINT" != *'@'* && "$HYDRA_S3_ENDPOINT" != *'?'* ]] || { echo 'Use an HTTPS S3 API endpoint without embedded credentials.' >&2; exit 2; }
 [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'Expected a full commit SHA.' >&2; exit 2; }

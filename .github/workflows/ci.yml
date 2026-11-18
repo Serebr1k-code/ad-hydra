@@ -150,7 +150,7 @@ jobs:
   publish-s3:
     name: Publish latest Linux binaries to S3
     needs: verify
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.HYDRA_PUBLISH_S3 == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -165,7 +165,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: hydra-linux-x86_64-musl-${{ github.sha }}
-          path: ${{ runner.temp }}/example-hydra-bucket-artifact
+          path: ${{ runner.temp }}/hydra-linux-artifact
       - name: Skip superseded builds
         id: latest
         env:
@@ -183,7 +183,7 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.HYDRA_S3_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.HYDRA_S3_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: example-region
-          HYDRA_S3_ENDPOINT: https://s3.example.com
-          HYDRA_S3_BUCKET: example-hydra-bucket
-        run: scripts/publish-s3.sh "$RUNNER_TEMP/example-hydra-bucket-artifact/hydra-linux-x86_64-musl.tar.gz"
+          AWS_DEFAULT_REGION: ${{ secrets.HYDRA_S3_REGION }}
+          HYDRA_S3_ENDPOINT: ${{ secrets.HYDRA_S3_ENDPOINT }}
+          HYDRA_S3_BUCKET: ${{ secrets.HYDRA_S3_BUCKET }}
+        run: scripts/publish-s3.sh "$RUNNER_TEMP/hydra-linux-artifact/hydra-linux-x86_64-musl.tar.gz"

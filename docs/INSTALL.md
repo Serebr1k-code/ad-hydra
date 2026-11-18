@@ -14,9 +14,9 @@ Enter these values when prompted, one line at a time:
 
 | Prompt | Value |
 | --- | --- |
-| Endpoint URL | `https://s3.example.com` |
-| Region | `example-region` |
-| Bucket | `example-hydra-bucket` |
+| Endpoint URL | Your HTTPS S3 API endpoint |
+| Region | Your bucket region |
+| Bucket | Your bucket name |
 | Access key ID | Your read-capable S3 key ID |
 | Secret access key | Your S3 secret |
 | Session token | Press Enter for ordinary keys; supply a token for temporary credentials |
