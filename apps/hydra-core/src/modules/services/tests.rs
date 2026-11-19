@@ -92,6 +92,7 @@ fn rule() -> Rule {
     Rule {
         id: "rule".into(),
         service_id: "service".into(),
+        additional_service_ids: vec![],
         name: "test".into(),
         description: String::new(),
         enabled: true,
@@ -265,9 +266,15 @@ async fn enforce_create_edit_and_bulk_enable_do_not_require_rehearsal() {
         FieldValue::String("/secret".into()),
     )]);
     assert_eq!(
-        c.test_rule(actor("alice"), "rule".into(), fields, "test".into())
-            .await
-            .unwrap()["matched"],
+        c.test_rule(
+            actor("alice"),
+            "rule".into(),
+            "service".into(),
+            fields,
+            "test".into()
+        )
+        .await
+        .unwrap()["matched"],
         true
     );
     assert_eq!(

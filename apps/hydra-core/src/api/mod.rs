@@ -37,6 +37,8 @@ pub struct ForwardingStats {
 }
 #[derive(Clone, Debug, Default, Serialize, ToSchema)]
 pub struct ProxyView {
+    pub request_checker_errors: u64,
+    pub last_request_checker_error: String,
     pub forwarding_stats: Option<ForwardingStats>,
     pub service_metrics: Vec<ServiceMetrics>,
     pub connected: bool,
@@ -59,6 +61,8 @@ pub struct ProxyView {
 impl ProxyView {
     pub fn from_status(s: v1::ProxyStatus) -> Self {
         Self {
+            request_checker_errors: s.request_checker_errors,
+            last_request_checker_error: s.last_request_checker_error,
             forwarding_stats: s.forwarding_stats.map(|m| ForwardingStats {
                 mappings: m.mappings,
                 reused: m.reused,

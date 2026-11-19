@@ -16,6 +16,7 @@ pub fn timestamp() -> prost_types::Timestamp {
 }
 
 pub struct Telemetry {
+    pub(crate) request_checks: crate::request_checks::Checks,
     pub forwarding: std::sync::RwLock<Option<Arc<crate::forwarding::Store>>>,
     pub budgets: std::sync::RwLock<
         std::collections::HashMap<String, Arc<crate::transport::protection::Budget>>,
@@ -39,9 +40,18 @@ pub struct Telemetry {
     pub subscribers: Arc<Semaphore>,
 }
 impl Telemetry {
+    #[cfg(test)]
     pub fn new(max_flows: usize) -> Arc<Self> {
+        Self::with_request_checks(max_flows, Default::default())
+    }
+
+    pub(crate) fn with_request_checks(
+        max_flows: usize,
+        request_checks: crate::request_checks::Checks,
+    ) -> Arc<Self> {
         let (events, _) = broadcast::channel(1024);
         Arc::new(Self {
+            request_checks,
             forwarding: Default::default(),
             budgets: Default::default(),
             samples: std::sync::RwLock::new(None),

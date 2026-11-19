@@ -671,6 +671,47 @@ paths:
           description: ''
         '401':
           description: ''
+  /api/v1/filters/request-checkers:
+    get:
+      tags:
+      - filters
+      operationId: request_checker_settings
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestCheckerSettings'
+        '401':
+          description: ''
+        '503':
+          description: ''
+    put:
+      tags:
+      - filters
+      operationId: update_request_checker_settings
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequestCheckerSettings'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestCheckerSettings'
+        '400':
+          description: ''
+        '401':
+          description: ''
+        '409':
+          description: ''
+        '503':
+          description: ''
   /api/v1/filters/state:
     put:
       tags:
@@ -2629,6 +2670,11 @@ components:
       properties:
         action:
           type: object
+        additional_service_ids:
+          type: array
+          items:
+            type: string
+          description: Additional services governed by this filter. IDs must be unique.
         backend:
           type: string
         description:
@@ -3235,6 +3281,8 @@ components:
     ProxyView:
       type: object
       required:
+      - request_checker_errors
+      - last_request_checker_error
       - service_metrics
       - connected
       - history_per_service_bytes
@@ -3303,9 +3351,15 @@ components:
           type: integer
           format: int64
           minimum: 0
+        last_request_checker_error:
+          type: string
         proxy_epoch_id:
           type: string
         rejected_flows:
+          type: integer
+          format: int64
+          minimum: 0
+        request_checker_errors:
           type: integer
           format: int64
           minimum: 0
@@ -3321,6 +3375,42 @@ components:
           type: integer
           format: int64
           minimum: 0
+    RequestCheckerPolicy:
+      type: object
+      required:
+      - id
+      - services
+      - timeout_ms
+      - allow_on_error
+      properties:
+        allow_on_error:
+          type: boolean
+        id:
+          type: string
+        services:
+          type: array
+          items:
+            type: string
+        timeout_ms:
+          type: integer
+          format: int64
+          minimum: 0
+      additionalProperties: false
+    RequestCheckerSettings:
+      type: object
+      required:
+      - revision
+      - policies
+      properties:
+        policies:
+          type: array
+          items:
+            $ref: '#/components/schemas/RequestCheckerPolicy'
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+      additionalProperties: false
     RunInput:
       type: object
       required:

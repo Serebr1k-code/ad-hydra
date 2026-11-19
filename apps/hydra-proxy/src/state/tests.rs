@@ -196,6 +196,7 @@ async fn combined_snapshot_moves_dependent_rules_and_service_together() {
     let rule = hydra_domain::Rule {
         id: "rule".into(),
         service_id: service.id.clone(),
+        additional_service_ids: vec![],
         name: "log".into(),
         description: String::new(),
         enabled: true,

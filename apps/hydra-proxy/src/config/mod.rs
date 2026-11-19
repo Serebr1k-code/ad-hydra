@@ -34,6 +34,8 @@ impl Limits {
 pub struct Config {
     #[serde(default = "default_flag_pattern")]
     pub flag_pattern: Option<String>,
+    #[serde(default)]
+    pub(crate) request_checkers: Vec<crate::request_checks::Config>,
     #[serde(default = "socket_mode")]
     pub socket_mode: u32,
     pub socket: PathBuf,

@@ -9,7 +9,15 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
     // Acquire the exclusive management socket before opening shared state stores.
     let listener = security::bind(&config.socket, config.socket_mode).await?;
-    let telemetry = Telemetry::new(config.limits.max_flows);
+    let state_directory = config
+        .state_file
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let request_checks = crate::request_checks::Checks::open(
+        &state_directory.join("request-checkers"),
+        config.request_checkers,
+    )?;
+    let telemetry = Telemetry::with_request_checks(config.limits.max_flows, request_checks);
     if let Some(pattern) = config.flag_pattern.as_ref() {
         *telemetry.scanner.write().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(
             crate::inspection::flags::Scanner::new(pattern)?,

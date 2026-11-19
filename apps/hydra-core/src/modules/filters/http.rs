@@ -1,3 +1,4 @@
+use super::checker_http::{self, RequestCheckerPolicy, RequestCheckerSettings};
 use crate::modules::services::{
     Control,
     http::{Error, ListQuery, ListResponse, Revision, actor, list, remove, request},
@@ -152,6 +153,7 @@ async fn preview_filter(
     let rule = Rule {
         id: "__preview__".into(),
         service_id: input.service_id.clone(),
+        additional_service_ids: vec![],
         name: input.name,
         description: input.description,
         enabled: input.enabled,
@@ -220,6 +222,9 @@ async fn preview_filter(
 pub struct FilterInput {
     pub expected_revision: u64,
     pub service_id: String,
+    /// Additional services governed by this filter. IDs must be unique.
+    #[serde(default)]
+    pub additional_service_ids: Vec<String>,
     pub name: String,
     pub description: String,
     pub enabled: bool,
@@ -239,6 +244,7 @@ impl FilterInput {
         Rule {
             id,
             service_id: self.service_id,
+            additional_service_ids: self.additional_service_ids,
             name: self.name,
             description: self.description,
             enabled: self.enabled,
@@ -381,10 +387,10 @@ pub async fn test_filter(
     Json(input): Json<TestInput>,
 ) -> Result<Response, Error> {
     let a = actor(&c, &headers).await?;
-    let fields = crate::modules::traffic::saved_fields(&c.db, input.message_id)
+    let (service_id, fields) = crate::modules::traffic::saved_context(&c.db, input.message_id)
         .await
         .map_err(Error::from)?;
-    c.test_rule(a, id, fields, request())
+    c.test_rule(a, id, service_id, fields, request())
         .await
         .map(|v| (StatusCode::OK, Json(v)).into_response())
         .map_err(Error::from)
@@ -440,6 +446,7 @@ async fn from_message(
     let rule = Rule {
         id: uuid::Uuid::new_v4().to_string(),
         service_id,
+        additional_service_ids: vec![],
         name: input.name,
         description: format!("From saved message {}", input.message_id),
         enabled: true,
@@ -471,7 +478,9 @@ async fn from_message(
         test_filter,
         bulk_state,
         from_message,
-        preview_filter
+        preview_filter,
+        checker_http::request_checker_settings,
+        checker_http::update_request_checker_settings
     ),
     components(schemas(
         FilterInput,
@@ -480,6 +489,8 @@ async fn from_message(
         BulkStateInput,
         FromMessageInput,
         FilterPreviewInput,
+        RequestCheckerPolicy,
+        RequestCheckerSettings,
         ListResponse
     ))
 )]
@@ -501,5 +512,9 @@ pub fn router(control: Control) -> Router {
 pub fn preview_router(control: Control, socket: std::path::PathBuf) -> Router {
     Router::new()
         .route("/api/v1/filters/preview", post(preview_filter))
-        .with_state(PreviewState { control, socket })
+        .with_state(PreviewState {
+            control: control.clone(),
+            socket: socket.clone(),
+        })
+        .merge(checker_http::router(control, socket))
 }

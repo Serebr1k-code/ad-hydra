@@ -23,6 +23,7 @@ async fn byte_limits_work_before_udp_decoding_and_keep_directions_separate() {
                     rules: vec![Rule {
                         id: "limit".into(),
                         service_id: "udp".into(),
+                        additional_service_ids: vec![],
                         name: "byte limit".into(),
                         description: String::new(),
                         enabled: true,

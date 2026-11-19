@@ -25,6 +25,7 @@ fn rule(id: &str, action: Action) -> Rule {
     Rule {
         id: id.into(),
         service_id: "s".into(),
+        additional_service_ids: vec![],
         name: id.into(),
         description: String::new(),
         enabled: true,
@@ -47,6 +48,49 @@ fn context(fields: &BTreeMap<String, FieldValue>) -> EvaluationContext<'_> {
 }
 fn compile(rules: Vec<Rule>) -> Result<CompiledSnapshot, CompileError> {
     CompiledSnapshot::compile(RuleSnapshot { revision: 1, rules }, &[service()])
+}
+#[test]
+fn one_rule_applies_to_each_selected_service_and_validates_every_transport() {
+    let mut udp = service();
+    udp.id = "udp".into();
+    udp.transport = Transport::Udp;
+    let services = [service(), udp];
+    let mut shared = rule("shared", Action::Log);
+    shared.additional_service_ids.push("udp".into());
+    let compile_shared = |rule| {
+        CompiledSnapshot::compile(
+            RuleSnapshot {
+                revision: 1,
+                rules: vec![rule],
+            },
+            &services,
+        )
+    };
+    let compiled = compile_shared(shared.clone()).unwrap();
+    let fields = BTreeMap::from([("protocol.x".into(), FieldValue::String("yes".into()))]);
+    for service in &services {
+        let result = compiled.evaluate(&EvaluationContext {
+            service_id: &service.id,
+            transport: service.transport,
+            ..context(&fields)
+        });
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].rule_id, "shared");
+    }
+    assert!(
+        compiled
+            .evaluate(&EvaluationContext {
+                service_id: "other",
+                ..context(&fields)
+            })
+            .hits
+            .is_empty()
+    );
+    let mut wrong_transport = shared.clone();
+    wrong_transport.action = Action::DropConnection;
+    assert!(compile_shared(wrong_transport).is_err());
+    shared.additional_service_ids.push("s".into());
+    assert!(compile_shared(shared).is_err());
 }
 #[test]
 fn missing_field_stays_unknown_under_not() {

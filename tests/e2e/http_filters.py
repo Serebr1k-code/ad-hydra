@@ -381,7 +381,31 @@ class Filters(unittest.TestCase):
                         expression={'field':field,'op':'eq','value':{'type':'string','value':'unused'}},action={'type':'alert'})
                     made = good('POST', '/filters', candidate, alice)
                     revision = made['rules']['revision']; wait_revision(revision, alice)
-                print('Auth, optional tests, immediate enforcement/create/edit/bulk-enable, framing/restore and traffic persistence: OK')
+                second_port = port()
+                created = good('POST', '/services', dict(service, expected_revision=revision,
+                    listen_address=f'127.0.0.1:{second_port}', name='Second HTTP listener'), alice)
+                second_id = created['services']['services'][-1]['id']
+                revision = created['rules']['revision']; wait_revision(revision, alice)
+                shared = dict(instant, expected_revision=revision, service_id=sid,
+                    additional_service_ids=[second_id], name='Shared HTTP rule',
+                    expression={'field':'http.path','op':'eq','value':{'type':'string','value':'/shared-demo'}},
+                    action={'type':'block','http_status':403})
+                created = good('POST', '/filters', shared, alice)
+                shared_id = created['rules']['rules'][-1]['id']
+                revision = created['rules']['revision']; wait_revision(revision, alice)
+                self.assertEqual(good('GET', '/filters/' + shared_id, token=alice)['additional_service_ids'], [second_id])
+                for expected_status in (403, 200):
+                    for listener in (pp, second_port):
+                        connection = http.client.HTTPConnection('127.0.0.1', listener, timeout=3)
+                        try:
+                            connection.request('GET', '/shared-demo')
+                            self.assertEqual(connection.getresponse().status, expected_status)
+                        finally:
+                            connection.close()
+                    if expected_status == 403:
+                        good('PUT', '/filters/' + shared_id + '/state', {'expected_revision':revision,'enabled':False}, alice)
+                        wait_revision(revision + 1, alice)
+                print('Auth, filtering, shared service scope, framing and traffic persistence: OK')
             finally:
                 for p in processes:
                     if p.poll() is None:

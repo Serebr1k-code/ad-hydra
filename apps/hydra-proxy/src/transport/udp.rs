@@ -211,6 +211,7 @@ pub async fn listen(
           }
           if let Some(s)=sessions.get(&client){
            s.context.activity();if s.context.inspect(Direction::ClientToServer,&buf[..n]){continue}
+           if !telemetry.request_checks.allow(&config,&buf[..n]).await {telemetry.drop_udp(&budget);continue}
            let payload=match rewrite(&s.context,&buf[..n],false).await {Ok(v)=>v,Err(_)=>{telemetry.drop_udp(&budget);continue}};
            match s.socket.try_send(&payload){Ok(sent)if sent==n=>{s.context.flow.forwarded(n,true);},_=>{telemetry.drop_udp(&budget);}}
           }

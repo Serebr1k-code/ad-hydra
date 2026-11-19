@@ -69,6 +69,7 @@ pub fn rule_to_wire(r: &Rule) -> p::Rule {
     p::Rule {
         id: r.id.clone(),
         service_id: r.service_id.clone(),
+        additional_service_ids: r.additional_service_ids.clone(),
         name: r.name.clone(),
         enabled: r.enabled,
         mode: if r.mode == Mode::Shadow { 1 } else { 2 },
@@ -159,6 +160,7 @@ impl TryFrom<&p::ApplyRuleSnapshotRequest> for RuleSnapshot {
                 Ok(Rule {
                     id: r.id.clone(),
                     service_id: r.service_id.clone(),
+                    additional_service_ids: r.additional_service_ids.clone(),
                     name: r.name.clone(),
                     description: r.description.clone(),
                     enabled: r.enabled,
@@ -347,6 +349,7 @@ mod tests {
             rules: vec![Rule {
                 id: "r".into(),
                 service_id: "s".into(),
+                additional_service_ids: vec!["other".into()],
                 name: "rule".into(),
                 description: String::new(),
                 enabled: true,

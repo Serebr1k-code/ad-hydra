@@ -208,6 +208,10 @@ export const operations = {
     "method": "POST",
     "path": "/api/v1/auth/refresh"
   },
+  "request_checker_settings": {
+    "method": "GET",
+    "path": "/api/v1/filters/request-checkers"
+  },
   "retry": {
     "method": "POST",
     "path": "/api/v1/farm/runs/{id}/retry"
@@ -299,6 +303,10 @@ export const operations = {
   "update_filter": {
     "method": "PATCH",
     "path": "/api/v1/filters/{id}"
+  },
+  "update_request_checker_settings": {
+    "method": "PUT",
+    "path": "/api/v1/filters/request-checkers"
   },
   "update_service": {
     "method": "PATCH",

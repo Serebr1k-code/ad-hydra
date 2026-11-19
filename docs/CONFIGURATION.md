@@ -38,7 +38,11 @@ In **Filters → Add filter**, choose the service and add a condition. For examp
 
 Choose **Shadow** to count matches while letting requests through. You can also preview the rule on saved traffic from your service. When you choose **Enforce**, an enabled rule applies as soon as Proxy acknowledges the new revision. Check the rule card for the applied status and hit count. To see a blocked conversation in **Traffic**, select **Show blocked**.
 
+Under **Also apply to**, select more services or click **Select all services**. The saved rule has one switch and one hit count. Select all includes the services available at the time you edit the rule. Add future services by editing the rule. The editor lists fields with the same name and type on every selected decoder. A transport-specific action must be valid for every selected service.
+
 HTTP blocking requires a request Proxy can frame before forwarding. For transport limits, closing a TCP connection ends both directions. A UDP drop discards the whole datagram. See [rule behavior](rules-integration.md).
+
+For Python or WASM checks that use private persistent files, see [request checkers](REQUEST_CHECKERS.md).
 
 ## 4. Set retention and service limits
 

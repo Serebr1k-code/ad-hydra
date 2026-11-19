@@ -149,6 +149,9 @@ async fn client_to_server(
                 };
                 c.telemetry
                     .decoder_error(&c.config.id, &c.flow.id, "http_buffer_deadline");
+                if !c.telemetry.request_checks.framing_failure(&c.config) {
+                    return Err(std::io::ErrorKind::PermissionDenied.into());
+                }
                 write_active(c, &mut write, &pending).await?;
                 c.activity();
                 c.flow.forwarded(pending.len(), true);
@@ -168,6 +171,9 @@ async fn client_to_server(
                 .map(|h| h.take_pending())
                 .unwrap_or_default();
             if !pending.is_empty() {
+                if !c.telemetry.request_checks.framing_failure(&c.config) {
+                    return Err(std::io::ErrorKind::PermissionDenied.into());
+                }
                 write_active(c, &mut write, &pending).await?;
                 c.activity();
                 c.flow.forwarded(pending.len(), true);
@@ -222,6 +228,14 @@ async fn client_to_server(
         match inspected {
             Inspected::Frames(frames, fallback) => {
                 for frame in frames {
+                    if !c
+                        .telemetry
+                        .request_checks
+                        .allow(&c.config, &frame.bytes)
+                        .await
+                    {
+                        return Err(std::io::ErrorKind::PermissionDenied.into());
+                    }
                     let action = inspect_message(c, frame.message, frame.bytes.len(), true);
                     match action {
                         Some(Action::Block { http_status }) => {
@@ -244,12 +258,20 @@ async fn client_to_server(
                 if let Some(bytes) = fallback {
                     c.telemetry
                         .decoder_error(&c.config.id, &c.flow.id, "http_decoder_disabled");
+                    if !c.telemetry.request_checks.framing_failure(&c.config) {
+                        return Err(std::io::ErrorKind::PermissionDenied.into());
+                    }
                     write_active(c, &mut write, &bytes).await?;
                     c.flow.forwarded(bytes.len(), true);
                 }
             }
             Inspected::Raw => {
-                if inspect_raw(c, Direction::ClientToServer, &buf[..n]) {
+                let allowed = if c.config.protocol_id == "http" {
+                    c.telemetry.request_checks.framing_failure(&c.config)
+                } else {
+                    c.telemetry.request_checks.allow(&c.config, &buf[..n]).await
+                };
+                if !allowed || inspect_raw(c, Direction::ClientToServer, &buf[..n]) {
                     return Err(std::io::ErrorKind::PermissionDenied.into());
                 }
                 write_active(c, &mut write, &buf[..n]).await?;

@@ -32,7 +32,7 @@ fn invalid(message: &str) -> CompileError {
 #[derive(Debug)]
 struct CompiledRule {
     rule: Rule,
-    transport: Transport,
+    services: std::collections::HashMap<String, Transport>,
     expression: CompiledExpression,
     streaming_size: bool,
 }
@@ -62,10 +62,6 @@ impl CompiledSnapshot {
             {
                 return Err(invalid("unsupported backend or oversized metadata"));
             }
-            let service = services
-                .iter()
-                .find(|s| s.id == rule.service_id)
-                .ok_or_else(|| invalid("unknown service"))?;
             if let Action::RateLimit {
                 key,
                 requests,
@@ -87,30 +83,43 @@ impl CompiledSnapshot {
                 Action::RateLimit { on_exceed, .. } => on_exceed.as_ref(),
                 other => other,
             };
-            match enforcement {
-                Action::DropConnection if service.transport != Transport::Tcp => {
-                    return Err(invalid("drop_connection requires TCP"));
+            if rule.additional_service_ids.len() >= 128 {
+                return Err(invalid("filter service count exceeds 128"));
+            }
+            let mut scope = std::collections::HashMap::new();
+            for id in rule.service_ids() {
+                let service = services
+                    .iter()
+                    .find(|service| service.id == id)
+                    .ok_or_else(|| invalid("unknown service"))?;
+                if scope.insert(id.to_owned(), service.transport).is_some() {
+                    return Err(invalid("duplicate filter service"));
                 }
-                Action::DropDatagram if service.transport != Transport::Udp => {
-                    return Err(invalid("drop_datagram requires UDP"));
+                match enforcement {
+                    Action::DropConnection if service.transport != Transport::Tcp => {
+                        return Err(invalid("drop_connection requires TCP"));
+                    }
+                    Action::DropDatagram if service.transport != Transport::Udp => {
+                        return Err(invalid("drop_datagram requires UDP"));
+                    }
+                    Action::Block { http_status }
+                        if service.transport != Transport::Tcp
+                            || service.protocol_id != "http"
+                            || !(400..=599).contains(http_status) =>
+                    {
+                        return Err(invalid("block requires HTTP/TCP and status 400..599"));
+                    }
+                    Action::Tag { tag } if tag.is_empty() || tag.len() > 128 => {
+                        return Err(invalid("tag must contain 1..128 bytes"));
+                    }
+                    _ => {}
                 }
-                Action::Block { http_status }
-                    if service.transport != Transport::Tcp
-                        || service.protocol_id != "http"
-                        || !(400..=599).contains(http_status) =>
-                {
-                    return Err(invalid("block requires HTTP/TCP and status 400..599"));
-                }
-                Action::Tag { tag } if tag.is_empty() || tag.len() > 128 => {
-                    return Err(invalid("tag must contain 1..128 bytes"));
-                }
-                _ => {}
             }
             let expression = CompiledExpression::compile(&rule.expression, 1, &mut 0)?;
             let streaming_size = references_size(&rule.expression);
             rules.push(CompiledRule {
                 rule,
-                transport: service.transport,
+                services: scope,
                 expression,
                 streaming_size,
             });
@@ -139,8 +148,7 @@ impl CompiledSnapshot {
         for compiled in &self.rules {
             let r = &compiled.rule;
             if !r.enabled
-                || r.service_id != context.service_id
-                || compiled.transport != context.transport
+                || compiled.services.get(context.service_id) != Some(&context.transport)
                 || r.expires_at_ms.is_some_and(|t| context.now_ms >= t)
             {
                 continue;
@@ -177,11 +185,12 @@ impl CompiledSnapshot {
                         Some(FieldValue::Uint(v)) => v.to_string(),
                         _ => continue,
                     };
+                    let bucket = format!("{}:{}{}", r.id.len(), r.id, context.service_id);
                     let exceeded = self
                         .windows
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .exceeds(&r.id, key, *requests, *window_ms, context.now_ms);
+                        .exceeds(&bucket, key, *requests, *window_ms, context.now_ms);
                     if exceeded.is_none() {
                         result.state_exhausted = true;
                     }

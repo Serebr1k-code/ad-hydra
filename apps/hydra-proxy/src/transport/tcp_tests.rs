@@ -80,6 +80,7 @@ async fn raw_byte_filter_matches_across_reads_without_emitting_payload_telemetry
                 rules: vec![Rule {
                     id: "raw-rule".into(),
                     service_id: service.id.clone(),
+                    additional_service_ids: vec![],
                     name: "raw bytes".into(),
                     description: String::new(),
                     enabled: true,
@@ -184,6 +185,7 @@ async fn byte_limit_stops_incomplete_uploads_before_forwarding_the_excess() {
                     rules: vec![Rule {
                         id: "size-limit".into(),
                         service_id: service.id.clone(),
+                        additional_service_ids: vec![],
                         name: "limit".into(),
                         description: String::new(),
                         enabled: true,

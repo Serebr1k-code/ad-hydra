@@ -16,6 +16,7 @@ pub enum Error {
     Auth,
     Missing,
     Status(StatusCode),
+    Checker(StatusCode, String),
     Invalid(anyhow::Error),
 }
 impl From<anyhow::Error> for Error {
@@ -36,6 +37,7 @@ impl IntoResponse for Error {
                 "not_found",
                 "Record not found".into(),
             ),
+            Self::Checker(status, message) => (status, "checker_settings", message),
             Self::Status(status) => (
                 status,
                 if status == StatusCode::SERVICE_UNAVAILABLE {

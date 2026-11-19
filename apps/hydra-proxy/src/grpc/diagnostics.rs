@@ -342,6 +342,7 @@ mod history_tests {
                     rules: vec![Rule {
                         id: "__preview__".into(),
                         service_id: service.id.clone(),
+                        additional_service_ids: vec![],
                         name: "test".into(),
                         description: String::new(),
                         enabled: true,

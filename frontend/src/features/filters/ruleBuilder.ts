@@ -1,6 +1,6 @@
 import {splitDirection,type FilterDirection} from './filterDirection'
 export type FieldKind = 'string' | 'number' | 'boolean' | 'bytes'
-export interface RuleField { value: string; label: string; kind: FieldKind }
+export interface RuleField { value: string; label: string; kind: FieldKind; schemaType?: string }
 export type Join = 'all' | 'any'
 export interface Condition {
   id: string

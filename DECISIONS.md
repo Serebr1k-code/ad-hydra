@@ -359,3 +359,14 @@ Visual rows serialize independent scopes, including condition negation inside ea
 User clarified that HTTP work is the viewer layout, not new decoder support. Render existing parsed HTTP fields as structured messages with headers, query parameters and body formatting, preserving chronology/direction layout and generic field inspection. Format valid JSON by changing whitespace in original tokens; parse-and-stringify would round large integers and drop duplicate keys. Bound input/depth/output/header/query previews and render captured text only through escaped Vue interpolation.
 
 Service names live in Core-only `service_names` metadata (migration26), with optional `ServiceInput.name` for API compatibility. Write name and service snapshot in one audited transaction; omit name on update to preserve it. Stable IDs remain transport/history keys. The Services table exposes the exact requested columns; enable/application status stays in the Name cell. A visible TCP mirroring button opens the existing framing/flag-substitution configuration. Copy framing into its draft to preserve Cancel semantics. No gRPC or protocol decoder changes; deploy Core only.
+
+### Shared filter service scope
+
+A filter keeps its UUID, author, switch, priority, and aggregate hit count when it is attached to more than one service. Its existing `service_id` is the first service. The optional OpenAPI `additional_service_ids` and repeated Protobuf field 13 add the other services to the same rule. Old records and single-service clients can omit the new field. No database migration is needed because rules are stored as JSON.
+
+The editor intersects field paths and types across its selected decoders. The compiler rejects duplicate or unknown services and validates transport-specific actions against every selected service. Rate windows stay separate by service. A saved-message test uses the actual service associated with that message. Upgrade Core and Proxy together before applying shared rules because an older Proxy does not recognize field 13.
+
+
+### Networkless Python and WASI request checkers
+
+Proxy can optionally launch a persistent Python or WASI sandbox for configured services. It evaluates client input before forwarding and uses a configured fallback on errors. One worker processes one framed input at a time, and concurrent requests use the fallback instead of entering a queue. Each worker gets a private writable directory mounted at `/state`. The host directory is keyed by checker ID under the Proxy state directory. Stateful scripts retain files independently of worker or Proxy restarts. The protobuf status additions expose an error count and the latest safe diagnostic string. Proxy persists console policy edits atomically with a separate revision. The host administrator registers the actual Python or WASI program in Proxy JSON. See [Request checkers](docs/REQUEST_CHECKERS.md).

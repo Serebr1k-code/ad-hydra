@@ -10,6 +10,8 @@ import "google/protobuf/timestamp.proto";
 service ProxyControl {
   rpc GetStatus(GetStatusRequest) returns (ProxyStatus);
   rpc ConfigureHistory(ConfigureHistoryRequest) returns (ConfigureHistoryReply);
+  rpc GetRequestCheckerSettings(GetRequestCheckerSettingsRequest) returns (RequestCheckerSettings);
+  rpc SetRequestCheckerSettings(SetRequestCheckerSettingsRequest) returns (RequestCheckerSettings);
   rpc ApplyConfigSnapshot(ApplyConfigSnapshotRequest) returns (ApplyResult);
   rpc ApplyServiceSnapshot(ApplyServiceSnapshotRequest) returns (ApplyResult);
   rpc ApplyRuleSnapshot(ApplyRuleSnapshotRequest) returns (ApplyResult);
@@ -154,6 +156,7 @@ message Rule {
   string description = 10;
   RuleActionConfig action_config = 11;
   google.protobuf.Timestamp expires_at = 12;
+  repeated string additional_service_ids = 13;
 }
 
 message ServiceConfig {
@@ -215,6 +218,27 @@ message ProxyStatus {
   int32 history_compression_level = 16;
   repeated ServiceMetrics service_metrics = 17;
   ForwardingStats forwarding_stats = 18;
+  uint64 request_checker_errors = 19;
+  string last_request_checker_error = 20;
+}
+message RequestCheckerPolicy {
+  string id = 1;
+  repeated string services = 2;
+  uint64 timeout_ms = 3;
+  bool allow_on_error = 4;
+}
+message RequestCheckerSettings {
+  uint64 revision = 1;
+  repeated RequestCheckerPolicy policies = 2;
+}
+message GetRequestCheckerSettingsRequest {
+  Actor actor = 1;
+  string request_id = 2;
+}
+message SetRequestCheckerSettingsRequest {
+  RequestCheckerSettings settings = 1;
+  Actor actor = 2;
+  string request_id = 3;
 }
 message ApplyServiceSnapshotRequest {
   uint64 revision = 1;

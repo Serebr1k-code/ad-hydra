@@ -54,7 +54,7 @@ export function fieldsForService(service: FieldService, catalog: DecoderCatalog)
   }
   const decoded = schema.flatMap(field => {
     const fieldKind = kind(field.field_type)
-    return fieldKind ? [{ value: field.path, label: labels[field.path] ?? field.path, kind: fieldKind }] : []
+    return fieldKind ? [{ value: field.path, label: labels[field.path] ?? field.path, kind: fieldKind, schemaType: field.field_type }] : []
   })
   const fields = [...universal, ...decoded]
   return [...new Map(fields.map(field => [field.value, field])).values()]

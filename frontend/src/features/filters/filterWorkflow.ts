@@ -20,9 +20,9 @@ export async function enforceSavedFilter(call: Call, id: string) {
 }
 
 async function writeEnforce(call: Call, path: string, saved: SavedFilter) {
-  const { service_id, name, description, enabled, priority, expression, action, backend, expires_at_ms } = saved
+  const { service_id, additional_service_ids, name, description, enabled, priority, expression, action, backend, expires_at_ms } = saved
   await call(path, 'PATCH', {
-    service_id, name, description, enabled, priority, expression, action, backend, expires_at_ms,
+    service_id, additional_service_ids, name, description, enabled, priority, expression, action, backend, expires_at_ms,
     mode: 'enforce', expected_revision: saved.desired_revision,
   })
 }

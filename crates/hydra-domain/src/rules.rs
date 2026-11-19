@@ -95,6 +95,8 @@ pub enum Action {
 pub struct Rule {
     pub id: String,
     pub service_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_service_ids: Vec<String>,
     pub name: String,
     pub description: String,
     pub enabled: bool,
@@ -104,6 +106,16 @@ pub struct Rule {
     pub action: Action,
     pub backend: String,
     pub expires_at_ms: Option<u64>,
+}
+impl Rule {
+    pub fn service_ids(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.service_id.as_str())
+            .chain(self.additional_service_ids.iter().map(String::as_str))
+    }
+
+    pub fn applies_to(&self, service_id: &str) -> bool {
+        self.service_ids().any(|id| id == service_id)
+    }
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -81,6 +81,7 @@ impl Control {
         &self,
         actor: Actor,
         id: String,
+        service_id: String,
         fields: std::collections::BTreeMap<String, hydra_domain::FieldValue>,
         request: String,
     ) -> anyhow::Result<serde_json::Value> {
@@ -88,7 +89,7 @@ impl Control {
             serde_json::to_vec(&fields)?.len() <= 65536,
             "test fields too large"
         );
-        self.db.run(move|db|{let tx=db.transaction()?;let desired=load(&tx)?;let mut rule=desired.rules.rules.iter().find(|r|r.id==id).cloned().ok_or_else(||anyhow::anyhow!("filter not found"))?;let hash=fingerprint(&rule)?;rule.enabled=true;rule.mode=hydra_domain::Mode::Shadow;let service=desired.services.services.iter().find(|s|s.id==rule.service_id).ok_or_else(||anyhow::anyhow!("service not found"))?;let snapshot=hydra_filter_engine::CompiledSnapshot::compile(RuleSnapshot{revision:desired.rules.revision,rules:vec![rule]},&desired.services.services)?;let evaluated=snapshot.evaluate(&hydra_domain::EvaluationContext{service_id:&service.id,transport:service.transport,fields:&fields,now_ms:crate::modules::auth::now() as u64*1000,safe_http:service.protocol_id=="http"});tx.execute("INSERT INTO rule_tests VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET fingerprint=excluded.fingerprint,tested_at=excluded.tested_at",params![id,hash,crate::modules::auth::now()])?;audit::append(&tx,&actor,"filter.test",&id,&request,true,crate::modules::auth::now())?;tx.commit()?;Ok(serde_json::json!({"matched":!evaluated.hits.is_empty(),"mode":"shadow","forwarding_performed":false}))}).await
+        self.db.run(move|db|{let tx=db.transaction()?;let desired=load(&tx)?;let mut rule=desired.rules.rules.iter().find(|r|r.id==id).cloned().ok_or_else(||anyhow::anyhow!("filter not found"))?;let hash=fingerprint(&rule)?;rule.enabled=true;rule.mode=hydra_domain::Mode::Shadow;anyhow::ensure!(rule.applies_to(&service_id),"saved message is outside filter services");let service=desired.services.services.iter().find(|s|s.id==service_id).ok_or_else(||anyhow::anyhow!("service not found"))?;let snapshot=hydra_filter_engine::CompiledSnapshot::compile(RuleSnapshot{revision:desired.rules.revision,rules:vec![rule]},&desired.services.services)?;let evaluated=snapshot.evaluate(&hydra_domain::EvaluationContext{service_id:&service.id,transport:service.transport,fields:&fields,now_ms:crate::modules::auth::now() as u64*1000,safe_http:service.protocol_id=="http"});tx.execute("INSERT INTO rule_tests VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET fingerprint=excluded.fingerprint,tested_at=excluded.tested_at",params![id,hash,crate::modules::auth::now()])?;audit::append(&tx,&actor,"filter.test",&id,&request,true,crate::modules::auth::now())?;tx.commit()?;Ok(serde_json::json!({"matched":!evaluated.hits.is_empty(),"mode":"shadow","forwarding_performed":false}))}).await
     }
 
     pub async fn open(auth: AuthState) -> anyhow::Result<Self> {

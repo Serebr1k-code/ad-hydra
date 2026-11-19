@@ -10,12 +10,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 
 interface Flow { flow_id: string; occurred_at: string; client: { ip: string; port: number } }
 interface Message { message_id: string; direction: number; message_type: string; occurred_at: string; fields: Record<string, { value: unknown }> }
-const props = defineProps<{ open: boolean; filter?: Pick<FilterRecord, 'id' | 'name' | 'service_id'> }>()
+const props = defineProps<{ open: boolean; filter?: Pick<FilterRecord, 'id' | 'name' | 'service_id' | 'additional_service_ids'>; serviceNames: Record<string, string> }>()
 const emit = defineEmits<{ 'update:open': [value: boolean]; enforced: [] }>()
 const isOpen = computed({ get: () => props.open, set: value => { if (!running.value) emit('update:open', value) } })
 const flows = ref<Flow[]>([])
 const messages = ref<Message[]>([])
 const flowId = ref('')
+const serviceId = ref('')
+const serviceIds = computed(() => props.filter ? [props.filter.service_id, ...(props.filter.additional_service_ids ?? [])] : [])
 const messageId = ref('')
 const cursor = ref<number | null>(null)
 const loading = ref(false)
@@ -35,7 +37,7 @@ async function loadFlows(older = false) {
   loading.value = true; error.value = ''; result.value = ''
   if (!older) { flows.value = []; flowId.value = ''; messages.value = []; messageId.value = '' }
   try {
-    const page = await api<{ items: Flow[]; next_cursor: number | null }>(`/traffic/flows?service_id=${encodeURIComponent(filter.service_id)}&newest_first=true&limit=25${older && cursor.value ? '&after=' + encodeURIComponent(cursor.value) : ''}`)
+    const page = await api<{ items: Flow[]; next_cursor: number | null }>(`/traffic/flows?service_id=${encodeURIComponent(serviceId.value)}&newest_first=true&limit=25${older && cursor.value ? '&after=' + encodeURIComponent(cursor.value) : ''}`)
     if (version !== generation || !props.open) return
     flows.value = (older ? [...flows.value, ...page.items] : page.items).slice(-100)
     cursor.value = page.next_cursor
@@ -45,8 +47,16 @@ async function loadFlows(older = false) {
 }
 watch(() => [props.open, props.filter?.id] as const, ([open]) => {
   ++generation; ++messageGeneration
-  if (open) void loadFlows()
+  if (open) {
+    serviceId.value = props.filter?.service_id ?? ''
+    if (serviceId.value) void loadFlows()
+  }
 })
+function selectService(value: unknown) {
+  if (typeof value !== 'string' || value === serviceId.value) return
+  serviceId.value = value
+  void loadFlows()
+}
 watch(flowId, async id => {
   const version = ++messageGeneration
   messages.value = []; messageId.value = ''; result.value = ''; error.value = ''
@@ -82,10 +92,14 @@ async function run(enforce: boolean) {
     <DialogContent class="max-h-[85vh] max-w-2xl overflow-y-auto" @interact-outside="event => { if (running) event.preventDefault() }" @escape-key-down="event => { if (running) event.preventDefault() }">
       <DialogHeader>
         <DialogTitle>Test filter: {{ filter?.name }}</DialogTitle>
-        <DialogDescription>Select captured traffic from this service. Testing evaluates saved fields without sending network traffic. Test and enforce activates the saved rule only when it matches.</DialogDescription>
+        <DialogDescription>Select captured traffic from one of the filter services. Testing evaluates saved fields without sending network traffic. Test and enforce activates the saved rule only when it matches.</DialogDescription>
       </DialogHeader>
       <div class="space-y-3">
         <p class="text-sm">Testing is optional. You can save or enforce rules directly from the filter list without selecting captured traffic.</p>
+        <Select v-if="serviceIds.length > 1" :model-value="serviceId" :disabled="loading || running" @update:model-value="selectService">
+          <SelectTrigger aria-label="Test service"><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem v-for="id in serviceIds" :key="id" :value="id">{{ serviceNames[id] ?? id }}</SelectItem></SelectContent>
+        </Select>
         <div class="flex gap-2"><Button variant="outline" :disabled="loading || running" @click="loadFlows()">Refresh traffic</Button><Button v-if="cursor" variant="outline" :disabled="loading || running" @click="loadFlows(true)">Older sessions</Button></div>
         <p v-if="loading" role="status">Loading captured traffic…</p>
         <p v-else-if="!flows.length" role="status">No captured sessions for this service. Send a normal request through its proxy port, then refresh traffic.</p>

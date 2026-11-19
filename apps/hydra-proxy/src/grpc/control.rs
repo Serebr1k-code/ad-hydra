@@ -33,7 +33,10 @@ impl ProxyControl for Rpc {
                 restored: store.restored.load(Ordering::Relaxed),
                 errors: store.errors.load(Ordering::Relaxed),
             });
+        let (request_checker_errors, last_request_checker_error) = t.request_checks.status();
         Ok(Response::new(v1::ProxyStatus {
+            request_checker_errors,
+            last_request_checker_error,
             service_metrics,
             forwarding_stats,
             proxy_instance_id: t.epoch.clone(),
@@ -90,6 +93,79 @@ impl ProxyControl for Rpc {
                 .collect(),
         }))
     }
+    async fn get_request_checker_settings(
+        &self,
+        request: Request<v1::GetRequestCheckerSettingsRequest>,
+    ) -> Result<Response<v1::RequestCheckerSettings>, Status> {
+        let request = request.into_inner();
+        check_provenance(request.actor.as_ref(), &request.request_id)?;
+        Ok(Response::new(checker_settings(
+            self.state.telemetry.request_checks.settings(),
+        )))
+    }
+
+    async fn set_request_checker_settings(
+        &self,
+        request: Request<v1::SetRequestCheckerSettingsRequest>,
+    ) -> Result<Response<v1::RequestCheckerSettings>, Status> {
+        use crate::request_checks::{Fallback, Policy, Settings, StaleRevision};
+        let request = request.into_inner();
+        check_provenance(request.actor.as_ref(), &request.request_id)?;
+        let requested = request
+            .settings
+            .ok_or_else(|| Status::invalid_argument("missing checker settings"))?;
+        if requested.policies.len() > 4 || requested.policies.iter().any(|p| p.services.len() > 128)
+        {
+            return Err(Status::invalid_argument(
+                "checker settings exceed configured limits",
+            ));
+        }
+        for policy in &requested.policies {
+            for id in &policy.services {
+                let service = self
+                    .state
+                    .get_service(id)
+                    .await
+                    .ok_or_else(|| Status::invalid_argument("unknown checker service"))?;
+                if service.forwarding.is_some() {
+                    return Err(Status::invalid_argument(
+                        "request checkers require an ordinary upstream",
+                    ));
+                }
+            }
+        }
+        let telemetry = self.state.telemetry.clone();
+        let settings = Settings {
+            revision: requested.revision,
+            policies: requested
+                .policies
+                .into_iter()
+                .map(|policy| Policy {
+                    id: policy.id,
+                    services: policy.services,
+                    timeout_ms: policy.timeout_ms,
+                    on_error: if policy.allow_on_error {
+                        Fallback::Allow
+                    } else {
+                        Fallback::Block
+                    },
+                })
+                .collect(),
+        };
+        let applied =
+            tokio::task::spawn_blocking(move || telemetry.request_checks.configure(settings))
+                .await
+                .map_err(|_| Status::internal("checker configuration task failed"))?
+                .map_err(|error| {
+                    if error.is::<StaleRevision>() {
+                        Status::aborted(error.to_string())
+                    } else {
+                        Status::invalid_argument(error.to_string())
+                    }
+                })?;
+        Ok(Response::new(checker_settings(applied)))
+    }
+
     async fn configure_history(
         &self,
         request: Request<v1::ConfigureHistoryRequest>,
@@ -361,6 +437,22 @@ impl ProxyControl for Rpc {
         Ok(Response::new(result))
     }
 }
+fn checker_settings(settings: crate::request_checks::Settings) -> v1::RequestCheckerSettings {
+    v1::RequestCheckerSettings {
+        revision: settings.revision,
+        policies: settings
+            .policies
+            .into_iter()
+            .map(|policy| v1::RequestCheckerPolicy {
+                id: policy.id,
+                services: policy.services,
+                timeout_ms: policy.timeout_ms,
+                allow_on_error: matches!(policy.on_error, crate::request_checks::Fallback::Allow),
+            })
+            .collect(),
+    }
+}
+
 #[allow(clippy::result_large_err)] // tonic trait boundary uses Status by value.
 pub(super) fn check_provenance(actor: Option<&v1::Actor>, request: &str) -> Result<(), Status> {
     let actor = actor.ok_or_else(|| Status::invalid_argument("actor required"))?;
