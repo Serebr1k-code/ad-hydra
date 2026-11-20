@@ -918,3 +918,55 @@ async fn saved_direction_scope_uses_message_metadata_for_legacy_decoder_fields()
     drop(traffic);
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[tokio::test]
+async fn flow_detail_exposes_only_allowlisted_decoder_warnings() {
+    let (traffic, path) = setup().await;
+    traffic
+        .ingest(proto::EventBatch {
+            events: vec![
+                proto::Event {
+                    event_id: "decoder-flow-open".into(),
+                    flow_id: "decoder-flow".into(),
+                    service_id: "svc".into(),
+                    payload: Some(Payload::FlowOpened(proto::FlowOpened {
+                        transport: 1,
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                },
+                proto::Event {
+                    event_id: "decoder-warning".into(),
+                    flow_id: "decoder-flow".into(),
+                    service_id: "svc".into(),
+                    payload: Some(Payload::Loss(proto::EventLoss {
+                        count: 1,
+                        reason: "http_response_decoder_disabled".into(),
+                    })),
+                    ..Default::default()
+                },
+                proto::Event {
+                    event_id: "unknown-warning".into(),
+                    flow_id: "decoder-flow".into(),
+                    service_id: "svc".into(),
+                    payload: Some(Payload::Loss(proto::EventLoss {
+                        count: 1,
+                        reason: "private decoder detail".into(),
+                    })),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let detail = traffic.flow("decoder-flow".into()).await.unwrap().unwrap();
+    assert_eq!(
+        detail["decoder_warnings"],
+        serde_json::json!(["http_response_decoder_disabled"])
+    );
+    assert!(!detail.to_string().contains("private decoder detail"));
+    drop(traffic);
+    std::fs::remove_dir_all(path).unwrap();
+}

@@ -251,11 +251,15 @@ impl Traffic {
         let Some(mut value) = self.one("traffic_flows", id.clone()).await? else {
             return Ok(None);
         };
-        let (findings,has_flag)=self.auth.db.run(move |db| {
+        let (findings,has_flag,decoder_warnings)=self.auth.db.run(move |db| {
             let mut statement=db.prepare("SELECT data FROM traffic_events WHERE flow_id=?1 AND kind='rule_hit' ORDER BY seq LIMIT 101")?;
             let findings=statement.query_map([&id],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
-            let has_flag:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM flag_events WHERE flow_id=?1) OR EXISTS(SELECT 1 FROM traffic_favorites WHERE flow_id=?1 AND has_flag=1)",[id],|r|r.get(0))?;
-            Ok((findings,has_flag))
+            let has_flag:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM flag_events WHERE flow_id=?1) OR EXISTS(SELECT 1 FROM traffic_favorites WHERE flow_id=?1 AND has_flag=1)",[&id],|r|r.get(0))?;
+            // Expose only known decoder status codes; event_loss also carries arbitrary
+            // diagnostic reasons that must not be returned from flow detail.
+            let mut statement=db.prepare("SELECT DISTINCT json_extract(data,'$.reason') FROM traffic_events WHERE flow_id=?1 AND kind='event_loss' AND json_extract(data,'$.reason') IN ('http_response_decoder_disabled','http_decoder_disabled','protocol_decoder_disabled') ORDER BY 1 LIMIT 3")?;
+            let warnings=statement.query_map([&id],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+            Ok((findings,has_flag,warnings))
         }).await?;
         let blocked = self
             .auth
@@ -280,6 +284,8 @@ impl Traffic {
             || favorite.map(|v| v.1).unwrap_or(false))
         .into();
         value["blocked"] = blocked.into();
+        value["decoder_warnings"] =
+            Value::Array(decoder_warnings.into_iter().map(Value::String).collect());
         value["findings_truncated"] = (findings.len() > 100).into();
         value["rule_hits"] = Value::Array(
             findings

@@ -2,7 +2,11 @@
 mod critical;
 use critical::CriticalSpool;
 use hydra_wire::v1::{self, event::Payload};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Barrier},
+    time::Duration,
+};
 fn path() -> PathBuf {
     std::env::temp_dir().join(format!("hydra-critical-{}", uuid::Uuid::new_v4()))
 }
@@ -28,6 +32,32 @@ async fn wait_events(spool: &Arc<CriticalSpool>, count: usize) -> Vec<v1::EventB
     })
     .await
     .unwrap()
+}
+async fn wait_control_queue(spool: &Arc<CriticalSpool>, count: usize) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while spool.control_queue_len() != count {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+struct WorkerRelease {
+    gate: Arc<Barrier>,
+    released: bool,
+}
+impl WorkerRelease {
+    fn release(&mut self) {
+        if !self.released {
+            self.released = true;
+            self.gate.wait();
+        }
+    }
+}
+impl Drop for WorkerRelease {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 #[tokio::test]
 async fn persisted_flag_replays_after_restart_and_ack_survives_restart() {
@@ -156,6 +186,88 @@ async fn failed_ack_write_preserves_unacknowledged_events_for_restart() {
     drop(spool);
     let spool = CriticalSpool::open(path.clone()).unwrap();
     assert_eq!(spool.replay(&epoch, 0, 32).await.unwrap(), batches);
+    drop(spool);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn saturated_emit_queue_does_not_block_replay_or_ack() {
+    let path = path();
+    let gate = Arc::new(Barrier::new(2));
+    let spool = CriticalSpool::open_paused(path.clone(), gate.clone()).unwrap();
+    let mut release = WorkerRelease {
+        gate,
+        released: false,
+    };
+    let epoch = spool.epoch().to_owned();
+
+    // The worker cannot consume while both bounded queues are filled. Admission is
+    // deterministic, with no timing window between producing and saturation.
+    for index in 0..critical::QUEUE_LIMIT {
+        assert!(spool.try_emit(flag(&format!("FLAG{{queued-{index}}}"))));
+    }
+    assert!(!spool.try_emit(flag("FLAG{overflow}")));
+
+    let replay_spool = spool.clone();
+    let replay = tokio::spawn(async move { replay_spool.replay(&epoch, 0, 8).await });
+    wait_control_queue(&spool, 1).await;
+    let ack_epoch = spool.epoch().to_owned();
+    let ack_spool = spool.clone();
+    let ack = tokio::spawn(async move { ack_spool.ack(&ack_epoch, 0).await });
+    wait_control_queue(&spool, 2).await;
+
+    release.release();
+    assert!(replay.await.unwrap().unwrap().is_empty());
+    assert_eq!(ack.await.unwrap().unwrap(), 0);
+    assert_eq!(
+        wait_events(&spool, critical::QUEUE_LIMIT + 1).await.len(),
+        critical::QUEUE_LIMIT + 1
+    );
+
+    drop(spool);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn control_backpressure_stays_bounded_when_waiting_calls_are_cancelled() {
+    let path = path();
+    let gate = Arc::new(Barrier::new(2));
+    let spool = CriticalSpool::open_paused(path.clone(), gate.clone()).unwrap();
+    let mut release = WorkerRelease {
+        gate,
+        released: false,
+    };
+    let epoch = spool.epoch().to_owned();
+
+    let pending = (0..critical::CONTROL_QUEUE_LIMIT)
+        .map(|_| {
+            let spool = spool.clone();
+            let epoch = epoch.clone();
+            tokio::spawn(async move { spool.replay(&epoch, 0, 1).await })
+        })
+        .collect::<Vec<_>>();
+    wait_control_queue(&spool, critical::CONTROL_QUEUE_LIMIT).await;
+
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let waiting_spool = spool.clone();
+    let waiting_epoch = epoch.clone();
+    let waiting = tokio::spawn(async move {
+        let _ = started_tx.send(());
+        waiting_spool.replay(&waiting_epoch, 0, 1).await
+    });
+    started_rx.await.unwrap();
+    tokio::task::yield_now().await;
+    assert_eq!(spool.control_queue_len(), critical::CONTROL_QUEUE_LIMIT);
+    assert!(!waiting.is_finished());
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+    assert_eq!(spool.control_queue_len(), critical::CONTROL_QUEUE_LIMIT);
+
+    release.release();
+    for call in pending {
+        assert!(call.await.unwrap().unwrap().is_empty());
+    }
+
     drop(spool);
     std::fs::remove_dir_all(path).unwrap();
 }

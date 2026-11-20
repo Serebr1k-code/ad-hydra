@@ -4,12 +4,37 @@ export function text(value: unknown) { return typeof value === 'string' || typeo
 export function direction(value: unknown) { return value === 1 ? 'Client → server' : value === 2 ? 'Server → client' : 'Unknown direction' }
 export function transportLabel(value:unknown):string { return value===1?'TCP':value===2?'UDP':'Unknown transport' }
 export function timestamp(value: unknown) { return typeof value === 'number' && Number.isFinite(value) ? new Date(value).toISOString() : 'Unknown time' }
+/** Safe labels for known proxy socket failures; unknown error text is never rendered. */
+export function closureReasonText(value: unknown): string | undefined {
+ const messages: Record<string,string> = {
+  'io:ConnectionRefused':'Upstream refused the connection.',
+  'io:BrokenPipe':'Connection ended while Hydra was writing to a peer.',
+  'io:ConnectionReset':'A peer reset the connection.',
+  'io:ConnectionAborted':'A peer aborted the connection.',
+  'io:TimedOut':'The connection timed out.',
+  'io:UnexpectedEof':'A peer ended the connection unexpectedly.',
+ }
+ return typeof value==='string'&&Object.hasOwn(messages,value)?messages[value]:undefined
+}
+/** Safe display copy for an allowlisted decoder warning returned by flow detail. */
+export function decoderWarningText(value: unknown): string | undefined {
+ return Array.isArray(value)&&value.includes('http_response_decoder_disabled')
+  ? 'The HTTP response decoder stopped; parsed response content may be incomplete.'
+  : undefined
+}
 export function endpoint(value: unknown) { const v=record(value), ip=text(v.ip); return ip ? `${ip.includes(':')?'['+ip+']':ip}:${text(v.port)}` : 'Unknown endpoint' }
 export function flowRows(page: Page) { return page.items.map(item => ({ ...item, closed:item.closed, favorite:item.favorite===true, raw_history_state:text(item.raw_history_state), decoded_incomplete:item.decoded_incomplete===true, blocked:item.blocked===true, has_flag:item.has_flag===true, flow_id:text(item.flow_id), service_id:text(item.service_id), transport:Number(item.transport??0), client:endpoint(item.client), destination:endpoint(item.upstream), started:timestamp(item.occurred_ms), state:item.closed?'Closed':'Open', bytesUp:text(record(item.closed).bytes_client_to_server), bytesDown:text(record(item.closed).bytes_server_to_client) })) }
 export type Flow = ReturnType<typeof flowRows>[number]
 /** A favourite can outlive its last lifecycle event after a Proxy interruption. */
-export function canReadSavedHistory(flow: Pick<Flow,'state'|'favorite'|'raw_history_state'> | undefined): boolean {
- return flow?.state==='Closed'||Boolean(flow?.favorite&&['ready','partial'].includes(flow.raw_history_state))
+export function canReadSavedHistory(flow: Pick<Flow,'state'|'favorite'|'raw_history_state'> | undefined, historyAvailable = false): boolean {
+ return historyAvailable||flow?.state==='Closed'||Boolean(flow?.favorite&&['ready','partial'].includes(flow.raw_history_state))
+}
+export type FlowByteTotals = {bytesUp:string;bytesDown:string}
+/** Show counters only when Core or a completed Proxy history supplies both directions. */
+export function flowByteTotals(flow: Pick<Flow,'closed'|'bytesUp'|'bytesDown'> | undefined, history?: Pick<FlowHistory,'closed_at_ms'|'bytes_client_to_server'|'bytes_server_to_client'>): FlowByteTotals | undefined {
+ if(history&&history.closed_at_ms>0)return {bytesUp:text(history.bytes_client_to_server),bytesDown:text(history.bytes_server_to_client)}
+ if(flow?.closed&&flow.bytesUp!==''&&flow.bytesDown!=='')return {bytesUp:flow.bytesUp,bytesDown:flow.bytesDown}
+ return undefined
 }
 export function mergeFlows(current: Flow[], incoming: Flow[], older = false): Flow[] {
  const unique = new Map<string, Flow>()
@@ -20,9 +45,9 @@ export function mergeFlows(current: Flow[], incoming: Flow[], older = false): Fl
 }
 export function messageRows(page: Page) { return page.items.map(item => ({ ...item, blocked:item.blocked===true, message_id:text(item.message_id), stream_sequence:item.stream_sequence, occurred_ms:item.occurred_ms, direction:item.direction, message_type:text(item.message_type), protocol_id:text(item.protocol_id), fields:record(item.fields), truncated:item.truncated===true })) }
 export type Message = ReturnType<typeof messageRows>[number]
-/** Native raw byte summaries describe read sizes; they are not decoded payload messages. */
-export function onlyRawSummaryMessages(messages: Message[], protocolId: string): boolean {
- return protocolId==='raw'&&messages.length>0&&messages.every(message=>message.protocol_id==='transfer'&&message.message_type==='byte_summary')
+/** Saved native transfer summaries describe read sizes, independent of the service's current profile. */
+export function onlyRawSummaryMessages(messages: Message[]): boolean {
+ return messages.length>0&&messages.every(message=>message.protocol_id==='transfer'&&message.message_type==='byte_summary')
 }
 export function serviceProtocol(service:{id:string;protocol_id:string},activations:{service_id:string;id:string;version:string;applied:boolean}[]):string {
  const active=activations.find(item=>item.service_id===service.id&&item.applied)

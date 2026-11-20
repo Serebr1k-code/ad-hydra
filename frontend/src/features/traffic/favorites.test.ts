@@ -33,3 +33,8 @@ test('interrupted favourite snapshots remain readable even without a flow-close 
   expect(canReadSavedHistory({state:'Open',favorite:true,raw_history_state:'pending'})).toBe(false)
   expect(canReadSavedHistory({state:'Open',favorite:false,raw_history_state:'partial'})).toBe(false)
 })
+
+test('completed proxy history is readable when Core still lists the flow as open', () => {
+  expect(canReadSavedHistory({ state: 'Open', favorite: false, raw_history_state: 'not_saved' }, true)).toBe(true)
+  expect(canReadSavedHistory({ state: 'Open', favorite: false, raw_history_state: 'not_saved' }, false)).toBe(false)
+})

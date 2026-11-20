@@ -19,12 +19,12 @@ use tokio::sync::oneshot;
 
 const LIVE_LIMIT: usize = 2 * 1024 * 1024;
 const EVENT_LIMIT: usize = 64 * 1024;
-const QUEUE_LIMIT: usize = 64;
+pub(super) const QUEUE_LIMIT: usize = 64;
+pub(super) const CONTROL_QUEUE_LIMIT: usize = 8;
 const HEADER: usize = 8 + 36 + 8 + 8;
 const MAGIC: &[u8; 8] = b"HYDRAC01";
 
-enum Command {
-    Emit(Box<v1::Event>),
+enum ControlCommand {
     Replay(
         String,
         u64,
@@ -47,13 +47,32 @@ impl Metrics {
 }
 pub struct CriticalSpool {
     epoch: String,
-    tx: Option<SyncSender<Command>>,
+    emit_tx: Option<SyncSender<Box<v1::Event>>>,
+    control_tx: Option<tokio::sync::mpsc::Sender<ControlCommand>>,
+    wake: thread::Thread,
     metrics: Arc<Metrics>,
     worker: Option<thread::JoinHandle<()>>,
 }
 impl CriticalSpool {
     /// Startup-only blocking filesystem access. The directory must have one owner.
     pub fn open(path: PathBuf) -> io::Result<Arc<Self>> {
+        Self::open_inner(path, None)
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn open_paused(
+        path: PathBuf,
+        worker_gate: Arc<std::sync::Barrier>,
+    ) -> io::Result<Arc<Self>> {
+        Self::open_inner(path, Some(worker_gate))
+    }
+
+    fn open_inner(
+        path: PathBuf,
+        #[cfg(test)] worker_gate: Option<Arc<std::sync::Barrier>>,
+        #[cfg(not(test))] _worker_gate: Option<()>,
+    ) -> io::Result<Arc<Self>> {
         use std::os::unix::fs::MetadataExt;
         for ancestor in path.ancestors().filter(|p| !p.as_os_str().is_empty()) {
             if ancestor.exists() && fs::symlink_metadata(ancestor)?.file_type().is_symlink() {
@@ -83,61 +102,74 @@ impl CriticalSpool {
         let metrics = Arc::new(Metrics::default());
         metrics.bytes.store(disk.size() as u64, Ordering::Relaxed);
         let worker_metrics = metrics.clone();
-        let (tx, rx) = mpsc::sync_channel(QUEUE_LIMIT);
-        let worker = thread::Builder::new().name("critical-spool".into()).spawn(move || {
-            loop {
-                match rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(Command::Emit(event)) => {
-                        if let Err(error) = disk.append(*event) {
-                            worker_metrics.loss();
-                            let dropped = worker_metrics.dropped.load(Ordering::Relaxed);
-                            if dropped.is_power_of_two() {
-                                tracing::warn!(kind = ?error.kind(), dropped, "critical spool rejected event");
-                            }
+        let (emit_tx, emit_rx) = mpsc::sync_channel::<Box<v1::Event>>(QUEUE_LIMIT);
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(CONTROL_QUEUE_LIMIT);
+        let worker = thread::Builder::new()
+            .name("critical-spool".into())
+            .spawn(move || {
+                #[cfg(test)]
+                if let Some(gate) = worker_gate {
+                    gate.wait();
+                }
+                loop {
+                    // Process one command from each lane per pass so a continuous control
+                    // stream cannot starve critical event persistence.
+                    let mut did_work = false;
+                    let mut control_disconnected = false;
+                    let mut emit_disconnected = false;
+                    match control_rx.try_recv() {
+                        Ok(command) => {
+                            process_control(command, &mut disk);
+                            did_work = true;
+                        }
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                            control_disconnected = true
                         }
                     }
-                    Ok(Command::Replay(epoch, after, limit, reply)) => {
-                        if disk.poisoned {
-                            let _ = reply.send(Err(io::Error::other("critical spool durability uncertain; restart required")));
-                            continue;
+                    match emit_rx.try_recv() {
+                        Ok(event) => {
+                            process_emit(*event, &mut disk, &worker_metrics);
+                            did_work = true;
                         }
-                        let after = if epoch == disk.epoch { after } else { 0 };
-                        let batches = disk.events.iter().enumerate()
-                            .filter(|(index, _)| disk.ack + 1 + *index as u64 > after)
-                            .take(limit.clamp(1, 256))
-                            .map(|(index, event)| v1::EventBatch {
-                                proxy_epoch_id: disk.epoch.clone(),
-                                first_sequence: disk.ack + 1 + index as u64,
-                                critical: true, events: vec![event.clone()],
-                            }).collect();
-                        let _ = reply.send(Ok(batches));
+                        Err(mpsc::TryRecvError::Empty) => {}
+                        Err(mpsc::TryRecvError::Disconnected) => emit_disconnected = true,
                     }
-                    Ok(Command::Ack(epoch, through, reply)) => {
-                        let _ = reply.send(disk.acknowledge(&epoch, through));
+                    if !did_work {
+                        if control_disconnected && emit_disconnected {
+                            break;
+                        }
+                        thread::park_timeout(Duration::from_millis(100));
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    // Keep loss pending while quota/disk is unavailable; retry after ACK.
+                    let count = worker_metrics.pending_loss.swap(0, Ordering::Relaxed);
+                    if count > 0 {
+                        let loss = v1::Event {
+                            event_id: uuid::Uuid::new_v4().to_string(),
+                            occurred_at: Some(SystemTime::now().into()),
+                            payload: Some(Payload::Loss(v1::EventLoss {
+                                count,
+                                reason: "critical_queue_quota_or_disk_loss".into(),
+                            })),
+                            ..Default::default()
+                        };
+                        if disk.append(loss).is_err() {
+                            worker_metrics
+                                .pending_loss
+                                .fetch_add(count, Ordering::Relaxed);
+                        }
+                    }
+                    worker_metrics
+                        .bytes
+                        .store(disk.size() as u64, Ordering::Relaxed);
                 }
-                // Keep loss pending while quota/disk is unavailable; retry after ACK.
-                let count = worker_metrics.pending_loss.swap(0, Ordering::Relaxed);
-                if count > 0 {
-                    let loss = v1::Event {
-                        event_id: uuid::Uuid::new_v4().to_string(),
-                        occurred_at: Some(SystemTime::now().into()),
-                        payload: Some(Payload::Loss(v1::EventLoss {
-                            count, reason: "critical_queue_quota_or_disk_loss".into(),
-                        })), ..Default::default()
-                    };
-                    if disk.append(loss).is_err() {
-                        worker_metrics.pending_loss.fetch_add(count, Ordering::Relaxed);
-                    }
-                }
-                worker_metrics.bytes.store(disk.size() as u64, Ordering::Relaxed);
-            }
-        })?;
+            })?;
+        let wake = worker.thread().clone();
         Ok(Arc::new(Self {
             epoch,
-            tx: Some(tx),
+            emit_tx: Some(emit_tx),
+            control_tx: Some(control_tx),
+            wake,
             metrics,
             worker: Some(worker),
         }))
@@ -146,14 +178,19 @@ impl CriticalSpool {
     pub fn try_emit(&self, event: v1::Event) -> bool {
         if !matches!(event.payload, Some(Payload::Flag(_) | Payload::Loss(_)))
             || event.encoded_len() > EVENT_LIMIT
-            || self
-                .tx
-                .as_ref()
-                .is_none_or(|tx| tx.try_send(Command::Emit(Box::new(event))).is_err())
         {
             self.metrics.loss();
             return false;
         }
+        if self
+            .emit_tx
+            .as_ref()
+            .is_none_or(|tx| tx.try_send(Box::new(event)).is_err())
+        {
+            self.metrics.loss();
+            return false;
+        }
+        self.wake.unpark();
         true
     }
     pub fn epoch(&self) -> &str {
@@ -172,34 +209,84 @@ impl CriticalSpool {
         limit: usize,
     ) -> io::Result<Vec<v1::EventBatch>> {
         let (tx, rx) = oneshot::channel();
-        self.send(Command::Replay(epoch.into(), after, limit, tx))?;
+        self.send(ControlCommand::Replay(epoch.into(), after, limit, tx))
+            .await?;
         rx.await
             .map_err(|_| io::Error::other("critical spool stopped"))?
     }
     pub async fn ack(&self, epoch: &str, through: u64) -> io::Result<u64> {
         let (tx, rx) = oneshot::channel();
-        self.send(Command::Ack(epoch.into(), through, tx))?;
+        self.send(ControlCommand::Ack(epoch.into(), through, tx))
+            .await?;
         rx.await
             .map_err(|_| io::Error::other("critical spool stopped"))?
     }
-    fn send(&self, command: Command) -> io::Result<()> {
-        self.tx
+    async fn send(&self, command: ControlCommand) -> io::Result<()> {
+        self.control_tx
             .as_ref()
             .ok_or_else(|| io::Error::other("critical spool stopped"))?
-            .try_send(command)
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "critical spool command queue full",
-                )
-            })
+            .send(command)
+            .await
+            .map_err(|_| io::Error::other("critical spool stopped"))?;
+        self.wake.unpark();
+        Ok(())
+    }
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn control_queue_len(&self) -> usize {
+        self.control_tx
+            .as_ref()
+            .map_or(0, |tx| CONTROL_QUEUE_LIMIT - tx.capacity())
     }
 }
 impl Drop for CriticalSpool {
     fn drop(&mut self) {
-        self.tx.take();
+        self.emit_tx.take();
+        self.control_tx.take();
+        self.wake.unpark();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
+        }
+    }
+}
+
+fn process_emit(event: v1::Event, disk: &mut Disk, metrics: &Metrics) {
+    if let Err(error) = disk.append(event) {
+        metrics.loss();
+        let dropped = metrics.dropped.load(Ordering::Relaxed);
+        if dropped.is_power_of_two() {
+            tracing::warn!(kind = ?error.kind(), dropped, "critical spool rejected event");
+        }
+    }
+}
+
+fn process_control(command: ControlCommand, disk: &mut Disk) {
+    match command {
+        ControlCommand::Replay(epoch, after, limit, reply) => {
+            if disk.poisoned {
+                let _ = reply.send(Err(io::Error::other(
+                    "critical spool durability uncertain; restart required",
+                )));
+                return;
+            }
+            let after = if epoch == disk.epoch { after } else { 0 };
+            let batches = disk
+                .events
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| disk.ack + 1 + *index as u64 > after)
+                .take(limit.clamp(1, 256))
+                .map(|(index, event)| v1::EventBatch {
+                    proxy_epoch_id: disk.epoch.clone(),
+                    first_sequence: disk.ack + 1 + index as u64,
+                    critical: true,
+                    events: vec![event.clone()],
+                })
+                .collect();
+            let _ = reply.send(Ok(batches));
+        }
+        ControlCommand::Ack(epoch, through, reply) => {
+            let _ = reply.send(disk.acknowledge(&epoch, through));
         }
     }
 }

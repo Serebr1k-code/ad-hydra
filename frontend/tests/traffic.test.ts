@@ -74,3 +74,15 @@ test('activated WASM overrides raw fallback when opening the decoded conversatio
  expect(protocol({id:'ark',protocol_id:'raw'},[])).toBe('raw')
  expect(protocol({id:'crypter',protocol_id:'raw'},[{service_id:'crypter',id:'sys-grpc',version:'1',applied:false}])).toBe('raw')
 })
+
+test('byte totals remain unknown for open flows and come from completed capture history after a lost close event',()=>{
+ expect(traffic).toHaveProperty('flowByteTotals')
+ const totals=Reflect.get(traffic,'flowByteTotals') as (flow:traffic.Flow|undefined,history?:{closed_at_ms:number;bytes_client_to_server:number;bytes_server_to_client:number})=>{bytesUp:string;bytesDown:string}|undefined
+ const [open]=traffic.flowRows({items:[{flow_id:'open',service_id:'s'}],next_cursor:null})
+ expect(open?.state).toBe('Open')
+ expect(open?.bytesUp).toBe('')
+ expect(totals(open)).toBeUndefined()
+ expect(totals(open,{closed_at_ms:2,bytes_client_to_server:4,bytes_server_to_client:2})).toEqual({bytesUp:'4',bytesDown:'2'})
+ const [closedZero]=traffic.flowRows({items:[{flow_id:'closed-zero',closed:{bytes_client_to_server:'0',bytes_server_to_client:'0'}}],next_cursor:null})
+ expect(totals(closedZero)).toEqual({bytesUp:'0',bytesDown:'0'})
+})

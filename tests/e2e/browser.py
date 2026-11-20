@@ -820,7 +820,7 @@ class Browser(unittest.TestCase):
                         cdp.evaluate("document.querySelector('#flag-paste').closest('form').requestSubmit()")
                         wait("document.querySelector('#page').innerText.includes('27 matches · 27 new flags')")
                         self.assertFalse(cdp.evaluate("[...document.querySelectorAll('#page table th')].some(e=>e.textContent==='Digest')"))
-                        cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.innerText.trim().startsWith('Flags')).click()")
+                        cdp.evaluate("(()=>{const button=[...document.querySelectorAll('#page button[aria-expanded]')].find(b=>b.innerText.trim().startsWith('Flags'));if(button?.getAttribute('aria-expanded')==='false')button.click()})()")
                         wait("Boolean(document.querySelector('[aria-label=\"Flags per page\"]'))")
                         cdp.click("document.querySelector('[aria-label=\"Sort flags\"]')")
                         wait("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].some(e=>e.textContent.trim()==='Flag text')")
@@ -921,8 +921,10 @@ class Browser(unittest.TestCase):
                         except (AssertionError,OSError) as error:ordered_error.append(str(error))
                         finally:ordered_done.set()
                     threading.Thread(target=ordered_reply,daemon=True).start()
+                    cdp.evaluate("window.__hydraBrowserBearer='';const hydraOriginalFetch=window.fetch.bind(window);window.fetch=(input,init={})=>{const authorization=new Headers(init.headers).get('Authorization');if(authorization?.startsWith('Bearer '))window.__hydraBrowserBearer=authorization;return hydraOriginalFetch(input,init)}")
                     cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Services').click()")
                     wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent==='Add service'&&!b.disabled)")
+                    wait("Boolean(window.__hydraBrowserBearer)")
                     cdp.click("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add service')")
                     wait("Boolean(document.querySelector('#service-form'))")
                     ordered_service={**service,'name':'Browser ordered raw','protocol_id':'raw','listen_address':f'127.0.0.1:{port()}','upstream_address':f'127.0.0.1:{ordered_backend.getsockname()[1]}'}
@@ -969,6 +971,69 @@ class Browser(unittest.TestCase):
                     self.assertEqual([chunk[0] for chunk in hex_chunks],['1','2','1','2'])
                     for chunk,prefix in zip(hex_chunks,['00000000  41 c3','00000000  42','00000000  a9 43','00000000  44']):self.assertTrue(chunk[1].startswith(prefix),chunk[1])
                     for index,chunk in enumerate(hex_chunks,1):self.assertIn(f'chunk #{index}',chunk[2])
+                    ordered_flow_id=cdp.evaluate("document.querySelector('#traffic-sessions [aria-pressed=true]')?.dataset.flowId")
+                    self.assertTrue(ordered_flow_id)
+                    cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Services').click()")
+                    wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent==='Add service'&&!b.disabled)")
+                    wait("Boolean(window.__hydraBrowserBearer)")
+                    profile_update=cdp.evaluate(f"""(async()=>{{
+                      const authorization=window.__hydraBrowserBearer;
+                      const currentResponse=await fetch('/api/v1/services',{{headers:{{Authorization:authorization}}}});
+                      if(!currentResponse.ok)return {{status:currentResponse.status}};
+                      const current=await currentResponse.json();
+                      const service=current.items.find(item=>item.id==={json.dumps(ordered_id)});
+                      if(!service)return {{status:404}};
+                      const body={{name:service.name,expected_revision:current.revision,transport:service.transport,listen_address:service.listen_address,upstream_address:service.upstream_address,protocol_id:'utf8',enabled:service.enabled,retain_history:service.retain_history,forwarding:service.forwarding??null,protection:service.protection??null}};
+                      const response=await fetch(`/api/v1/services/${{encodeURIComponent(service.id)}}`,{{method:'PATCH',headers:{{Authorization:authorization,'Content-Type':'application/json'}},body:JSON.stringify(body)}});
+                      const result=await response.json();
+                      return {{status:response.status,revision:result.services?.revision,protocol_id:result.services?.services?.find(item=>item.id===service.id)?.protocol_id}};
+                    }})()""")
+                    self.assertEqual(profile_update['status'],202,profile_update)
+                    self.assertEqual(profile_update['protocol_id'],'utf8',profile_update)
+                    lost_closure_script=f"""(()=>{{
+                      const targetFlow={json.dumps(ordered_flow_id)};
+                      const originalFetch=window.fetch.bind(window);
+                      window.__lostClosureFixtureApplied=false;
+                      window.fetch=async(...args)=>{{
+                        const response=await originalFetch(...args);
+                        const url=new URL(typeof args[0]==='string'?args[0]:args[0].url,location.href);
+                        if(!url.pathname.startsWith('/api/v1/traffic/flows')||url.pathname.endsWith('/history'))return response;
+                        const body=await response.clone().json();let changed=false;
+                        const stripClosed=item=>{{if(item?.flow_id===targetFlow&&Object.hasOwn(item,'closed')){{delete item.closed;changed=true}}}};
+                        if(Array.isArray(body.items))body.items.forEach(stripClosed);
+                        if(url.pathname.endsWith('/'+targetFlow))stripClosed(body);
+                        if(!changed)return response;
+                        window.__lostClosureFixtureApplied=true;
+                        const headers=new Headers(response.headers);headers.delete('content-length');
+                        return new Response(JSON.stringify(body),{{status:response.status,statusText:response.statusText,headers}});
+                      }};
+                    }})()"""
+                    cdp.call('Page.reload')
+                    wait("document.querySelector('#console') && !document.querySelector('#console').hidden")
+                    cdp.evaluate(lost_closure_script)
+                    cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Traffic').click()")
+                    wait("document.querySelector('#traffic-live-status')?.textContent==='Live'")
+                    cdp.click("document.querySelector('#traffic-service')")
+                    wait(f"[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].some(e=>e.textContent.trim()==={json.dumps(ordered_service['name'])})")
+                    cdp.click(f"[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].find(e=>e.textContent.trim()==={json.dumps(ordered_service['name'])})")
+                    selector=f'#traffic-sessions [data-flow-id="{ordered_flow_id}"]'
+                    wait(f'Boolean(document.querySelector({json.dumps(selector)}))')
+                    wait('window.__lostClosureFixtureApplied===true')
+                    cdp.click(f'document.querySelector({json.dumps(selector)})')
+                    wait("document.querySelector('#traffic-stream').innerText.includes('Proxy has a saved capture; Core still lists this flow as open.')")
+                    self.assertIn('Open',cdp.evaluate(f"document.querySelector({json.dumps(selector)}).innerText"))
+                    self.assertIn('4 B sent / 2 B received',cdp.evaluate("document.querySelector('#traffic-stream').innerText"))
+                    self.assertNotIn('Connection ended:',cdp.evaluate("document.querySelector('#traffic-stream').innerText"))
+                    cdp.click("document.querySelector('[aria-label=\"Stream view\"]')")
+                    wait("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].some(e=>e.textContent.trim()==='Decoded conversation')")
+                    cdp.click("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].find(e=>e.textContent.trim()==='Decoded conversation')")
+                    wait("document.querySelectorAll('#traffic-stream article[data-direction]').length===4")
+                    utf8_history=cdp.evaluate("[...document.querySelectorAll('#traffic-stream article[data-direction]')].map(e=>[e.dataset.direction,e.querySelector('pre')?.textContent])")
+                    self.assertEqual(utf8_history,[['1','A'],['2','B'],['1','éC'],['2','D']])
+                    raw_metadata=cdp.evaluate("(()=>{const details=document.querySelector('#traffic-stream details');return details&&{summary:details.querySelector('summary')?.textContent,open:details.open}})()")
+                    self.assertEqual(raw_metadata,{'summary':'Raw metadata · 2 read summaries','open':False})
+                    cdp.click("document.querySelector('#traffic-stream details summary')")
+                    wait("Boolean(document.querySelector('#traffic-stream details[open] table tbody tr'))")
                 # Real UDP traffic is visible without switching away from the default list.
                 with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as udp_backend:
                     udp_backend.bind(('127.0.0.1',0));udp_backend.settimeout(10)

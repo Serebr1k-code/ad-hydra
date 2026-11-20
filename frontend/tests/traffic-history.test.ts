@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { historyPreview, historySegments, historyTextSegments, historyUtf8Segments, onlyRawSummaryMessages, messageRows } from '../src/features/traffic/traffic'
+import { closureReasonText, decoderWarningText, historyPreview, historySegments, historyTextSegments, historyUtf8Segments, onlyRawSummaryMessages, messageRows } from '../src/features/traffic/traffic'
 
 test('closed history keeps client and server directions distinct', () => {
  const history={segments:[{direction:1,data:[0x41]},{direction:2,data:[0x42]}],truncated_client_to_server:true,truncated_server_to_client:false}
@@ -45,15 +45,14 @@ test('captured-byte UTF-8 view decodes split TCP code points without changing ra
  expect(segments.map(s=>s.data)).toEqual([[0x41,0xc3],[0x42],[0xa9]])
 })
 
-test('only native raw byte summaries are eligible for saved text fallback',()=>{
+test('saved transfer summaries stay eligible for byte fallback after the service profile changes',()=>{
  const summary=messageRows({items:[{message_id:'raw-summary',protocol_id:'transfer',message_type:'byte_summary'}],next_cursor:null})
  const wasm=messageRows({items:[{message_id:'wasm-summary',protocol_id:'browser-wasm',message_type:'byte_summary'}],next_cursor:null})
  const decoder=messageRows({items:[{message_id:'raw-decoder',protocol_id:'raw',message_type:'bytes'}],next_cursor:null})
- expect(onlyRawSummaryMessages(summary,'raw')).toBe(true)
- expect(onlyRawSummaryMessages(summary,'custom:browser-wasm/v1')).toBe(false)
- expect(onlyRawSummaryMessages(wasm,'custom:browser-wasm/v1')).toBe(false)
- expect(onlyRawSummaryMessages([...summary,...decoder],'raw')).toBe(false)
- expect(onlyRawSummaryMessages([],'raw')).toBe(false)
+ expect(onlyRawSummaryMessages(summary)).toBe(true)
+ expect(onlyRawSummaryMessages(wasm)).toBe(false)
+ expect(onlyRawSummaryMessages([...summary,...decoder])).toBe(false)
+ expect(onlyRawSummaryMessages([])).toBe(false)
 })
 
 
@@ -68,4 +67,19 @@ test('UDP text keeps binary and empty datagrams in captured order', () => {
  expect(segments.map(s=>historyPreview(s,'utf8'))).toEqual(['�','','�\0'])
  expect(segments.map(s=>s.previewText)).toEqual(['�','','�\0'])
  expect(historySegments(history,'1').map(s=>s.sequence)).toEqual([1,3])
+})
+
+test('closure reasons explain known socket failures without exposing unknown strings',()=>{
+ expect(closureReasonText('io:ConnectionRefused')).toBe('Upstream refused the connection.')
+ expect(closureReasonText('io:BrokenPipe')).toBe('Connection ended while Hydra was writing to a peer.')
+ expect(closureReasonText('private peer detail')).toBeUndefined()
+ expect(closureReasonText('constructor')).toBeUndefined()
+ expect(closureReasonText('__proto__')).toBeUndefined()
+ expect(closureReasonText('eof')).toBeUndefined()
+})
+
+test('decoder warning codes map to safe actionable text only for known decoders',()=>{
+ expect(decoderWarningText(['http_response_decoder_disabled'])).toBe('The HTTP response decoder stopped; parsed response content may be incomplete.')
+ expect(decoderWarningText(['private decoder detail'])).toBeUndefined()
+ expect(decoderWarningText('http_response_decoder_disabled')).toBeUndefined()
 })
