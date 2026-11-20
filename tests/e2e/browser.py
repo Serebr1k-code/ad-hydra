@@ -152,7 +152,8 @@ class Browser(unittest.TestCase):
                 browser=subprocess.Popen([chrome,'--headless','--no-sandbox','--disable-gpu','--disable-dev-shm-usage','--disable-background-networking','--disable-component-update','--no-first-run','--ignore-certificate-errors',f'--user-data-dir={tmp / "chrome"}',f'--remote-debugging-port={debug}','about:blank'],stdout=log,stderr=log)
                 processes.append(browser)
                 # GitHub's shared hosted runners can take several seconds to start Chrome.
-                for _ in range(300):
+                startup_deadline = time.monotonic() + 60
+                while time.monotonic() < startup_deadline:
                     if browser.poll() is not None:
                         log.seek(0);self.fail(f'{chrome} exited with status {browser.returncode} before DevTools started:\n'+log.read())
                     try:
@@ -779,7 +780,11 @@ class Browser(unittest.TestCase):
                     for p in reversed(processes):
                         if p.poll() is None:
                             p.terminate()
-                        p.wait(timeout=10)
+                        try:
+                            p.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            p.kill()
+                            p.wait(timeout=5)
                 finally:
                     if hidden_dist is not None:
                         rename_dist_preserving_parent_mtime(hidden_dist, dist)

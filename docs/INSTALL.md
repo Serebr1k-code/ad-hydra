@@ -53,6 +53,14 @@ sudo bash install-hydra.sh --archive /path/to/hydra-linux-x86_64-musl.tar.gz
 
 The public release contains the static x86_64 Linux binaries and SHA256 checksums. `--source github-auth` downloads the Actions ZIP and requires a token. For noninteractive authenticated downloads, `HYDRA_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN` can provide it. `HYDRA_ARCHIVE_SHA256` optionally pins an offline archive. `HYDRA_DOWNLOAD_URL` remains a legacy HTTPS index override.
 
+## Installer output and download errors
+
+Installer status and error messages use ANSI colors when output is attached to a terminal with a usable `TERM`. Redirected output remains plain text. Set `NO_COLOR=1` to disable color.
+
+A public GitHub install needs the `hydra-latest` release and its Linux archive. HTTP 404 means that release or asset is unavailable. Check the repository's Actions page for the release build result. Authenticated workflow artifacts use `--source github-auth`.
+
+If `sudo` prints `unable to resolve host`, check that the VM's hostname resolves locally. On Debian/Ubuntu, `/etc/hostname` and an appropriate hostname entry in `/etc/hosts` should agree. This warning is separate from a GitHub download error.
+
 ## Open the console
 
 The installer creates private state, service users, a localhost TLS certificate, systemd units, and a random initial account through Hydra's CLI. Read its credentials as root:

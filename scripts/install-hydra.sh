@@ -84,6 +84,21 @@ SOCKET='/run/hydra-proxy/proxy.sock'
 CREDENTIALS=pathlib.Path('/root/hydra-install-credentials.json')
 
 
+def styled(message, color, stream):
+    enabled = stream.isatty() and os.environ.get('TERM', '') not in {'', 'dumb'} and 'NO_COLOR' not in os.environ
+    return '\033['+color+'m'+message+'\033[0m' if enabled else message
+
+
+def report(message, color='36', stream=sys.stdout):
+    print(styled(str(message), color, stream), file=stream, flush=True)
+
+
+class DownloadError(RuntimeError):
+    def __init__(self, status, curl_code):
+        self.status = status
+        super().__init__('Download failed (HTTP %s, curl exit %s)' % (status, curl_code))
+
+
 def require(condition,message):
     if not condition: raise RuntimeError(message)
 
@@ -141,14 +156,14 @@ def curl_download(url,target,limit,configuration='',follow=True,allow_redirect=F
         target.unlink(missing_ok=True)
         if status==403: raise RuntimeError('Download denied (HTTP 403): the S3 key needs GetObject/read access to the release objects')
         if 300<=status<400: raise RuntimeError('Redirect refused for this download (HTTP %s, curl exit %s)'%(status,result.returncode))
-        raise RuntimeError('Download failed (HTTP %s, curl exit %s)'%(status,result.returncode))
+        raise DownloadError(status,result.returncode)
     require(target.is_file() and target.stat().st_size<=limit,'Download exceeds size limit')
     return headers
 
 
 def download(url,target,token=''):
     parsed=valid_url(url);configuration=''
-    if not token and parsed.hostname=='api.github.com':
+    if source_kind!='github' and not token and parsed.hostname=='api.github.com':
         token=os.environ.get('HYDRA_GITHUB_TOKEN') or os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
     if token:
         configuration+='header = '+curl_quote('Authorization: Bearer '+token)+'\n'
@@ -181,7 +196,7 @@ def read_s3_input():
                 if hidden:
                     previous=termios.tcgetattr(stream.fileno());changed=previous.copy();changed[3]&=~termios.ECHO
                     termios.tcsetattr(stream.fileno(),termios.TCSANOW,changed)
-                print(label+': ',end='',file=sys.stderr,flush=True)
+                print(styled(label+': ', '36', sys.stderr),end='',file=sys.stderr,flush=True)
             try: value=stream.readline(4098)
             finally:
                 if previous is not None:
@@ -210,7 +225,7 @@ def read_github_token():
             import termios
             previous=termios.tcgetattr(stream.fileno());changed=previous.copy();changed[3]&=~termios.ECHO
             termios.tcsetattr(stream.fileno(),termios.TCSANOW,changed)
-            print('GitHub token with Actions read access: ',end='',file=sys.stderr,flush=True)
+            print(styled('GitHub token with Actions read access: ', '36', sys.stderr),end='',file=sys.stderr,flush=True)
         try: token=stream.readline(4098).rstrip('\r\n')
         finally:
             if previous is not None:
@@ -226,7 +241,7 @@ def verify_binaries(directory,checks):
         with open(directory/name,'rb') as executable: header=executable.read(20)
         require(header[:6]==b'\x7fELF\x02\x01' and header[18:20]==b'\x3e\x00','Expected an x86_64 Linux ELF binary: '+name)
         os.chmod(directory/name,0o755)
-    print('Both Hydra binary checksums verified',flush=True)
+    report('Both Hydra binary checksums verified', '32')
 
 
 def fetch_s3(directory):
@@ -247,13 +262,19 @@ def fetch_s3(directory):
     verify_binaries(bundle,checks)
     (bundle/'SHA256SUMS').write_text(''.join(sha+'  '+name+'\n' for name,sha in checks.items()))
     (bundle/'BUILD.txt').write_text('commit='+commit+'\ntarget=x86_64-unknown-linux-musl\n')
-    print('S3 release commit:',commit,flush=True)
+    report('S3 release commit: '+commit)
     return bundle
 
 
 def fetch_bundle(directory, url=None, token=''):
     source=pathlib.Path(archive) if archive else directory/'download'
-    if not archive: download(url or source_url,source,token)
+    if not archive:
+        try:
+            download(url or source_url,source,token)
+        except DownloadError as error:
+            if error.status == 404 and source_kind == 'github':
+                raise RuntimeError('No public Hydra install release is available for this repository (HTTP 404). The repository owner must complete a successful release build. Check GitHub Actions, or use --source github-auth with an Actions-read token for an available build.') from None
+            raise
     require(source.is_file() and source.stat().st_size<=MAX_DOWNLOAD,'Archive is missing or exceeds 256 MiB')
     with open(source,'rb') as stream: prefix=stream.read(128).lstrip()
     if not archive and prefix.startswith(b'{'):
@@ -263,12 +284,16 @@ def fetch_bundle(directory, url=None, token=''):
             require(catalog.get('tag_name')=='hydra-latest','Unexpected release tag')
             asset=next((item for item in catalog['assets'] if item.get('name')=='hydra-linux-x86_64-musl.tar.gz'),None)
             require(asset is not None,'Latest public GitHub release has no Hydra Linux archive')
-            source=directory/'release.tar.gz';download(asset['browser_download_url'],source)
+            source=directory/'release.tar.gz'
+            report('Downloading public release: '+catalog['tag_name'])
+            download(asset['browser_download_url'],source)
+            if asset.get('digest'):
+                require(asset['digest']=='sha256:'+digest(source),'GitHub release asset digest mismatch')
         else:
             items=[item for item in catalog.get('artifacts',[]) if re.fullmatch(r'hydra-linux-x86_64-musl-[0-9a-f]{40}',item.get('name','')) and not item.get('expired',True) and item.get('workflow_run',{}).get('head_branch')=='main']
             require(items,'No unexpired main-branch Linux build found at the configured artifact index')
             item=max(items,key=lambda item:item.get('created_at',''))
-            print('Build:',item['name'],flush=True)
+            report('Build: '+item['name'])
             source=directory/'artifact.zip';download_github_artifact(item['archive_download_url'],source,token)
             if item.get('digest'):
                 require(item['digest']=='sha256:'+digest(source),'GitHub artifact digest mismatch')
@@ -510,17 +535,17 @@ def install(bundle,directory):
             if healthy: break
             time.sleep(.5)
         require(healthy,'Hydra health checks failed')
-        print('Hydra installed. Console: https://localhost:8080 (SSH tunnel).')
-        print('Rollback backup:',backup)
-        print('Initial credentials: '+str(CREDENTIALS) if not users else 'Existing users and credentials preserved.')
-        print('Add your service listeners and authorized Farm teams in the console. Python host execution can be enabled in Settings.')
+        report('Hydra installed. Console: https://localhost:8080 (SSH tunnel).', '32')
+        report('Rollback backup: '+str(backup))
+        report('Initial credentials: '+str(CREDENTIALS) if not users else 'Existing users and credentials preserved.')
+        report('Add your service listeners and authorized Farm teams in the console. Python host execution can be enabled in Settings.')
     except Exception:
         if not changed:
             if was_active['hydra-core']: run('systemctl','start','hydra-core',check=False)
             raise
         stopped=run('systemctl','stop','hydra-core','hydra-proxy',check=False)
         if stopped.returncode and any(run('systemctl','is-active','--quiet',name,check=False).returncode==0 for name in names):
-            print('Could not stop Hydra for rollback. Recover manually from:',backup,file=sys.stderr);raise
+            report('Could not stop Hydra for rollback. Recover manually from: '+str(backup), '31', sys.stderr);raise
         for name in names:
             if not was_enabled[name]: run('systemctl','disable',name,check=False)
         for path,copy in saved.items():
@@ -536,7 +561,7 @@ def install(bundle,directory):
         run('systemctl','daemon-reload',check=False)
         for name in ['hydra-proxy','hydra-core']:
             if was_active[name]: run('systemctl','start',name,check=False)
-        print('Installation failed; prior binaries/configuration/database restored. Backup:',backup,file=sys.stderr)
+        report('Installation failed; prior binaries/configuration/database restored. Backup: '+str(backup), '31', sys.stderr)
         raise
 
 
@@ -551,7 +576,7 @@ try:
         elif source_kind=='github':
             repository=os.environ.get('HYDRA_GITHUB_REPOSITORY','nrf24l01/ad-hydra').strip()
             require(re.fullmatch(r'[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}',repository),'Invalid HYDRA_GITHUB_REPOSITORY; expected owner/name')
-            index='https://api.github.com/repos/'+repository+'/releases/latest'
+            index='https://api.github.com/repos/'+repository+'/releases/tags/hydra-latest'
             bundle=fetch_bundle(directory,index)
         elif source_kind=='github-auth':
             token=read_github_token()
@@ -565,8 +590,8 @@ try:
             destination=pathlib.Path(output)
             require(not destination.exists(),'Download directory must not exist')
             shutil.copytree(bundle,destination);os.chmod(destination,0o700)
-            print('Verified build extracted to:',destination)
+            report('Verified build extracted to: '+str(destination), '32')
         else: install(bundle,directory)
 except Exception as error:
-    print('Hydra installer:',str(error),file=sys.stderr);sys.exit(1)
+    report('Hydra installer: '+str(error), '31', sys.stderr);sys.exit(1)
 PY

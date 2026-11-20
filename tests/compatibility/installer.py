@@ -115,6 +115,70 @@ class Installer(unittest.TestCase):
             self.assertFalse((self.directory/'insecure-output').exists())
         finally:server.shutdown();server.server_close();thread.join()
 
+    def test_public_release_and_terminal_colors(self):
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
+                        '-keyout',str(self.directory/'key'),'-out',str(self.directory/'cert'),
+                        '-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1'],
+                       check=True,capture_output=True)
+        package=tar_bundle()
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(inner):
+                if inner.path=='/missing':
+                    inner.send_error(404);return
+                payload=package if inner.path=='/archive' else json.dumps({
+                    'tag_name':'hydra-latest',
+                    'assets':[{'name':'hydra-linux-x86_64-musl.tar.gz',
+                        'browser_download_url':f'https://localhost:{server.server_port}/archive',
+                        'digest':'sha256:'+hashlib.sha256(package).hexdigest()}],
+                }).encode()
+                inner.send_response(200);inner.send_header('Content-Length',str(len(payload)));inner.end_headers();inner.wfile.write(payload)
+            def log_message(self,*args):pass
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(self.directory/'cert',self.directory/'key')
+        server.socket=context.wrap_socket(server.socket,server_side=True)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            # Run the actual public path against our HTTPS release fixture.
+            script=self.directory/'public-installer.sh'
+            script.write_text(SCRIPT.read_text().replace(
+                "index='https://api.github.com/repos/'+repository+'/releases/tags/hydra-latest'",
+                f"index='https://localhost:{server.server_port}/release'"))
+            env={**os.environ,'SSL_CERT_FILE':str(self.directory/'cert'),'TERM':'xterm-256color'}
+            env.pop('NO_COLOR',None)
+            args=['bash',str(script),'--source','github','--download-only',str(self.directory/'public')]
+            result=subprocess.run(args,env=env,capture_output=True,text=True,timeout=30)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertNotIn('\x1b[',result.stdout+result.stderr)
+            self.assertIn('Both Hydra binary checksums verified',result.stdout)
+
+            master,slave=pty.openpty()
+            try:
+                args[-1]=str(self.directory/'terminal')
+                process=subprocess.Popen(args,env=env,stdout=slave,stderr=slave,stdin=subprocess.DEVNULL)
+                os.close(slave);slave=None
+                output=b''
+                while process.poll() is None or select.select([master],[],[],.05)[0]:
+                    if select.select([master],[],[],.1)[0]:
+                        try: output+=os.read(master,65536)
+                        except OSError: break
+                self.assertEqual(process.wait(timeout=5),0,output)
+                self.assertIn(b'\x1b[32m',output)
+            finally:
+                if slave is not None:os.close(slave)
+                os.close(master)
+            env['NO_COLOR']='1'
+            args[-1]=str(self.directory/'no-color')
+            result=subprocess.run(args,env=env,capture_output=True,text=True,timeout=30)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertNotIn('\x1b[',result.stdout+result.stderr)
+            script.write_text(script.read_text().replace('/release', '/missing'))
+            args[-1]=str(self.directory/'missing')
+            result=subprocess.run(args,env=env,capture_output=True,text=True,timeout=30)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('No public Hydra install release',result.stderr)
+        finally:
+            server.shutdown();server.server_close();thread.join()
+
     @contextlib.contextmanager
     def s3_fixture(self,behavior='ok',token='temporary-session-token'):
         subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-keyout',str(self.directory/'s3-key'),'-out',str(self.directory/'s3-cert'),'-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1'],check=True,capture_output=True)
