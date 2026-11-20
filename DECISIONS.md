@@ -399,3 +399,16 @@ unparsed one. The private key travels to the Proxy over the local socket and is
 never returned by the API; reads report `private_key_configured` instead, and an
 update that omits the key keeps the stored one. Nothing is decrypted passively:
 traffic without a terminating service stays opaque, as before.
+
+### Certificate prompt for undecoded TLS streams
+
+Opening a stream that starts with a TLS record header used to show hex with no
+hint that a certificate would make it readable. The traffic view now detects the
+handshake from the first client chunk (a record content type 0x14-0x17 with major
+version 0x03 and a minor version up to 0x04, in text or hex spans) and, when the
+service has no TLS configuration, shows a prompt with a button that opens that
+service's TLS section. A certificate cannot decrypt a session that was already
+negotiated, so the prompt states that only connections opened after saving are
+read as HTTP; captured history stays opaque and is not rewritten. Detection is
+client-side on bytes the console already receives, so no new API field, protobuf
+message or migration is added.

@@ -16,7 +16,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { validateEndpoints } from './endpoints'
 import {decoderChoices,selectedDecoder,saveWithDecoder,type DecoderCatalog} from './decoders'
 
-const props = defineProps<{ service?: Omit<ServiceInput, 'expected_revision'> & { id: string;name?:string } & ProtectionService; revision: number;initialSection?:'general'|'forwarding' }>()
+const props = defineProps<{ service?: Omit<ServiceInput, 'expected_revision'> & { id: string;name?:string } & ProtectionService; revision: number;initialSection?:'general'|'forwarding'|'tls' }>()
 const emit = defineEmits<{ saved: []; busy: [value: boolean] }>()
 const initial = props.service
 const form = reactive({
@@ -44,6 +44,7 @@ const savedId=ref(initial?.id), savedRevision=ref(props.revision)
 const savedEnabled=ref(initial?.enabled ?? false)
 onMounted(async()=>{try{catalog.value=await api<DecoderCatalog>('/protocols');decodersReady.value=true;if(initial)form.protocol_id=selectedDecoder(initial,catalog.value)}catch(cause){error.value=errorMessage(cause)}finally{loadingDecoders.value=false}})
 onMounted(async()=>{if(props.initialSection==='forwarding'){await nextTick();requestAnimationFrame(()=>{const panel=document.getElementById('service-forwarding-settings');panel?.scrollIntoView({block:'start'});panel?.focus({preventScroll:true})})}})
+onMounted(async()=>{if(props.initialSection==='tls'){await nextTick();if(!tls.value)toggleTls(true);await nextTick();requestAnimationFrame(()=>{const panel=document.getElementById('service-tls');panel?.scrollIntoView({block:'start'});panel?.focus({preventScroll:true})})}})
 const saving = ref(false)
 const error = ref('')
 const showRetry = ref(false)
@@ -150,7 +151,7 @@ async function retryListener() {
     </div>
     <ForwardingForm v-model="forwarding" :disabled="saving" :transport="form.transport" :listen-address="form.listen_address" />
     <ServiceProtectionForm v-model="protection" :disabled="saving" :transport="form.transport" />
-    <div v-if="form.transport === 'tcp'" class="space-y-2 rounded-md border p-3">
+    <div v-if="form.transport === 'tcp'" id="service-tls" tabindex="-1" class="space-y-2 rounded-md border p-3">
       <div class="flex items-center gap-2">
         <Checkbox id="service-tls-enabled" :model-value="tls !== null" :disabled="saving" @update:model-value="value => toggleTls(value === true)" />
         <Label for="service-tls-enabled">TLS</Label>

@@ -6,6 +6,7 @@ import { openEditor } from '@/shared/editor'
 import DataTable from '@/components/DataTable.vue'
 import { Button } from '@/components/ui/button'
 import { Alert,AlertDescription } from '@/components/ui/alert'
+import { looksLikeTls } from './tlsDetect'
 import { Select,SelectContent,SelectItem,SelectTrigger,SelectValue } from '@/components/ui/select'
 import FlowCapture from './FlowCapture.vue'
 import HttpMessage from './HttpMessage.vue'
@@ -15,8 +16,8 @@ const TerminalStream=defineAsyncComponent(()=>import('./TerminalStream.vue'))
 import FlowFavoriteButton, { type FavoriteChange } from './FlowFavoriteButton.vue'
 import { eventMessage,mergeMessages,type TrafficEvent } from './live'
 import { canReadSavedHistory,closureReasonText,decoderWarningText,differences,direction,fields,flowByteTotals,flowRows,historyPreview,historySegments,historyTextSegments,historyUtf8Segments,initialStreamMode,messageRows,onlyRawSummaryMessages,record,streamText,timestamp,type Flow,type Message } from './traffic'
-const props=defineProps<{flowId:string;flow?:Flow;protocolId?:string;showBlocked?:boolean;flagPattern?:string}>()
-const emit=defineEmits<{favorite:[value:FavoriteChange]}>()
+const props=defineProps<{flowId:string;flow?:Flow;protocolId?:string;showBlocked?:boolean;flagPattern?:string;serviceTls?:boolean}>()
+const emit=defineEmits<{favorite:[value:FavoriteChange];'configure-tls':[]}>()
 const detail=ref<Flow|undefined>(props.flow),messages=ref<Message[]>([]),cursor=ref<number|null>()
 const inspect=ref<Message>(),selected=ref<Message>(),comparison=ref<ReturnType<typeof differences>>([]),comparisonTitle=ref('')
 const streamBody=ref<HTMLElement>()
@@ -40,6 +41,7 @@ const terminalTranscript=computed(()=>{
  if(history.value){const saved=terminalHistory(history.value.segments,side.value);if(saved.ordered||side.value!=='both')return saved}
  return terminalMessages(visible.value,side.value)
 })
+const tlsUndecoded=computed(()=>!props.serviceTls&&looksLikeTls(terminalTranscript.value.chunks))
 const terminalLegacyOrder=computed(()=>historyState.value==='ready'&&history.value&&history.value.segments.filter(s=>s.data.length>0).length>1&&!history.value.segments.filter(s=>s.data.length>0).every(s=>s.sequence>0)&&!terminalTranscript.value.chunks.length&&side.value==='both')
 const path=`/traffic/flows/${encodeURIComponent(props.flowId)}`
 function favoriteChanged(change:FavoriteChange){if(detail.value)detail.value={...detail.value,...change};if(savedStream.value)void loadHistory();emit('favorite',change)}
@@ -114,6 +116,13 @@ onUnmounted(()=>{disposed=true;request++})
   <div ref="streamBody" class="min-h-0 flex-1" :class="mode==='terminal'?'flex flex-col gap-3 overflow-hidden p-3':'space-y-3 overflow-auto p-4'">
    <Alert v-if="error" variant="destructive"><AlertDescription>{{error}}</AlertDescription></Alert>
    <Alert v-if="notice"><AlertDescription>{{notice}}</AlertDescription></Alert>
+   <Alert v-if="tlsUndecoded" data-tls-prompt>
+    <AlertDescription>
+     This stream starts with a TLS handshake, so the proxy forwards it unread. A certificate cannot decrypt a session that was already negotiated.
+     Add a certificate to this service and connections opened after saving are read as HTTP.
+     <Button size="sm" variant="outline" class="mt-2" @click="emit('configure-tls')">Add certificate</Button>
+    </AlertDescription>
+   </Alert>
    <template v-if="mode==='terminal'">
     <p v-if="(loading||historyState==='loading')&&!terminalTranscript.chunks.length" role="status">Loading terminal stream…</p>
     <p v-if="terminalLegacyOrder" class="text-sm text-muted-foreground">This older capture saved separate direction buffers without conversation order. Select Client or Server to inspect it in a terminal.</p>

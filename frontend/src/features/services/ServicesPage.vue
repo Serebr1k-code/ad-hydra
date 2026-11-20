@@ -12,6 +12,7 @@ import type { ProtectionService } from './protection'
 import {decoderLabel,type DecoderCatalog} from './decoders'
 import ServiceColorDialog from './ServiceColorDialog.vue'
 import { resolveServiceColors } from './colors'
+import { useRoute, useRouter } from 'vue-router'
 const catalog=ref<DecoderCatalog>({items:[],activations:[]})
 
 type Service = Omit<ServiceInput, 'expected_revision'> & ProtectionService & { id: string; name?:string; applied_enabled: boolean | null; color?: string | null }
@@ -29,7 +30,7 @@ const formBusy = ref(false)
 const editing = ref<Service>()
 const coloring = ref<Service>()
 const colors = computed(() => resolveServiceColors(data.value?.items ?? []))
-const formSection=ref<'general'|'forwarding'>('general')
+const formSection=ref<'general'|'forwarding'|'tls'>('general')
 const formRevision = ref(0)
 const formGeneration = ref(0)
 const columns = [{key:'name',label:'Name'},{ key: 'color', label: 'Color' }, { key: 'transport', label: 'Transport' }, { key: 'listen_address', label: 'Listener' }, { key: 'destination', label: 'Destination' }, { key: 'protocol_id', label: 'Decoder' }, { key: 'actions', label: 'Buttons' }]
@@ -94,7 +95,7 @@ async function retryService(service: Service) {
     } else error.value = errorMessage(cause)
   }
 }
-function edit(service?: Service,section:'general'|'forwarding'='general') {
+function edit(service?: Service,section:'general'|'forwarding'|'tls'='general') {
   formSection.value=section
   if (!data.value) return
   editing.value = service
@@ -117,7 +118,16 @@ async function remove(service: Service) {
   } catch (cause) { error.value = errorMessage(cause) }
   finally { busy.value = false }
 }
-onMounted(load)
+const route = useRoute(), router = useRouter()
+// The traffic view links here when a TLS stream needs a certificate.
+onMounted(async () => {
+  await load()
+  const target = typeof route.query.tls === 'string' ? route.query.tls : ''
+  if (!target || disposed) return
+  void router.replace({ path: '/services' })
+  const service = data.value?.items.find(item => item.id === target)
+  if (service) edit(service, 'tls')
+})
 onBeforeUnmount(() => { disposed = true; retryGeneration++; for (const timer of retryTimers.values()) clearTimeout(timer); retryTimers.clear() })
 </script>
 
