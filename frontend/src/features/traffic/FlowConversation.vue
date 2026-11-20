@@ -15,7 +15,7 @@ const TerminalStream=defineAsyncComponent(()=>import('./TerminalStream.vue'))
 import FlowFavoriteButton, { type FavoriteChange } from './FlowFavoriteButton.vue'
 import { eventMessage,mergeMessages,type TrafficEvent } from './live'
 import { canReadSavedHistory,closureReasonText,decoderWarningText,differences,direction,fields,flowByteTotals,flowRows,historyPreview,historySegments,historyTextSegments,historyUtf8Segments,initialStreamMode,messageRows,onlyRawSummaryMessages,record,streamText,timestamp,type Flow,type Message } from './traffic'
-const props=defineProps<{flowId:string;flow?:Flow;protocolId?:string;showBlocked?:boolean}>()
+const props=defineProps<{flowId:string;flow?:Flow;protocolId?:string;showBlocked?:boolean;flagPattern?:string}>()
 const emit=defineEmits<{favorite:[value:FavoriteChange]}>()
 const detail=ref<Flow|undefined>(props.flow),messages=ref<Message[]>([]),cursor=ref<number|null>()
 const inspect=ref<Message>(),selected=ref<Message>(),comparison=ref<ReturnType<typeof differences>>([]),comparisonTitle=ref('')
@@ -119,7 +119,7 @@ onUnmounted(()=>{disposed=true;request++})
     <p v-if="terminalLegacyOrder" class="text-sm text-muted-foreground">This older capture saved separate direction buffers without conversation order. Select Client or Server to inspect it in a terminal.</p>
     <p v-else-if="!loading&&historyState!=='loading'&&!terminalTranscript.chunks.length" class="text-sm text-muted-foreground">{{historyState==='ready'&&history?.segments.length===0?'The saved capture contains no payload bytes.':savedStream?'No readable text is available in the saved capture. Use Captured bytes to inspect it.':protocolId==='utf8'?'Waiting for captured UTF-8 text from either direction…':'Live terminal playback requires the UTF-8 decoder. Saved bytes can be replayed after the session closes.'}}</p>
     <p v-if="history?.history_truncated||detail?.decoded_incomplete" class="text-xs text-muted-foreground">Capture history is incomplete; only retained text can be replayed.</p>
-    <TerminalStream :chunks="terminalTranscript.chunks" :truncated="terminalTranscript.truncated" />
+    <TerminalStream :chunks="terminalTranscript.chunks" :truncated="terminalTranscript.truncated" :flag-pattern="flagPattern" />
    </template>
    <FlowCapture v-if="mode==='bytes'&&!savedStream" :flow-id="flowId" :live="true" :auto-capture="rawProfile" />
    <section v-if="mode==='bytes'&&savedStream" class="space-y-3">

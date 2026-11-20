@@ -22,3 +22,21 @@ export function coloredChunks(chunks:TerminalChunk[]):TerminalChunk[]{
   return {...chunk,text:text?(chunk.direction===1?CLIENT:SERVER)+text:''}
  })
 }
+/** Amber-500 wash matching the "Flag detected" badge, over the terminal background. */
+const FLAG_BACKGROUND='\x1b[48;2;61;46;18m',FLAG_RESET='\x1b[49m'
+/**
+ * Wash every flag match with the badge background without touching the text colour
+ * that direction colouring already applied. Runs after `coloredChunks`, because that
+ * pass consumes payload SGR sequences.
+ */
+export function flagChunks(chunks:TerminalChunk[],pattern:RegExp|null):TerminalChunk[]{
+ if(!pattern)return chunks
+ return chunks.map(chunk=>{
+  if(chunk.kind==='hex')return chunk
+  const prefix=chunk.text.match(/^\x1b\[[0-9;]*m/)?.[0]??''
+  const body=chunk.text.slice(prefix.length)
+  if(!body)return chunk
+  const highlighted=body.replace(pattern,match=>match?FLAG_BACKGROUND+match+FLAG_RESET:match)
+  return highlighted===body?chunk:{...chunk,text:prefix+highlighted}
+ })
+}

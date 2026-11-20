@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {onMounted,onUnmounted,ref,watch} from 'vue'
+import {computed,onMounted,onUnmounted,ref,watch} from 'vue'
 import {Terminal} from '@xterm/xterm'
 import {FitAddon} from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -7,7 +7,11 @@ import {Button} from '@/components/ui/button'
 import type {TerminalChunk} from './terminal'
 import {TranscriptWriter} from './terminalWriter'
 import {useTheme} from '@/app/theme'
-const props=defineProps<{chunks:TerminalChunk[];truncated?:boolean}>()
+const props=defineProps<{chunks:TerminalChunk[];truncated?:boolean;flagPattern?:string}>()
+const flagRegex=computed<RegExp|null>(()=>{
+ const source=props.flagPattern?.trim();if(!source)return null
+ try{return new RegExp(source,'g')}catch{return null}
+})
 const {theme}=useTheme()
 const host=ref<HTMLElement>(),status=ref(''),following=ref(true)
 let terminal:Terminal|undefined,fit:FitAddon|undefined,observer:ResizeObserver|undefined,frame:number|undefined,disposed=false
@@ -16,19 +20,20 @@ function resize(){if(!host.value||host.value.clientWidth<30||host.value.clientHe
 function render(){writer?.set(props.chunks)}
 function follow(){following.value=true;terminal?.scrollToBottom()}
 watch(()=>props.chunks,render)
+watch(()=>props.flagPattern,render)
 watch(theme,(value)=>{if(terminal)terminal.options.theme={background:value==='oled'?'#000000':'#151515',foreground:value==='oled'?'#ededed':'#e8e8e8'}})
 onMounted(()=>{
  terminal=new Terminal({disableStdin:true,convertEol:true,cursorBlink:false,cursorInactiveStyle:'none',scrollback:2000,fontSize:13,fontFamily:'ui-monospace, SFMono-Regular, Menlo, monospace',screenReaderMode:true,theme:{background:theme.value==='oled'?'#000000':'#151515',foreground:theme.value==='oled'?'#ededed':'#e8e8e8'},linkHandler:{activate:()=>{}},allowProposedApi:false,altClickMovesCursor:false,windowOptions:{}})
  fit=new FitAddon();terminal.loadAddon(fit);terminal.open(host.value!);terminal.onScroll(()=>{if(terminal&&!rebuilding)following.value=terminal.buffer.active.viewportY>=terminal.buffer.active.baseY})
  let viewport:number|undefined
- writer=new TranscriptWriter({reset:()=>{if(!terminal)return;rebuilding=true;viewport=terminal.buffer.active.viewportY;const follow=following.value;terminal.reset();following.value=follow},write:(text,done)=>terminal?.write(text,done)},()=>{if(disposed)return;if(following.value)terminal?.scrollToBottom();else if(viewport!==undefined)terminal?.scrollToLine(viewport);viewport=undefined;rebuilding=false;status.value=`${props.chunks.length} captured text chunks`})
+ writer=new TranscriptWriter({reset:()=>{if(!terminal)return;rebuilding=true;viewport=terminal.buffer.active.viewportY;const follow=following.value;terminal.reset();following.value=follow},write:(text,done)=>terminal?.write(text,done)},()=>{if(disposed)return;if(following.value)terminal?.scrollToBottom();else if(viewport!==undefined)terminal?.scrollToLine(viewport);viewport=undefined;rebuilding=false;status.value=`${props.chunks.length} captured text chunks`},()=>flagRegex.value)
  observer=new ResizeObserver(()=>{cancelAnimationFrame(frame??0);frame=requestAnimationFrame(resize)});observer.observe(host.value!);resize();render()
 })
 onUnmounted(()=>{disposed=true;observer?.disconnect();if(frame!==undefined)cancelAnimationFrame(frame);writer?.dispose();terminal?.dispose();terminal=undefined})
 </script>
 <template>
  <section class="flex min-h-0 flex-1 flex-col gap-2" aria-label="Read-only captured terminal">
-  <div class="flex shrink-0 items-center justify-between gap-2 text-xs text-muted-foreground"><span>Client: red · Server: blue · Invalid UTF-8: yellow hex · read-only</span><Button v-if="!following" size="sm" variant="outline" @click="follow">Follow output</Button></div>
+  <div class="flex shrink-0 items-center justify-between gap-2 text-xs text-muted-foreground"><span>Client: red · Server: blue · Invalid UTF-8: yellow hex · Flags highlighted · read-only</span><Button v-if="!following" size="sm" variant="outline" @click="follow">Follow output</Button></div>
   <p v-if="truncated" role="status" class="text-xs text-muted-foreground">The terminal preview is bounded; older text has been omitted.</p>
   <div ref="host" id="traffic-terminal" class="min-h-[240px] min-w-0 flex-1 overflow-hidden rounded-md border bg-background p-2" aria-label="Terminal stream"/>
   <span class="sr-only" role="status">{{status}}</span>
