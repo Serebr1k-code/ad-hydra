@@ -14,6 +14,7 @@ import FilterRow from './FilterRow.vue'
 import RequestCheckerSettings from './RequestCheckerSettings.vue'
 import { setFilterEnabled, type FilterRule } from './filterState'
 import { createPendingReconciliation } from './pendingReconciliation'
+import { hitsByService, visibleFilters } from './filterRow'
 import { defaultServiceColor, resolveServiceColors } from '@/features/services/colors'
 import { parseStreamSelection, type StreamSelection } from '@/features/traffic/streamSelection'
 
@@ -35,6 +36,7 @@ const testing = ref<Pick<FilterRecord, 'id' | 'name' | 'service_id' | 'additiona
 const error = ref('')
 const notice = ref('')
 const query = ref('')
+const serviceFilter = ref('')
 const after = ref('')
 const sort = ref('created_at')
 const selected = ref<string[]>([])
@@ -49,7 +51,10 @@ const reconciliation = createPendingReconciliation({
 })
 onBeforeUnmount(() => reconciliation.stop())
 const sortOptions = [{ key: 'created_at', label: 'Creation date' }, { key: 'created_by', label: 'Author' }, { key: 'hit_count', label: 'Hits' }, { key: 'priority', label: 'Priority' }, { key: 'name', label: 'Name' }]
-const rows = computed(() => [...(data.value?.items ?? [])].sort((a, b) => {
+const serviceHits = computed(() => hitsByService(data.value?.items ?? []))
+const serviceRows = computed(() => services.value.map(service => ({ ...service, hits: serviceHits.value[service.id] ?? 0, color: serviceColors.value[service.id] ?? defaultServiceColor(service.id) })))
+const visible = computed(() => visibleFilters(data.value?.items ?? [], serviceFilter.value))
+const rows = computed(() => [...visible.value].sort((a, b) => {
   switch (sort.value) {
     case 'priority': return b.priority - a.priority
     case 'hit_count': return b.hit_count - a.hit_count
@@ -175,9 +180,22 @@ onMounted(async () => {
     </div>
     <p v-if="error || reconciliationError || data?.apply_error" role="alert" class="text-sm text-destructive">{{ error || reconciliationError || data?.apply_error }}</p><p v-if="notice" role="status">{{ notice }}</p>
     <p v-if="busy" role="status">Loading filters…</p>
-    <p v-else-if="data && !data.items.length" class="text-muted-foreground">No filters. New enabled filters enforce as soon as the proxy applies them. Shadow mode and saved-traffic testing are optional.</p>
-    <div v-if="data?.items.length" aria-label="Filter rules" class="rounded-md border">
-      <FilterRow v-for="row in rows" :key="row.id" :filter="row" :service-name="[row.service_id, ...(row.additional_service_ids ?? [])].map(id => serviceNames[id] ?? id).join(', ')" :service-color="serviceColors[row.service_id] ?? defaultServiceColor(row.service_id)" :selected="selected.includes(row.id)" :disabled="busy || Boolean(savingState)" :saving="savingState === row.id" :apply-status="reconciliationError ? 'error' : data.apply_status" @select="toggleSelection(row.id, $event)" @state="setState(row, $event)" @edit="edit(row)" @test="test(row)" @enforce="enforce(row)" @remove="remove(row)" />
+    <div class="flex items-start gap-3">
+      <aside v-if="services.length" aria-label="Services" class="w-56 shrink-0 overflow-hidden rounded-md border">
+        <button type="button" class="flex w-full items-center gap-2 border-b px-2 py-2 text-left text-sm" :class="serviceFilter === '' ? 'bg-secondary' : ''" @click="serviceFilter = ''">
+          <span class="flex-1 truncate">All services</span><span class="text-xs tabular-nums text-muted-foreground">{{ (data?.items ?? []).length }}</span>
+        </button>
+        <button v-for="service in serviceRows" :key="service.id" type="button" class="flex w-full items-center gap-2 border-b px-2 py-2 text-left text-sm last:border-b-0" :class="serviceFilter === service.id ? 'bg-secondary' : ''" @click="serviceFilter = service.id">
+          <span class="size-2 shrink-0 rounded-full" :style="{ background: service.color }" aria-hidden="true" />
+          <span class="flex-1 truncate">{{ service.name }}</span><span class="text-xs tabular-nums text-muted-foreground">{{ service.hits }}</span>
+        </button>
+      </aside>
+      <div class="min-w-0 flex-1 space-y-3">
+      <p v-if="data && !rows.length" class="text-muted-foreground">{{ serviceFilter ? 'No filters for this service.' : 'No filters. New enabled filters enforce as soon as the proxy applies them.' }}</p>
+      <div v-if="rows.length" aria-label="Filter rules" class="rounded-md border">
+      <FilterRow v-for="row in rows" :key="row.id" :filter="row" :service-name="[row.service_id, ...(row.additional_service_ids ?? [])].map(id => serviceNames[id] ?? id).join(', ')" :service-color="serviceColors[row.service_id] ?? defaultServiceColor(row.service_id)" :selected="selected.includes(row.id)" :disabled="busy || Boolean(savingState)" :saving="savingState === row.id" :apply-status="reconciliationError ? 'error' : data?.apply_status ?? ''" @select="toggleSelection(row.id, $event)" @state="setState(row, $event)" @edit="edit(row)" @test="test(row)" @enforce="enforce(row)" @remove="remove(row)" />
+      </div>
+      </div>
     </div>
     <div class="flex gap-2"><Button v-if="after" variant="outline" :disabled="busy" @click="load('')">First page</Button><Button v-if="data?.next_cursor" variant="outline" :disabled="busy" @click="load(data.next_cursor)">Next page</Button></div>
   </section>

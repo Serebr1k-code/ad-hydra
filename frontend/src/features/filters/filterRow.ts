@@ -41,3 +41,18 @@ export function defaultActionType(protocolId: string, transport: string): string
   if (protocolId === 'http') return 'block'
   return transport === 'udp' ? 'drop_datagram' : 'drop_connection'
 }
+
+/** Filters shown for one service; an empty id means every service. */
+export function visibleFilters<T extends { service_id: string; additional_service_ids?: string[] }>(rules: T[], serviceId: string): T[] {
+  if (!serviceId) return rules
+  return rules.filter(rule => rule.service_id === serviceId || (rule.additional_service_ids ?? []).includes(serviceId))
+}
+
+/** Total hits per service, counting a shared rule once for each of its services. */
+export function hitsByService(rules: Array<{ service_id: string; additional_service_ids?: string[]; hit_count: number }>): Record<string, number> {
+  const totals: Record<string, number> = {}
+  for (const rule of rules) {
+    for (const id of [rule.service_id, ...(rule.additional_service_ids ?? [])]) totals[id] = (totals[id] ?? 0) + rule.hit_count
+  }
+  return totals
+}

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { defaultActionType, expressionFromRow, rowFromExpression, type FilterRow } from './filterRow'
+import { defaultActionType, expressionFromRow, hitsByService, rowFromExpression, visibleFilters, type FilterRow } from './filterRow'
 
 const row: FilterRow = { pattern: '\\.\\./', direction: 'both' }
 
@@ -47,5 +47,16 @@ describe('flat filter rows', () => {
 
   test('an empty pattern is still a row so the editor can open it', () => {
     expect(rowFromExpression(expressionFromRow({ pattern: '', direction: 'both' }))).toEqual({ pattern: '', direction: 'both' })
+  })
+  test('narrows the list to one service and counts its hits', () => {
+    const rules = [
+      { service_id: 'web', hit_count: 5 },
+      { service_id: 'ssh', hit_count: 2 },
+      { service_id: 'web', additional_service_ids: ['ssh'], hit_count: 1 },
+    ]
+    expect(visibleFilters(rules, '')).toHaveLength(3)
+    expect(visibleFilters(rules, 'ssh').map(rule => rule.hit_count)).toEqual([2, 1])
+    expect(visibleFilters(rules, 'dns')).toEqual([])
+    expect(hitsByService(rules)).toEqual({ web: 6, ssh: 3 })
   })
 })
