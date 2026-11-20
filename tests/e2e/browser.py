@@ -847,11 +847,11 @@ class Browser(unittest.TestCase):
                             with connection:
                                 connection.settimeout(5);connection.sendall(b'\x1b[32mName: \x1b[0m')
                                 value=b''
-                                while not value.endswith(b'\n'):
+                                while b'\n' not in value:
                                     part=connection.recv(128)
                                     if not part:return
                                     value+=part
-                                if value==b'alice\n':
+                                if value.split(b'\n',1)[0]==b'alice':
                                     connection.sendall(b'Loading 1%\r\x1b[2KWelcome, \xc3');time.sleep(.03);connection.sendall(b'\xa9!\nbinary: \xff\n')
                                 terminal_done.wait(5)
                         except OSError:pass
@@ -872,7 +872,9 @@ class Browser(unittest.TestCase):
                         wait(f'Boolean(document.querySelector({json.dumps(selector)}))');cdp.click(f'document.querySelector({json.dumps(selector)})')
                         wait("document.querySelector('#traffic-terminal')?.innerText.includes('Name:')")
                         self.assertIn('Stream · terminal',cdp.evaluate("document.querySelector('[aria-label=\"Stream view\"]').textContent"))
-                        nc_client.sendall(b'alice\n');wait("document.querySelector('#traffic-terminal')?.innerText.includes('Welcome, é!')")
+                        # Leave an unfinished OSC command in client input. It
+                        # must not consume the following server response.
+                        nc_client.sendall(b'alice\n\x1b]unfinished');wait("document.querySelector('#traffic-terminal')?.innerText.includes('Welcome, é!')")
                         wait("document.querySelector('#traffic-terminal')?.innerText.includes('[ff]')")
                         screen=cdp.evaluate("document.querySelector('#traffic-terminal').innerText")
                         self.assertIn('Name: alice',screen);self.assertNotIn('Loading 1%',screen);self.assertNotIn('utf8.text:',screen)
@@ -893,6 +895,80 @@ class Browser(unittest.TestCase):
                         if label=='Decoded conversation':wait("document.querySelector('#traffic-stream').innerText.includes('utf8.text:')")
                         elif label=='Captured bytes':wait("document.querySelector('#traffic-stream').innerText.includes('1b 5b 33 32')")
                         else:wait("document.querySelector('#traffic-terminal')?.innerText.includes('Welcome, é!')")
+                # A new raw TCP history keeps cross-direction read order and
+                # split UTF-8 bytes without changing the captured hex bytes.
+                with socket.socket() as ordered_backend:
+                    ordered_backend.bind(('127.0.0.1',0));ordered_backend.listen();ordered_backend.settimeout(10)
+                    ordered_done=threading.Event();ordered_error=[]
+                    def ordered_reply():
+                        try:
+                            peer,_=ordered_backend.accept()
+                            with peer:
+                                peer.settimeout(5);received=b''
+                                while len(received)<2:
+                                    part=peer.recv(128)
+                                    if not part:return
+                                    received+=part
+                                if received!=b'A\xc3':raise AssertionError(f'first TCP chunk: {received!r}')
+                                peer.sendall(b'B')
+                                received=b''
+                                while len(received)<2:
+                                    part=peer.recv(128)
+                                    if not part:return
+                                    received+=part
+                                if received!=b'\xa9C':raise AssertionError(f'second TCP chunk: {received!r}')
+                                peer.sendall(b'D')
+                        except (AssertionError,OSError) as error:ordered_error.append(str(error))
+                        finally:ordered_done.set()
+                    threading.Thread(target=ordered_reply,daemon=True).start()
+                    cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Services').click()")
+                    wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent==='Add service'&&!b.disabled)")
+                    cdp.click("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add service')")
+                    wait("Boolean(document.querySelector('#service-form'))")
+                    ordered_service={**service,'name':'Browser ordered raw','protocol_id':'raw','listen_address':f'127.0.0.1:{port()}','upstream_address':f'127.0.0.1:{ordered_backend.getsockname()[1]}'}
+                    fill_service(ordered_service)
+                    with sqlite3.connect(tmp/'db') as database:
+                        ordered_id=next(item['id'] for item in json.loads(database.execute('SELECT services FROM control_state').fetchone()[0]) if item['listen_address']==ordered_service['listen_address'])
+                    cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Traffic').click()")
+                    wait("document.querySelector('#traffic-live-status')?.textContent==='Live'")
+                    cdp.click("document.querySelector('#traffic-service')")
+                    wait(f"[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].some(e=>e.textContent.trim()==={json.dumps(ordered_service['name'])})")
+                    cdp.click(f"[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].find(e=>e.textContent.trim()==={json.dumps(ordered_service['name'])})")
+                    with socket.create_connection(('127.0.0.1',int(ordered_service['listen_address'].split(':')[1])),timeout=5) as ordered_client:
+                        ordered_client.settimeout(5);ordered_client.sendall(b'A\xc3');self.assertEqual(ordered_client.recv(1),b'B')
+                        ordered_client.sendall(b'\xa9C');self.assertEqual(ordered_client.recv(1),b'D')
+                    self.assertTrue(ordered_done.wait(5), 'ordered TCP backend did not finish')
+                    self.assertEqual(ordered_error,[])
+                    selector=f'#traffic-sessions [data-service-id="{ordered_id}"]'
+                    wait(f'Boolean(document.querySelector({json.dumps(selector)}))')
+                    cdp.click(f'document.querySelector({json.dumps(selector)})')
+                    wait("document.querySelector('#traffic-stream').innerText.includes('Closed')")
+                    wait("document.querySelector('#traffic-stream').innerText.includes('chunk #4')")
+                    cdp.click("document.querySelector('[aria-label=\"Stream view\"]')")
+                    wait("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].some(e=>e.textContent.trim()==='Decoded conversation')")
+                    cdp.click("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].find(e=>e.textContent.trim()==='Decoded conversation')")
+                    wait("document.querySelectorAll('#traffic-stream article[data-direction]').length===4")
+                    decoded=cdp.evaluate("[...document.querySelectorAll('#traffic-stream article[data-direction]')].map(e=>[e.dataset.direction,e.querySelector('pre')?.textContent])")
+                    self.assertEqual(decoded,[['1','A'],['2','B'],['1','éC'],['2','D']])
+                    self.assertIn('chunk #1',cdp.evaluate("document.querySelector('#traffic-stream').innerText"))
+                    pathlib.Path('/tmp/hydra-ordered-raw-desktop.png').write_bytes(base64.b64decode(cdp.call('Page.captureScreenshot',{'format':'png'})['data']))
+                    cdp.click("document.querySelector('[aria-label=\"Stream view\"]')")
+                    wait("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].some(e=>e.textContent.trim()==='Captured bytes')")
+                    cdp.click("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].find(e=>e.textContent.trim()==='Captured bytes')")
+                    cdp.click("document.querySelector('[aria-label=\"Raw byte format\"]')")
+                    wait("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].some(e=>e.textContent.trim()==='UTF-8')")
+                    cdp.click("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].find(e=>e.textContent.trim()==='UTF-8')")
+                    wait("document.querySelectorAll('#traffic-stream article[data-direction]').length===4")
+                    utf8=cdp.evaluate("[...document.querySelectorAll('#traffic-stream article[data-direction]')].map(e=>[e.dataset.direction,e.querySelector('pre')?.textContent])")
+                    self.assertEqual(utf8,[['1','A'],['2','B'],['1','éC'],['2','D']])
+                    self.assertNotIn('�',str(utf8))
+                    cdp.click("document.querySelector('[aria-label=\"Raw byte format\"]')")
+                    wait("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].some(e=>e.textContent.trim()==='Hex dump')")
+                    cdp.click("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].find(e=>e.textContent.trim()==='Hex dump')")
+                    hex_chunks=cdp.evaluate("[...document.querySelectorAll('#traffic-stream article[data-direction]')].map(e=>[e.dataset.direction,e.querySelector('pre')?.textContent,e.innerText])")
+                    self.assertEqual([chunk[0] for chunk in hex_chunks],['1','2','1','2'])
+                    for chunk,prefix in zip(hex_chunks,['00000000  41 c3','00000000  42','00000000  a9 43','00000000  44']):self.assertTrue(chunk[1].startswith(prefix),chunk[1])
+                    for index,chunk in enumerate(hex_chunks,1):self.assertIn(f'chunk #{index}',chunk[2])
                 # Real UDP traffic is visible without switching away from the default list.
                 with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as udp_backend:
                     udp_backend.bind(('127.0.0.1',0));udp_backend.settimeout(10)

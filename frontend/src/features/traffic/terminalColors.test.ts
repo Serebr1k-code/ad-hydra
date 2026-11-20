@@ -18,3 +18,7 @@ test('C1 commands and terminal resets cannot override direction or swallow follo
  const result=coloredChunks([{id:'a',direction:2,text:'\u009b31mblue\u009d52;clipboard\u009ctext\x1bc\x1b[!p!'}])
  expect(result[0]!.text).toBe('\x1b[38;2;96;165;250mbluetext!')
 })
+test('an unfinished terminal command in one direction cannot swallow the other direction',()=>{
+ const result=coloredChunks([{id:'client',direction:1,text:'\x1b]unfinished title'},{id:'server',direction:2,text:'HELLO\n'}])
+ expect(result.map(chunk=>chunk.text)).toEqual(['','\x1b[38;2;96;165;250mHELLO\n'])
+})

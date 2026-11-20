@@ -20,6 +20,10 @@ export function mergeFlows(current: Flow[], incoming: Flow[], older = false): Fl
 }
 export function messageRows(page: Page) { return page.items.map(item => ({ ...item, blocked:item.blocked===true, message_id:text(item.message_id), stream_sequence:item.stream_sequence, occurred_ms:item.occurred_ms, direction:item.direction, message_type:text(item.message_type), protocol_id:text(item.protocol_id), fields:record(item.fields), truncated:item.truncated===true })) }
 export type Message = ReturnType<typeof messageRows>[number]
+/** Native raw byte summaries describe read sizes; they are not decoded payload messages. */
+export function onlyRawSummaryMessages(messages: Message[], protocolId: string): boolean {
+ return protocolId==='raw'&&messages.length>0&&messages.every(message=>message.protocol_id==='transfer'&&message.message_type==='byte_summary')
+}
 export function serviceProtocol(service:{id:string;protocol_id:string},activations:{service_id:string;id:string;version:string;applied:boolean}[]):string {
  const active=activations.find(item=>item.service_id===service.id&&item.applied)
  return active?`custom:${active.id}/${active.version}`:service.protocol_id
@@ -64,23 +68,49 @@ export function bytePreview(data:number[]) {
 }
 // Optional fields remain compatible with histories produced before UDP framing.
 export type SavedHistorySegment = Pick<HistorySegment,'direction'|'data'> & { datagram?: boolean; occurred_at_ms?: number; sequence?: number }
-export type HistoryDisplaySegment = SavedHistorySegment & { truncated: boolean }
+export type HistoryDisplaySegment = SavedHistorySegment & { truncated: boolean; previewText?: string }
 /** Preserves arrival order while optionally limiting a saved stream to one direction. */
 export function historySegments(history: Pick<FlowHistory,'truncated_client_to_server'|'truncated_server_to_client'> & { segments: SavedHistorySegment[] }, side: 'both'|'1'|'2'): HistoryDisplaySegment[] {
  return (history.segments as SavedHistorySegment[]).filter(segment=>side==='both'||String(segment.direction)===side).map(segment=>({...segment,truncated:segment.direction===1?history.truncated_client_to_server:history.truncated_server_to_client}))
+}
+/** Decode saved read chunks incrementally per TCP direction, without changing their byte arrays or order. */
+function withUtf8Previews(segments: HistoryDisplaySegment[]): HistoryDisplaySegment[] {
+ const result=segments.map(segment=>({...segment,previewText:''}))
+ const decoders=new Map<number,TextDecoder>(),lastByDirection=new Map<number,number>()
+ for(const [index,segment] of result.entries()) {
+  if(segment.datagram) {
+   segment.previewText=new TextDecoder('utf-8').decode(new Uint8Array(segment.data))
+   continue
+  }
+  let decoder=decoders.get(segment.direction)
+  if(!decoder){decoder=new TextDecoder('utf-8');decoders.set(segment.direction,decoder)}
+  segment.previewText=decoder.decode(new Uint8Array(segment.data),{stream:true})
+  lastByDirection.set(segment.direction,index)
+ }
+ for(const [direction,decoder] of decoders) {
+  const last=result[lastByDirection.get(direction)!]
+  if(last)last.previewText+=decoder.decode()
+ }
+ return result
+}
+/** Captured-byte UTF-8 view: direction tails decode incrementally while each UDP datagram resets decoding. */
+export function historyUtf8Segments(history: Pick<FlowHistory,'truncated_client_to_server'|'truncated_server_to_client'> & { segments: SavedHistorySegment[] }, side: 'both'|'1'|'2'): HistoryDisplaySegment[] {
+ return withUtf8Previews(historySegments(history,side))
 }
 /** Combine saved chunks per direction so split UTF-8 code points decode correctly. */
 export function historyTextSegments(history: Pick<FlowHistory,'truncated_client_to_server'|'truncated_server_to_client'> & { segments: SavedHistorySegment[] }, side: 'both'|'1'|'2'): HistoryDisplaySegment[] {
  const segments=historySegments(history,side)
  // Datagram text must never combine adjacent packets or split UTF-8 between packets.
- if(segments.some(segment=>segment.datagram))return segments
+ if(segments.some(segment=>segment.datagram))return withUtf8Previews(segments)
+ // New TCP records carry one global sequence; keep the true conversation order.
+ if(segments.length&&segments.every(segment=>Number(segment.sequence)>0))return withUtf8Previews(segments)
  const grouped=new Map<number,HistoryDisplaySegment>()
  for(const segment of segments) {
   const existing=grouped.get(segment.direction)
   if(existing){existing.data.push(...segment.data);existing.truncated ||= segment.truncated}
   else grouped.set(segment.direction,{...segment,data:[...segment.data]})
  }
- return [...grouped.values()]
+ return withUtf8Previews([...grouped.values()])
 }
 /** Raw defaults to the hex dump; text decoding is an explicit operator choice. */
 export function historyPreview(segment: Pick<HistorySegment,'data'>, mode: 'hex'|'utf8'|'ascii'): string {
