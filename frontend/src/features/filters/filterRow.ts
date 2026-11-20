@@ -36,6 +36,8 @@ export function expressionFromRow(row: FilterRow): Expression {
   return row.direction === 'both' ? predicate : { direction: row.direction, scoped: predicate }
 }
 
-export function rowAction(row: FilterRow, transport: string): Record<string, unknown> {
-  return transport === 'udp' ? { type: 'drop_datagram' } : { type: 'drop_connection' }
+/** HTTP services answer a block with a status; other transports drop. */
+export function defaultActionType(protocolId: string, transport: string): string {
+  if (protocolId === 'http') return 'block'
+  return transport === 'udp' ? 'drop_datagram' : 'drop_connection'
 }

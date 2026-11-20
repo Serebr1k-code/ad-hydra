@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { expressionFromRow, rowAction, rowFromExpression, type FilterRow } from './filterRow'
+import { defaultActionType, expressionFromRow, rowFromExpression, type FilterRow } from './filterRow'
 
 const row: FilterRow = { pattern: '\\.\\./', direction: 'both' }
 
@@ -39,9 +39,10 @@ describe('flat filter rows', () => {
     expect(rowFromExpression({})).toBeNull()
   })
 
-  test('picks the transport-specific drop action', () => {
-    expect(rowAction(row, 'tcp')).toEqual({ type: 'drop_connection' })
-    expect(rowAction(row, 'udp')).toEqual({ type: 'drop_datagram' })
+  test('picks a default action the transport supports', () => {
+    expect(defaultActionType('http', 'tcp')).toBe('block')
+    expect(defaultActionType('raw', 'tcp')).toBe('drop_connection')
+    expect(defaultActionType('raw', 'udp')).toBe('drop_datagram')
   })
 
   test('an empty pattern is still a row so the editor can open it', () => {

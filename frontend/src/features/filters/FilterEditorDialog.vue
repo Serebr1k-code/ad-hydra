@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Textarea } from '@/components/ui/textarea'
 import RuleGroupEditor from './RuleGroupEditor.vue'
 import { createGroup, fromExpression, toExpression, type Group } from './ruleBuilder'
+import { defaultActionType, expressionFromRow, rowFromExpression, type RowDirection } from './filterRow'
 import { fieldsForService, type DecoderCatalog } from './fieldCatalog'
 import type { RuleField } from './ruleBuilder'
 import { api, errorMessage } from '@/shared/api/client'
@@ -70,6 +71,19 @@ const form = reactive({
   service_id: '', additional_service_ids: [] as string[], name: '', description: '', enabled: true, mode: 'enforce', priority: 10,
   actionType: 'block', httpStatus: 403, tag: '', expires: '', rules: createGroup(),
 })
+const patternMode = ref(true)
+const row = reactive({ pattern: '', direction: 'both' as RowDirection })
+const directionOptions: Array<{ value: RowDirection; label: string }> = [
+  { value: 'both', label: 'Both directions' },
+  { value: 'client_to_server', label: 'Client to server' },
+  { value: 'server_to_client', label: 'Server to client' },
+]
+function currentExpression(): Record<string, unknown> {
+  if (!patternMode.value) return toExpression(form.rules, availableFields.value)
+  if (!row.pattern) throw new Error('Enter a pattern')
+  try { new RegExp(row.pattern) } catch { throw new Error('Invalid regular expression') }
+  return expressionFromRow({ pattern: row.pattern, direction: row.direction })
+}
 const previewRows = ref<StreamPreviewResult[]>([])
 const previewBusy = ref(false)
 const previewError = ref('')
@@ -86,7 +100,7 @@ function schedulePreview() {
   previewTimer = setTimeout(async () => {
     try {
       if (form.additional_service_ids.length) ensureSharedFields(form.rules)
-      const expression = toExpression(form.rules, availableFields.value)
+      const expression = currentExpression()
       const action: Record<string, unknown> = form.actionType === '__preserve__' && preservedAction.value ? preservedAction.value : form.actionType === 'block'
         ? { type: 'block', http_status: form.httpStatus }
         : form.actionType === 'tag' ? { type: 'tag', tag: form.tag } : { type: form.actionType }
@@ -118,11 +132,16 @@ watch(() => [props.open, props.filter, props.services] as const, ([open]) => {
   form.enabled = filter?.enabled ?? true
   form.mode = filter?.mode ?? 'enforce'
   form.priority = filter?.priority ?? 10
-  form.actionType = actionType
+  const chosen = props.services.find(service => service.id === form.service_id)
+  form.actionType = filter ? actionType : defaultActionType(chosen?.protocol_id ?? 'raw', chosen?.transport ?? 'tcp')
   form.httpStatus = typeof action.http_status === 'number' ? action.http_status : 403
   form.tag = typeof action.tag === 'string' ? action.tag : ''
   const localExpiration = filter?.expires_at_ms ? new Date(filter.expires_at_ms - new Date().getTimezoneOffset() * 60_000) : null
   form.expires = localExpiration ? localExpiration.toISOString().slice(0, 16) : ''
+  const savedRow = filter ? rowFromExpression(filter.expression) : null
+  patternMode.value = filter ? Boolean(savedRow) : true
+  row.pattern = savedRow?.pattern ?? ''
+  row.direction = savedRow?.direction ?? 'both'
   try { form.rules = filter ? fromExpression(filter.expression) : createGroup('all', defaultField.value, availableFields.value) }
   catch {
     form.rules = createGroup()
@@ -148,8 +167,8 @@ function save() {
   }
   let expression: Record<string, unknown>
   try {
-    if (form.additional_service_ids.length) ensureSharedFields(form.rules)
-    expression = toExpression(form.rules, availableFields.value)
+    if (form.additional_service_ids.length && !patternMode.value) ensureSharedFields(form.rules)
+    expression = currentExpression()
     ruleError.value = ''
   }
   catch (cause) { ruleError.value = cause instanceof Error ? cause.message : 'Invalid rules'; return }
@@ -188,7 +207,7 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
       <div :class="hasSelectedStreams ? 'grid min-h-0 flex-1 gap-4 overflow-y-auto lg:grid-cols-2 lg:overflow-hidden' : ''">
       <form id="filter-editor-form" class="min-w-0 space-y-5" :class="hasSelectedStreams ? 'lg:overflow-y-auto lg:pr-3' : ''" @submit.prevent="save">
         <div class="grid gap-4 md:grid-cols-2">
-          <div class="space-y-2"><Label for="filter-name">Name</Label><Input id="filter-name" v-model="form.name" required maxlength="256" /></div>
+          <div class="space-y-2"><Label for="filter-name">{{ patternMode ? 'Tag' : 'Name' }}</Label><Input id="filter-name" v-model="form.name" required maxlength="256" /></div>
           <div class="space-y-2"><Label>Service</Label><Select v-model="form.service_id" :disabled="hasSelectedStreams"><SelectTrigger aria-label="Filter service"><SelectValue placeholder="Choose service" /></SelectTrigger><SelectContent><SelectItem v-for="service in services" :key="service.id" :value="service.id">{{ service.name }}</SelectItem></SelectContent></Select></div>
           <fieldset v-if="services.length > 1" class="space-y-2 md:col-span-2">
             <legend class="text-sm font-medium">Also apply to</legend>
@@ -207,18 +226,23 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
             <p class="text-xs text-muted-foreground">The rule editor shows fields available on every selected service.</p>
           </fieldset>
           <div class="space-y-2"><Label for="filter-mode">Mode</Label><Select v-model="form.mode"><SelectTrigger id="filter-mode"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="shadow">Shadow (observe only)</SelectItem><SelectItem value="enforce">Enforce</SelectItem></SelectContent></Select></div>
-          <div class="space-y-2"><Label for="filter-priority">Priority</Label><Input id="filter-priority" v-model.number="form.priority" type="number" min="0" max="1000000" /></div>
-          <div class="space-y-2 md:col-span-2"><Label for="filter-description">Description</Label><Textarea id="filter-description" v-model="form.description" maxlength="4096" rows="2" /></div>
+          <div v-if="!patternMode" class="space-y-2"><Label for="filter-priority">Priority</Label><Input id="filter-priority" v-model.number="form.priority" type="number" min="0" max="1000000" /></div>
+          <div v-if="!patternMode" class="space-y-2 md:col-span-2"><Label for="filter-description">Description</Label><Textarea id="filter-description" v-model="form.description" maxlength="4096" rows="2" /></div>
         </div>
 
         <p v-if="form.mode === 'shadow'" role="status" class="rounded-md border p-3 text-sm">Shadow mode: matches are counted, but traffic is allowed through. Choose Enforce to apply the action immediately; saved-traffic testing is optional.</p>
 
         <p v-if="form.mode === 'enforce'" role="status" class="rounded-md border p-3 text-sm">Saving applies this rule as soon as the proxy acknowledges the new revision. No traffic test is required.</p>
 
-        <section class="space-y-2" :aria-disabled="!expressionEditable">
-          <div><h3 class="font-medium">Match conditions</h3><p class="text-sm text-muted-foreground">Groups add parentheses. Choose whether all or any conditions inside a group must match. Each condition has its own direction. Conditions evaluate one message at a time; use OR to match either a client-only or a server-only condition.</p></div>
+        <section v-if="patternMode" class="grid gap-4 md:grid-cols-2">
+          <div class="space-y-2 md:col-span-2"><Label for="filter-pattern">Pattern</Label><Input id="filter-pattern" v-model="row.pattern" class="font-mono" placeholder="\.\./" maxlength="1024" /></div>
+          <div class="space-y-2"><Label>Direction</Label><Select v-model="row.direction"><SelectTrigger aria-label="Pattern direction"><SelectValue /></SelectTrigger><SelectContent><SelectItem v-for="option in directionOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem></SelectContent></Select></div>
+          <div class="flex items-end"><Button type="button" variant="ghost" size="sm" @click="patternMode = false">Advanced expression</Button></div>
+        </section>
+        <section v-else class="space-y-2" :aria-disabled="!expressionEditable">
+          <div><h3 class="font-medium">Match conditions</h3><p class="text-sm text-muted-foreground">Groups add parentheses. Choose whether all or any conditions inside a group must match. Each condition has its own direction.</p></div>
           <RuleGroupEditor :group="form.rules" :fields="availableFields" />
-          <p class="text-xs text-muted-foreground">Live byte limits count bytes as they arrive. HTTP counts body bytes per request; other TCP profiles count each stream direction, and UDP counts each datagram. Use Block transfer to stop the selected direction immediately; on TCP this closes the whole connection. Block HTTP request is for client requests.</p>
+          <Button type="button" variant="ghost" size="sm" @click="patternMode = true">Simple pattern</Button>
         </section>
 
         <div class="grid gap-4 md:grid-cols-2">
