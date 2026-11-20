@@ -262,7 +262,8 @@ async fn client_to_server(
                     {
                         return Err(std::io::ErrorKind::PermissionDenied.into());
                     }
-                    let action = inspect_message(c, frame.message, frame.bytes.len(), true);
+                    let size = frame.bytes.len();
+                    let action = inspect_message(c, frame.message, size, true, &frame.bytes);
                     match action {
                         Some(Action::Block { http_status }) => {
                             if c.flow.up.load(Ordering::Relaxed) > 0 {
@@ -337,7 +338,8 @@ async fn server_to_client(
                 match result {
                     Ok(frames) => {
                         for frame in frames {
-                            inspect_message(c, frame.message, frame.bytes.len(), false);
+                            let size = frame.bytes.len();
+                            inspect_message(c, frame.message, size, false, &frame.bytes);
                         }
                     }
                     Err(_) => c.telemetry.decoder_error(
@@ -375,6 +377,7 @@ fn inspect_message(
     mut message: hydra_protocol_sdk::ParsedMessage,
     size: usize,
     safe_http: bool,
+    stream: &[u8],
 ) -> Option<Action> {
     c.flow
         .body_sizes
@@ -390,7 +393,7 @@ fn inspect_message(
     } else {
         "server_to_client"
     };
-    let fields = merged_fields(c, direction, &message, size);
+    let fields = merged_fields(c, direction, &message, size, stream);
     let raw_payload = message.protocol == "raw";
     let message_id = if raw_payload {
         String::new()
@@ -410,6 +413,7 @@ fn merged_fields(
     direction: &str,
     message: &hydra_protocol_sdk::ParsedMessage,
     size: usize,
+    stream: &[u8],
 ) -> std::collections::BTreeMap<String, hydra_domain::FieldValue> {
     let mut fields: std::collections::BTreeMap<String, hydra_domain::FieldValue> = message
         .fields
@@ -420,6 +424,12 @@ fn merged_fields(
     fields.insert(
         "packet.size".into(),
         hydra_domain::FieldValue::Uint(size as u64),
+    );
+    // Host-owned raw window so pattern rules can match the byte stream on any
+    // profile; inserted last, so a decoder cannot shadow it.
+    fields.insert(
+        "stream.text".into(),
+        hydra_domain::FieldValue::String(String::from_utf8_lossy(stream).into_owned()),
     );
     fields
 }
@@ -472,7 +482,7 @@ fn inspect_raw(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
                 let emitted = !messages.is_empty();
                 for (message, size) in messages {
                     if matches!(
-                        inspect_message(c, message, size, false),
+                        inspect_message(c, message, size, false, bytes),
                         Some(Action::DropConnection)
                     ) {
                         return true;

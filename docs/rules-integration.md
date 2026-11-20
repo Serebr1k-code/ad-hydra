@@ -98,7 +98,7 @@ compiled regex/DFA caches per regex. Snapshot-wide allocation-free preflight lim
 total AST nodes to 512, regex predicates to 16, and expected data to 256 KiB. Field paths are at most 256 bytes; empty
 segments are invalid. Built-in field registry accepts `http.method`, `http.path`,
 `http.user_agent`, `http.body_text`, `http.body_length`, `body.size`,
-`body.size_scope`, `transfer.bytes`, `packet.size`, `network.src_ip`, `network.src_port`, `network.dst_ip`,
+`body.size_scope`, `transfer.bytes`, `packet.size`, `stream.text`, `network.src_ip`, `network.src_port`, `network.dst_ip`,
 `network.dst_port`, `transport.kind`, `direction` and extensible `protocol.*`
 paths. Unknown HTTP/metadata paths reject the snapshot. Rule IDs are unique and at most 128 bytes. Live evaluation
 accepts decoded values up to 68 KiB, so a 16 KiB read plus the raw overlap tail and a
