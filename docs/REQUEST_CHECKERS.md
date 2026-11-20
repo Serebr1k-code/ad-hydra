@@ -6,7 +6,7 @@ A request checker runs before Proxy forwards client traffic to a local service. 
 
 The Hydra installer installs `bubblewrap`, the system `python3`, and the `libseccomp.so.2` runtime. Bubblewrap must support unprivileged user namespaces. On an existing installation, install those packages with the host distribution's package manager before enabling Python checkers.
 
-Managed Python checkers can be created from **Filters → Request checkers** by pasting source or uploading a `.py` file (up to 256 KiB). The UI stores managed source in Proxy's private checker program store; it does not accept filesystem paths. New programs start paused. Select one or more services and save checker settings to enable it. You can edit or delete managed source from the UI. Deleting a program preserves its `/state` data.
+Managed Python checkers can be created from **Filters → Add filter → Script** (one service per script) or from **Filters → Request checkers** by pasting source or uploading a `.py` file (up to 256 KiB). The UI stores managed source in Proxy's private checker program store; it does not accept filesystem paths. New programs start paused. Select one or more services and save checker settings to enable it. You can edit or delete managed source from the UI. Deleting a program preserves its `/state` data.
 
 Legacy checkers can still be configured by an administrator in Proxy JSON with an absolute `script` path. Those entries appear read-only in the UI; service assignments, timeout, and error fallback remain editable. Define `check(request: bytes) -> bool`. Returning `True` allows traffic to continue through the existing filters. Returning `False` closes the TCP connection or drops the UDP datagram.
 
@@ -22,6 +22,8 @@ def check(request: bytes) -> bool:
         LIMIT.write_text("65536\n", encoding="utf-8")
     return len(request) <= int(LIMIT.read_text(encoding="utf-8"))
 ```
+
+A service runs at most one checker, so assigning a second script to the same service takes it away from the first. Script rows in the filter list show their source on hover; delete removes the policy and the stored program.
 
 For legacy path-based checkers, add the following property to the existing Proxy JSON (typically `/etc/hydra/proxy.json`). Replace the service identifier with the ID shown by the Services API. One checker can cover several explicit service IDs. Each service can have one checker.
 

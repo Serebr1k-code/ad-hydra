@@ -9,7 +9,7 @@ Hydra runs as two native processes on x86_64 Linux. Its design target is **2 vCP
 - **Inspect traffic.** Follow live and saved TCP streams and UDP conversations. View decoded fields, HTTP headers, terminal-style text, or captured bytes in hex. Favourite a stream to preserve it through normal rotation.
 - **Decode your protocols.** Use built-in HTTP, UTF-8, and raw profiles or upload a WASM decoder. Ordinary proxying passes unknown protocols through unchanged.
 - **Terminate TLS.** Give a TCP service a PEM certificate to inspect HTTPS at the proxy, and optionally speak TLS to the backend. ALPN offers HTTP/1.1 only.
-- **Filter traffic.** Build rules with nested AND/OR groups, per-condition direction, and fields from the active decoder. Preview against saved traffic or apply rules live. See desired and applied revisions, match counts, and author history.
+- **Filter traffic.** Add a rule as one regex over the stream with a free-text tag, or as a Python script that returns `False` to block; richer AND/OR conditions stay one click away. Preview against saved traffic or apply rules live. See desired and applied revisions, match counts, and author history.
 - **Protect services under load.** Set per-service connection and traffic limits and monitor their effect in the console.
 - **Manage the workspace.** Manage users and settings through the console, review audit events, and use the documented HTTPS API.
 

@@ -606,7 +606,13 @@ async fn decoder_fields_cannot_shadow_host_network_metadata() {
             ("packet.size".into(), Value::Unsigned(1)),
         ]),
     };
-    let fields = merged_fields(&context, "client_to_server", &message, 99, b"GET /x HTTP/1.1");
+    let fields = merged_fields(
+        &context,
+        "client_to_server",
+        &message,
+        99,
+        b"GET /x HTTP/1.1",
+    );
     assert_eq!(
         fields["network.src_ip"],
         hydra_domain::FieldValue::String("203.0.113.7".into())

@@ -5,16 +5,18 @@ import type { FilterInput, ListResponse } from '@/generated/contracts'
 import { api, errorMessage } from '@/shared/api/client'
 import { enforceSavedFilter } from './filterWorkflow'
 import FilterTestDialog from './FilterTestDialog.vue'
-import FilterEditorDialog, { type FilterRecord } from './FilterEditorDialog.vue'
+import FilterEditorDialog, { type FilterRecord, type ScriptRecord } from './FilterEditorDialog.vue'
 import type { DecoderCatalog } from './fieldCatalog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import FilterRow from './FilterRow.vue'
 import RequestCheckerSettings from './RequestCheckerSettings.vue'
 import { setFilterEnabled, type FilterRule } from './filterState'
 import { createPendingReconciliation } from './pendingReconciliation'
 import { hitsByService, visibleFilters } from './filterRow'
+import { assignService, scriptRows as buildScriptRows, setPolicyService, upsertPolicy, withoutPolicy, type ScriptPolicy, type ScriptProgram, type ScriptRow } from './scriptFilters'
 import { defaultServiceColor, resolveServiceColors } from '@/features/services/colors'
 import { parseStreamSelection, type StreamSelection } from '@/features/traffic/streamSelection'
 
@@ -31,6 +33,13 @@ const serviceNames = computed(() => Object.fromEntries(services.value.map(servic
 const editorOpen = ref(false)
 watch(editorOpen, open => { if (!open) fromTraffic.value = null })
 const editing = ref<Filter | undefined>()
+const editingScript = ref<ScriptRecord | null>(null)
+const editorTab = ref<'regex' | 'script'>('regex')
+const programs = ref<ScriptProgram[]>([])
+const policies = ref<ScriptPolicy[]>([])
+const programsRevision = ref(0)
+const policiesRevision = ref(0)
+const scripts = computed<ScriptRow[]>(() => buildScriptRows(programs.value, policies.value).filter(row => !serviceFilter.value || row.services.includes(serviceFilter.value)))
 const testOpen = ref(false)
 const testing = ref<Pick<FilterRecord, 'id' | 'name' | 'service_id' | 'additional_service_ids'>>()
 const error = ref('')
@@ -76,11 +85,17 @@ async function load(cursor = after.value) {
   busy.value = true
   error.value = ''
   try {
-    const [filters, serviceItems, protocols] = await Promise.all([
+    const [filters, serviceItems, protocols, checkerSettings, checkerPrograms] = await Promise.all([
       api<Filters>(`/filters?q=${encodeURIComponent(filterQuery)}&after=${encodeURIComponent(cursor)}`),
       loadServices(),
       api<DecoderCatalog>('/protocols'),
+      api<{ revision: number; policies: ScriptPolicy[] }>('/filters/request-checkers').catch(() => ({ revision: 0, policies: [] })),
+      api<{ revision: number; programs: ScriptProgram[] }>('/filters/request-checkers/programs').catch(() => ({ revision: 0, programs: [] })),
     ])
+    policies.value = checkerSettings.policies
+    policiesRevision.value = checkerSettings.revision
+    programs.value = checkerPrograms.programs
+    programsRevision.value = checkerPrograms.revision
     data.value = filters
     loadedQuery = filterQuery
     reconciliationError.value = ''
@@ -93,7 +108,51 @@ async function load(cursor = after.value) {
 }
 function edit(filter?: Filter) {
   editing.value = filter
+  editingScript.value = null
+  editorTab.value = 'regex'
   editorOpen.value = true
+}
+function editScript(row: ScriptRow) {
+  editing.value = undefined
+  editingScript.value = { id: row.id, name: row.id, source: row.source, allowOnError: row.allowOnError, serviceId: row.services[0] ?? services.value[0]?.id ?? '' }
+  editorTab.value = 'script'
+  editorOpen.value = true
+}
+async function saveScript(input: { id: string; source: string; serviceId: string; allowOnError: boolean }) {
+  busy.value = true
+  error.value = ''
+  try {
+    await api(`/filters/request-checkers/programs/${encodeURIComponent(input.id)}`, 'PUT', { revision: programsRevision.value, source: input.source })
+    const existing = policies.value.find(policy => policy.id === input.id)
+    const policy: ScriptPolicy = {
+      id: input.id,
+      services: [...new Set([...(existing?.services ?? []), input.serviceId])],
+      timeout_ms: existing?.timeout_ms ?? 50,
+      allow_on_error: input.allowOnError,
+    }
+    await api('/filters/request-checkers', 'PUT', { revision: policiesRevision.value, policies: assignService(upsertPolicy(policies.value, policy), policy.id, input.serviceId) })
+    editorOpen.value = false
+    notice.value = 'Script saved. The proxy applies it to new requests.'
+    await load('')
+  } catch (cause) { error.value = errorMessage(cause) }
+  finally { busy.value = false }
+}
+async function savePolicies(next: ScriptPolicy[]) {
+  await api('/filters/request-checkers', 'PUT', { revision: policiesRevision.value, policies: next })
+  await load('')
+}
+async function toggleScript(row: ScriptRow, enabled: boolean) {
+  const serviceId = serviceFilter.value || services.value[0]?.id
+  if (!serviceId) return
+  try { await savePolicies(setPolicyService(policies.value, row.id, serviceId, enabled)) }
+  catch (cause) { error.value = errorMessage(cause) }
+}
+async function removeScript(row: ScriptRow) {
+  if (!window.confirm('Delete this script?')) return
+  try {
+    await savePolicies(withoutPolicy(policies.value, row.id))
+    await api(`/filters/request-checkers/programs/${encodeURIComponent(row.id)}`, 'DELETE', { revision: programsRevision.value }).catch(() => {})
+  } catch (cause) { error.value = errorMessage(cause) }
 }
 async function saveFilter(value: Omit<FilterInput, 'expected_revision'>) {
   reconciliation.invalidate()
@@ -167,7 +226,7 @@ onMounted(async () => {
 <template>
   <section class="space-y-4">
     <RequestCheckerSettings :services="services" />
-    <FilterEditorDialog v-model:open="editorOpen" :busy="busy" :error="error" :services="services" :catalog="decoderCatalog" :filter="editing" :initial-service-id="fromTraffic?.service_id" :initial-flow-ids="fromTraffic?.flow_ids" @save="saveFilter" />
+    <FilterEditorDialog v-model:open="editorOpen" :busy="busy" :error="error" :services="services" :catalog="decoderCatalog" :filter="editing" :script="editingScript" :initial-tab="editorTab" :initial-service-id="fromTraffic?.service_id" :initial-flow-ids="fromTraffic?.flow_ids" @save="saveFilter" @save-script="saveScript" />
     <FilterTestDialog v-model:open="testOpen" :filter="testing" :service-names="serviceNames" @enforced="enforced" />
     <h1 class="text-2xl font-semibold">Filters</h1>
     <div class="flex flex-wrap items-center gap-3">
@@ -191,9 +250,24 @@ onMounted(async () => {
         </button>
       </aside>
       <div class="min-w-0 flex-1 space-y-3">
-      <p v-if="data && !rows.length" class="text-muted-foreground">{{ serviceFilter ? 'No filters for this service.' : 'No filters. New enabled filters enforce as soon as the proxy applies them.' }}</p>
-      <div v-if="rows.length" aria-label="Filter rules" class="rounded-md border">
+      <p v-if="data && !rows.length && !scripts.length" class="text-muted-foreground">{{ serviceFilter ? 'No filters for this service.' : 'No filters. New enabled filters enforce as soon as the proxy applies them.' }}</p>
+      <div v-if="rows.length || scripts.length" aria-label="Filter rules" class="rounded-md border">
       <FilterRow v-for="row in rows" :key="row.id" :filter="row" :service-name="[row.service_id, ...(row.additional_service_ids ?? [])].map(id => serviceNames[id] ?? id).join(', ')" :service-color="serviceColors[row.service_id] ?? defaultServiceColor(row.service_id)" :selected="selected.includes(row.id)" :disabled="busy || Boolean(savingState)" :saving="savingState === row.id" :apply-status="reconciliationError ? 'error' : data?.apply_status ?? ''" @select="toggleSelection(row.id, $event)" @state="setState(row, $event)" @edit="edit(row)" @test="test(row)" @enforce="enforce(row)" @remove="remove(row)" />
+      <div v-for="row in scripts" :key="row.id" class="group border-b border-l-4 last:border-b-0" :style="{ borderLeftColor: serviceColors[row.services[0] ?? ''] ?? defaultServiceColor(row.services[0] ?? '') }">
+        <div class="flex flex-wrap items-center gap-2 px-2 py-0.5 text-[13px]">
+          <Switch :model-value="row.services.length > 0 && (!serviceFilter || row.services.includes(serviceFilter))" :disabled="busy || !serviceFilter" :aria-label="'Enable ' + row.name" @update:model-value="toggleScript(row, $event)" />
+          <span class="rounded border px-1.5 text-[11px] leading-5 text-muted-foreground">python</span>
+          <code class="max-w-80 truncate font-mono">{{ row.name }}</code>
+          <span class="rounded border px-1.5 text-[11px] leading-5 text-muted-foreground">c→s</span>
+          <span class="text-[11px] text-muted-foreground">{{ row.services.map(id => serviceNames[id] ?? id).join(', ') }}</span>
+          <span class="rounded border px-1.5 text-[11px] leading-5 text-muted-foreground">on error: {{ row.allowOnError ? 'allow' : 'block' }}</span>
+          <div class="ml-auto flex items-center gap-1">
+            <Button variant="ghost" size="xs" :disabled="busy" @click="editScript(row)">Edit</Button>
+            <Button variant="ghost" size="xs" class="text-destructive" :disabled="busy" @click="removeScript(row)">Delete</Button>
+          </div>
+        </div>
+        <pre class="hidden overflow-x-auto border-t px-2 py-1 font-mono text-[11px] leading-5 text-muted-foreground group-hover:block">{{ row.source }}</pre>
+      </div>
       </div>
       </div>
     </div>
