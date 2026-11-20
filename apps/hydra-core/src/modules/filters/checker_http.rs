@@ -21,8 +21,8 @@ use utoipa::ToSchema;
 
 #[derive(Clone)]
 pub(super) struct CheckerState {
-    control: Control,
-    socket: PathBuf,
+    pub(super) control: Control,
+    pub(super) socket: PathBuf,
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
@@ -59,7 +59,7 @@ impl From<v1::RequestCheckerSettings> for RequestCheckerSettings {
     }
 }
 
-fn wire_actor(actor: &audit::Actor, request_id: &str) -> v1::Actor {
+pub(super) fn wire_actor(actor: &audit::Actor, request_id: &str) -> v1::Actor {
     v1::Actor {
         r#type: v1::ActorType::User as i32,
         user_id: actor.id.clone(),
@@ -68,18 +68,18 @@ fn wire_actor(actor: &audit::Actor, request_id: &str) -> v1::Actor {
     }
 }
 
-fn unavailable() -> Error {
+pub(super) fn unavailable() -> Error {
     checker_error(
         StatusCode::SERVICE_UNAVAILABLE,
         "Request checker settings are unavailable",
     )
 }
 
-fn checker_error(status: StatusCode, message: &str) -> Error {
+pub(super) fn checker_error(status: StatusCode, message: &str) -> Error {
     Error::Checker(status, message.into())
 }
 
-fn map_rpc(error: tonic::Status) -> Error {
+pub(super) fn map_rpc(error: tonic::Status) -> Error {
     match error.code() {
         tonic::Code::Aborted => checker_error(StatusCode::CONFLICT, error.message()),
         tonic::Code::InvalidArgument => checker_error(StatusCode::BAD_REQUEST, error.message()),
@@ -87,7 +87,7 @@ fn map_rpc(error: tonic::Status) -> Error {
     }
 }
 
-fn rpc_request<T>(body: T) -> tonic::Request<T> {
+pub(super) fn rpc_request<T>(body: T) -> tonic::Request<T> {
     let mut request = tonic::Request::new(body);
     request.set_timeout(Duration::from_secs(3));
     request
@@ -199,6 +199,7 @@ pub(super) async fn update_request_checker_settings(
 }
 
 pub(super) fn router(control: Control, socket: PathBuf) -> Router {
+    let programs = super::checker_program_http::router(control.clone(), socket.clone());
     Router::new()
         .route(
             "/api/v1/filters/request-checkers",
@@ -207,4 +208,5 @@ pub(super) fn router(control: Control, socket: PathBuf) -> Router {
                 .layer(DefaultBodyLimit::max(128 * 1024)),
         )
         .with_state(CheckerState { control, socket })
+        .merge(programs)
 }

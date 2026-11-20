@@ -16,7 +16,7 @@ pub fn timestamp() -> prost_types::Timestamp {
 }
 
 pub struct Telemetry {
-    pub(crate) request_checks: crate::request_checks::Checks,
+    pub(crate) request_checks: Arc<crate::request_checks::Checks>,
     pub forwarding: std::sync::RwLock<Option<Arc<crate::forwarding::Store>>>,
     pub budgets: std::sync::RwLock<
         std::collections::HashMap<String, Arc<crate::transport::protection::Budget>>,
@@ -51,7 +51,7 @@ impl Telemetry {
     ) -> Arc<Self> {
         let (events, _) = broadcast::channel(1024);
         Arc::new(Self {
-            request_checks,
+            request_checks: Arc::new(request_checks),
             forwarding: Default::default(),
             budgets: Default::default(),
             samples: std::sync::RwLock::new(None),

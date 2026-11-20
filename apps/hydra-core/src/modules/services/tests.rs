@@ -88,6 +88,159 @@ async fn repeated_proxy_acknowledgements_do_not_write_duplicate_audit_rows() {
     drop(control);
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[tokio::test]
+async fn retry_service_audits_and_wakes_sync_without_changing_snapshot() {
+    let (control, path) = setup().await;
+    control
+        .put_service(actor("alice"), 0, service(), true, "create".into())
+        .await
+        .unwrap();
+    control
+        .mark_services(1, Some("Address already in use (os error 98)".into()))
+        .await
+        .unwrap();
+    let before = control.desired().await.unwrap();
+    let notified = control.changed.notified();
+    assert_eq!(
+        control
+            .retry_service(actor("alice"), 1, "service".into(), "retry-request".into())
+            .await
+            .unwrap(),
+        1
+    );
+    tokio::time::timeout(std::time::Duration::from_millis(50), notified)
+        .await
+        .expect("retry wakes the existing sync loop");
+    let after = control.desired().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&after.services).unwrap(),
+        serde_json::to_value(&before.services).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&after.rules).unwrap(),
+        serde_json::to_value(&before.rules).unwrap()
+    );
+    assert_eq!(after.services.revision, before.services.revision);
+    assert_eq!(after.apply_error, before.apply_error);
+    control
+        .db
+        .run(|db| {
+            let (actor_id, target, metadata): (String, String, String) = db.query_row(
+                "SELECT actor_id,target,metadata FROM audit WHERE action='service.retry'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            assert_eq!(actor_id, "alice");
+            assert_eq!(target, "service");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&metadata)?["expected_revision"],
+                1
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(control);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn retry_endpoint_is_authenticated_and_rejects_stale_revisions() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    let (control, path) = setup().await;
+    crate::modules::users::create(
+        &control.db,
+        &control.auth.crypto,
+        "retry-user".into(),
+        "correct horse battery".into(),
+    )
+    .await
+    .unwrap();
+    let token = control
+        .auth
+        .login(
+            "retry-user".into(),
+            "correct horse battery".into(),
+            "test".into(),
+        )
+        .await
+        .unwrap()
+        .response
+        .access_token;
+    control
+        .put_service(actor("retry-user"), 0, service(), true, "create".into())
+        .await
+        .unwrap();
+    control
+        .mark_services(1, Some("Address already in use (os error 98)".into()))
+        .await
+        .unwrap();
+    let app = super::router(control.clone());
+    let request = |revision: u64| {
+        Request::post("/api/v1/services/service/retry")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"expected_revision":revision}).to_string(),
+            ))
+            .unwrap()
+    };
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/services/service/retry")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"expected_revision":1}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let wake = control.changed.notified();
+    let response = app.clone().oneshot(request(1)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({"revision":1,"status":"retry_requested"})
+    );
+    tokio::time::timeout(std::time::Duration::from_millis(50), wake)
+        .await
+        .expect("retry route wakes the existing sync loop");
+
+    let snapshot_before = control.desired().await.unwrap();
+    let stale = app.clone().oneshot(request(0)).await.unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let snapshot_after = control.desired().await.unwrap();
+    assert_eq!(
+        snapshot_before.services.revision,
+        snapshot_after.services.revision
+    );
+    assert_eq!(snapshot_before.apply_error, snapshot_after.apply_error);
+    let audits = control
+        .db
+        .run(|db| {
+            Ok(db.query_row(
+                "SELECT count(*) FROM audit WHERE action='service.retry'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(audits, 1);
+    drop(control);
+    std::fs::remove_dir_all(path).unwrap();
+}
 fn rule() -> Rule {
     Rule {
         id: "rule".into(),

@@ -4,7 +4,7 @@ use crate::infrastructure::{crypto::Crypto, db::Database, operations::HostRuntim
 use rusqlite::params;
 use std::{
     io::Write,
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::PathBuf,
 };
 use tokio_util::sync::CancellationToken;
@@ -66,12 +66,17 @@ async fn fixture(body: &[u8]) -> Fixture {
 }
 fn config(enabled: bool) -> SubmitterConfig {
     SubmitterConfig {
+        mode: "custom".into(),
         batch_size: 240,
         revision: 0,
         enabled,
         flag_pattern: "FLAG[0-9]+".into(),
         python_packages: vec![],
         source: "print('submit')\n".into(),
+        forcad_ip: String::new(),
+        forcad_port: 8080,
+        team_token: String::new(),
+        team_token_configured: false,
         timeout_seconds: 3,
     }
 }
@@ -147,6 +152,18 @@ async fn configure_checks_revisions_validation_and_attribution() {
     let mut invalid = config(true);
     invalid.source.clear();
     assert!(f.configure_submitter(actor(), invalid).await.is_err());
+    let mut invalid = config(false);
+    invalid.mode = "forcad".into();
+    invalid.batch_size = 100;
+    invalid.forcad_ip = "https://192.0.2.1".into();
+    assert!(
+        f.configure_submitter(actor(), invalid.clone())
+            .await
+            .is_err()
+    );
+    invalid.forcad_ip = "192.0.2.1".into();
+    invalid.team_token = "bad\r\ntoken".into();
+    assert!(f.configure_submitter(actor(), invalid).await.is_err());
     configure(f, true).await;
     assert!(f.configure_submitter(actor(), config(true)).await.is_err());
     let view = f.submitter_view(actor()).await.unwrap();
@@ -156,6 +173,59 @@ async fn configure_checks_revisions_validation_and_attribution() {
     assert!(view.next_batch_at <= crate::modules::auth::now() + 1);
     let count = f.auth.db.run(|db| Ok(db.query_row("SELECT count(*) FROM audit WHERE action='submitter.configure' AND actor_id='initiator'", [], |r| r.get::<_,i64>(0))?)).await.unwrap();
     assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn first_install_uses_paused_forcad_preset_and_never_returns_token() {
+    let fixture = fixture(b"exit 0\n").await;
+    let f = &fixture.flags;
+    let fresh = f.submitter_view(actor()).await.unwrap().config;
+    assert_eq!(fresh.mode, "forcad");
+    assert_eq!(fresh.forcad_port, 8080);
+    assert_eq!(fresh.flag_pattern, "FLAG[0-9]+");
+    assert!(!fresh.enabled && !fresh.team_token_configured);
+    assert!(
+        serde_json::to_value(&fresh)
+            .unwrap()
+            .get("team_token")
+            .is_none()
+    );
+    let mut forcad = config(false);
+    forcad.mode = "forcad".into();
+    forcad.batch_size = 100;
+    forcad.forcad_ip = "127.0.0.1".into();
+    forcad.team_token = "forcad-secret-test-token".into();
+    f.configure_submitter(actor(), forcad).await.unwrap();
+    let saved = f.submitter_view(actor()).await.unwrap().config;
+    assert!(saved.team_token_configured);
+    let serialized = serde_json::to_string(&saved).unwrap();
+    assert!(!serialized.contains("forcad-secret-test-token"));
+    assert!(!serialized.contains("team_token\""));
+    let audit = f
+        .auth
+        .db
+        .run(|db| {
+            Ok(db.query_row(
+                "SELECT group_concat(metadata) FROM audit WHERE target='python-submitter'",
+                [],
+                |r| r.get::<_, Option<String>>(0),
+            )?)
+        })
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert!(!audit.contains("forcad-secret-test-token"));
+
+    // A blank write-only field preserves the configured secret, so an operator
+    // can edit other settings without reading or resending the token.
+    let mut update = saved;
+    update.revision = 1;
+    update.enabled = true;
+    update.team_token.clear();
+    update.team_token_configured = false;
+    f.configure_submitter(actor(), update).await.unwrap();
+    let enabled = f.submitter_view(actor()).await.unwrap().config;
+    assert!(enabled.enabled && enabled.team_token_configured);
 }
 
 #[tokio::test]
@@ -245,6 +315,230 @@ async fn captured_farm_flags_preserve_exact_batch_input_and_unredacted_zstd_outp
         String::from_utf8_lossy(&crate::modules::farm::runtimes::decode_log(&out).unwrap())
             .contains("FLAG")
     );
+}
+
+#[tokio::test]
+async fn forcad_http_uploads_are_capped_and_apply_mixed_verdicts_per_flag() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let fixture = fixture(b"# replaced below\n").await;
+    let uv_path = fixture._directory.0.join("uv");
+    std::fs::write(&uv_path, b"#!/bin/sh\nshift 2\n[ \"$1\" = python ] || exit 90\nshift\nexec /usr/bin/python3 \"$@\"\n").unwrap();
+    std::fs::set_permissions(&uv_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sizes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
+    let server_received = received.clone();
+    let server_sizes = sizes.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 8192];
+            let body_start = loop {
+                let count = stream.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+                if let Some(pos) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..body_start]);
+            assert!(headers.starts_with("PUT /flags/ HTTP/1.1\r\n"));
+            assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("X-Team-Token: secret-forcad-team-token")));
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':')
+                        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                })
+                .unwrap();
+            while request.len() < body_start + content_length {
+                let count = stream.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            let flags: Vec<String> =
+                serde_json::from_slice(&request[body_start..body_start + content_length]).unwrap();
+            assert!(flags.len() <= 100);
+            server_sizes.lock().unwrap().push(flags.len());
+            server_received
+                .lock()
+                .unwrap()
+                .extend(flags.iter().cloned());
+            let results: Vec<serde_json::Value> = flags
+                .iter()
+                .map(|flag| {
+                    let message = match flag.as_str() {
+                        "FLAG1000" => "Flag accepted! Earned points!",
+                        "FLAG1001" => "Flag already stolen",
+                        "FLAG1002" => "Flag is your own",
+                        "FLAG1003" => "Flag is invalid or too old.",
+                        "FLAG1004" => "Cannot submit flags while service is down",
+                        _ => "Flag accepted! Earned points!",
+                    };
+                    serde_json::json!({"flag":flag,"msg":format!("[{flag}] {message}")})
+                })
+                .collect();
+            let body = serde_json::to_vec(&results).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
+        }
+    });
+
+    let f = &fixture.flags;
+    let mut selected = config(false);
+    selected.mode = "forcad".into();
+    selected.batch_size = 100;
+    selected.forcad_ip = address.ip().to_string();
+    selected.forcad_port = address.port();
+    selected.team_token = "secret-forcad-team-token".into();
+    f.configure_submitter(actor(), selected).await.unwrap();
+    for n in 1000..1250 {
+        capture(f, n).await;
+    }
+    f.request_manual_run(actor(), 250).await.unwrap();
+    assert!(f.dispatch_cycle(CancellationToken::new()).await.unwrap());
+    server.await.unwrap();
+
+    let batch_sizes = sizes.lock().unwrap().clone();
+    assert_eq!(batch_sizes, [100, 100, 50]);
+    assert!(batch_sizes.iter().all(|size| *size <= 100));
+    let uploaded = received.lock().unwrap().clone();
+    let expected: Vec<String> = (1000..1250).map(|n| format!("FLAG{n}")).collect();
+    assert_eq!(uploaded, expected);
+    let states = f.auth.db.run(|db| Ok(db.prepare("SELECT f.value,s.state FROM submissions s JOIN flags f ON f.id=s.flag_id ORDER BY f.value")?.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?)).await.unwrap();
+    let state_for = |flag: &str| {
+        states
+            .iter()
+            .find(|(value, _)| value == flag)
+            .map(|(_, state)| state.as_str())
+            .unwrap()
+    };
+    assert_eq!(state_for("FLAG1000"), "accepted");
+    assert_eq!(state_for("FLAG1001"), "accepted");
+    assert_eq!(state_for("FLAG1002"), "failed");
+    assert_eq!(state_for("FLAG1003"), "failed");
+    assert_eq!(state_for("FLAG1004"), "retry");
+    let (count, maximum, logs) = f
+        .auth
+        .db
+        .run(|db| {
+            let blobs = db
+                .prepare("SELECT stdout_gzip,stderr_gzip FROM flag_submitter_batches")?
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, Option<Vec<u8>>>(0)?,
+                        row.get::<_, Option<Vec<u8>>>(1)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut text = String::new();
+            for (stdout, stderr) in blobs {
+                for blob in [stdout, stderr].into_iter().flatten() {
+                    text.push_str(&String::from_utf8_lossy(&hydra_compression::decode(
+                        &blob, 65536,
+                    )?));
+                }
+            }
+            Ok((
+                db.query_row("SELECT count(*) FROM flag_submitter_batches", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                db.query_row(
+                    "SELECT max(flag_count) FROM flag_submitter_batches",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                text,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!((count, maximum), (3, 100));
+    assert!(!logs.contains("secret-forcad-team-token"));
+}
+
+#[tokio::test]
+async fn forcad_invalid_team_token_keeps_flag_queued_for_retry() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let fixture = fixture(b"# replaced below\n").await;
+    let uv_path = fixture._directory.0.join("uv");
+    std::fs::write(&uv_path, b"#!/bin/sh\nshift 2\n[ \"$1\" = python ] || exit 90\nshift\nexec /usr/bin/python3 \"$@\"\n").unwrap();
+    std::fs::set_permissions(&uv_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let body_start = loop {
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert!(count > 0);
+            request.extend_from_slice(&chunk[..count]);
+            if let Some(pos) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&request[..body_start]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.split_once(':')
+                    .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            })
+            .unwrap();
+        while request.len() < body_start + content_length {
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert!(count > 0);
+            request.extend_from_slice(&chunk[..count]);
+        }
+        let body = br#"{"error":"Invalid team token."}"#;
+        let header = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
+    });
+    let f = &fixture.flags;
+    let mut selected = config(false);
+    selected.mode = "forcad".into();
+    selected.batch_size = 100;
+    selected.forcad_ip = address.ip().to_string();
+    selected.forcad_port = address.port();
+    selected.team_token = "bad-token".into();
+    f.configure_submitter(actor(), selected).await.unwrap();
+    let flag_id = capture(f, 888).await;
+    f.request_manual_run(actor(), 1).await.unwrap();
+    assert!(f.dispatch_cycle(CancellationToken::new()).await.unwrap());
+    server.await.unwrap();
+    let state = f
+        .auth
+        .db
+        .run(move |db| {
+            Ok(db.query_row(
+                "SELECT state FROM submissions WHERE flag_id=?1",
+                [flag_id],
+                |row| row.get::<_, String>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(state, "retry");
+    let view = f.submitter_view(actor()).await.unwrap();
+    let batch = view.last_batch.unwrap();
+    assert_eq!(batch.status, "retry");
+    assert!(!batch.stderr.contains("bad-token"));
+    assert!(!batch.stderr.contains("Traceback"));
 }
 
 #[tokio::test]

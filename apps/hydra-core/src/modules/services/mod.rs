@@ -7,3 +7,4 @@ pub use http::{ControlApi, router};
 mod tests;
 
 mod forwarding;
+mod retry;

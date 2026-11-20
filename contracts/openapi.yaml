@@ -712,6 +712,87 @@ paths:
           description: ''
         '503':
           description: ''
+  /api/v1/filters/request-checkers/programs:
+    get:
+      tags:
+      - filters
+      operationId: list_request_checker_programs
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestCheckerPrograms'
+        '401':
+          description: ''
+        '503':
+          description: ''
+  /api/v1/filters/request-checkers/programs/{program_id}:
+    put:
+      tags:
+      - filters
+      operationId: put_request_checker_program
+      parameters:
+      - name: program_id
+        in: path
+        description: Managed checker identifier
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PutProgramInput'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestCheckerPrograms'
+        '400':
+          description: ''
+        '401':
+          description: ''
+        '409':
+          description: ''
+        '503':
+          description: ''
+    delete:
+      tags:
+      - filters
+      operationId: delete_request_checker_program
+      parameters:
+      - name: program_id
+        in: path
+        description: Managed checker identifier
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteProgramInput'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestCheckerPrograms'
+        '400':
+          description: ''
+        '401':
+          description: ''
+        '409':
+          description: ''
+        '503':
+          description: ''
   /api/v1/filters/state:
     put:
       tags:
@@ -1408,6 +1489,38 @@ paths:
         '400':
           description: ''
         '503':
+          description: ''
+  /api/v1/services/{id}/retry:
+    post:
+      tags:
+      - services
+      operationId: retry_service
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetryInput'
+        required: true
+      responses:
+        '202':
+          description: Retry requested for the unchanged desired service snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetryAccepted'
+        '400':
+          description: ''
+        '401':
+          description: ''
+        '404':
+          description: ''
+        '409':
           description: ''
   /api/v1/submissions:
     get:
@@ -2322,6 +2435,16 @@ components:
           description: Password length is measured in UTF-8 bytes and must be 12..1024.
         username:
           type: string
+      additionalProperties: false
+    DeleteProgramInput:
+      type: object
+      required:
+      - revision
+      properties:
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
       additionalProperties: false
     EditableConfig:
       type: object
@@ -3375,6 +3498,19 @@ components:
           type: integer
           format: int64
           minimum: 0
+    PutProgramInput:
+      type: object
+      required:
+      - revision
+      - source
+      properties:
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+        source:
+          type: string
+      additionalProperties: false
     RequestCheckerPolicy:
       type: object
       required:
@@ -3396,6 +3532,37 @@ components:
           format: int64
           minimum: 0
       additionalProperties: false
+    RequestCheckerProgram:
+      type: object
+      required:
+      - id
+      - runtime
+      - managed
+      - source
+      properties:
+        id:
+          type: string
+        managed:
+          type: boolean
+        runtime:
+          type: string
+        source:
+          type: string
+      additionalProperties: false
+    RequestCheckerPrograms:
+      type: object
+      required:
+      - revision
+      - programs
+      properties:
+        programs:
+          type: array
+          items:
+            $ref: '#/components/schemas/RequestCheckerProgram'
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
     RequestCheckerSettings:
       type: object
       required:
@@ -3407,6 +3574,28 @@ components:
           items:
             $ref: '#/components/schemas/RequestCheckerPolicy'
         revision:
+          type: integer
+          format: int64
+          minimum: 0
+      additionalProperties: false
+    RetryAccepted:
+      type: object
+      required:
+      - revision
+      - status
+      properties:
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+        status:
+          type: string
+    RetryInput:
+      type: object
+      required:
+      - expected_revision
+      properties:
+        expected_revision:
           type: integer
           format: int64
           minimum: 0
@@ -3882,6 +4071,14 @@ components:
           type: boolean
         flag_pattern:
           type: string
+        forcad_ip:
+          type: string
+        forcad_port:
+          type: integer
+          format: int32
+          minimum: 0
+        mode:
+          type: string
         python_packages:
           type: array
           items:
@@ -3891,6 +4088,12 @@ components:
           format: int64
         source:
           type: string
+        team_token:
+          type: string
+          writeOnly: true
+        team_token_configured:
+          type: boolean
+          readOnly: true
         timeout_seconds:
           type: integer
           format: int64

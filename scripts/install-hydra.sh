@@ -55,21 +55,26 @@ if [[ "$mode" == install ]]; then
   [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'This build supports x86_64 Linux.' >&2; exit 1; }
   [[ -d /run/systemd/system ]] || { echo 'A running systemd installation is required.' >&2; exit 1; }
   missing=false
-  for command in python3 curl openssl getent groupadd useradd runuser systemctl; do
+  for command in python3 curl openssl getent groupadd useradd runuser systemctl bwrap; do
     command -v "$command" >/dev/null || missing=true
   done
+  if command -v python3 >/dev/null && ! python3 -c 'import ctypes; ctypes.CDLL("libseccomp.so.2")' >/dev/null 2>&1; then missing=true; fi
   if [[ "$missing" == true ]]; then
     if command -v apt-get >/dev/null; then
       apt-get update
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 curl openssl ca-certificates passwd util-linux
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 bubblewrap libseccomp2 curl openssl ca-certificates passwd util-linux
     elif command -v dnf >/dev/null; then
-      dnf install -y python3 curl openssl ca-certificates shadow-utils util-linux
+      dnf install -y python3 bubblewrap libseccomp curl openssl ca-certificates shadow-utils util-linux
     else
-      echo 'Install python3, curl, openssl, ca-certificates and shadow/util-linux tools first.' >&2; exit 1
+      echo 'Install python3, bubblewrap, libseccomp, curl, openssl, ca-certificates and shadow/util-linux tools first.' >&2; exit 1
     fi
   fi
 fi
 command -v python3 >/dev/null || { echo 'python3 is required.' >&2; exit 1; }
+if [[ "$mode" == install ]]; then
+  command -v bwrap >/dev/null || { echo 'bubblewrap (bwrap) is required for checker sandboxes.' >&2; exit 1; }
+  python3 -c 'import ctypes; ctypes.CDLL("libseccomp.so.2")' || { echo 'libseccomp.so.2 is required for checker sandboxes.' >&2; exit 1; }
+fi
 python3 - "$mode" "$archive" "$output" "$DOWNLOAD_URL" "$ARCHIVE_SHA256" "$INITIAL_USER" "$INSTALL_UV" "$UV_URL" "$UV_SHA256" "$source_kind" 3<&0 <<'PY'
 import datetime, hashlib, json, os, pathlib, pwd, re, resource, select, shutil, signal, sqlite3, ssl, subprocess, sys, tarfile, tempfile, time, urllib.error, urllib.parse, urllib.request, uuid, zipfile
 
@@ -499,8 +504,8 @@ def install(bundle,directory):
         if not ROOT.exists():
             ROOT.mkdir(parents=True,mode=0o755);os.chmod(ROOT,0o755)
         owned_dir(ROOT/'core-settings','hydra-core');owned_dir(DATA/'farm-host','hydra-core')
-        write_new(ROOT/'proxy.json',json.dumps({'socket':SOCKET,'state_file':'/var/lib/hydra-proxy/last-good.json','allowed_core_uid':pwd.getpwnam('hydra-core').pw_uid,'socket_mode':0o660},indent=2)+'\n','hydra-proxy')
-        write_new(ROOT/'core-settings/operations.json',json.dumps({'traffic_history_per_service_mib':128,'flag_pattern':None,'auto_submit_captured':False,'checker':None,'sandbox':None,'execution_mode':'sandbox','host_runtime':{'uv':uv_path,'work_dir':str(DATA/'farm-host')}},indent=2)+'\n','hydra-core')
+        write_new(ROOT/'proxy.json',json.dumps({'flag_pattern':'[A-Z0-9]{31}=','socket':SOCKET,'state_file':'/var/lib/hydra-proxy/last-good.json','allowed_core_uid':pwd.getpwnam('hydra-core').pw_uid,'socket_mode':0o660},indent=2)+'\n','hydra-proxy')
+        write_new(ROOT/'core-settings/operations.json',json.dumps({'traffic_history_per_service_mib':128,'flag_pattern':'[A-Z0-9]{31}=','auto_submit_captured':False,'checker':None,'sandbox':None,'execution_mode':'sandbox','host_runtime':{'uv':uv_path,'work_dir':str(DATA/'farm-host')}},indent=2)+'\n','hydra-core')
         require((ROOT/'tls.key').exists()==(ROOT/'tls.crt').exists(),'Incomplete existing TLS certificate pair')
         if not (ROOT/'tls.key').exists():
             run('openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','365','-keyout',str(ROOT/'tls.key'),'-out',str(ROOT/'tls.crt'),'-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1')

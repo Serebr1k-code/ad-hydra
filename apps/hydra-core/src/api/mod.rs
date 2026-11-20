@@ -151,6 +151,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
     api.merge(crate::modules::protocols::ProtocolApi::openapi());
     api.merge(crate::modules::flags::FlagsApi::openapi());
     api.merge(crate::modules::farm::FarmApi::openapi());
+    api.merge(crate::modules::filters::FilterApi::openapi());
     let components = api.components.get_or_insert_with(Default::default);
     components.add_security_scheme(
         "AccessJWT",

@@ -105,6 +105,9 @@ class Browser(unittest.TestCase):
         chrome = browser_binary()
         processes = []
         upstream = None
+        retry_backend = None
+        occupied = None
+        retry_backend_stop = threading.Event()
         with tempfile.TemporaryDirectory(prefix='hydra-browser-') as directory:
             tmp = pathlib.Path(directory)
             ap, debug = port(), port()
@@ -171,7 +174,14 @@ class Browser(unittest.TestCase):
                         if cdp.evaluate(expression):
                             return
                         time.sleep(.05)
-                    self.fail(cdp.evaluate("'Controls: '+JSON.stringify([...document.querySelectorAll('[role=combobox]')].map(e=>e.outerHTML))+'\\n'+document.body.innerText+'\\nTextarea DOM: '+[...document.querySelectorAll('textarea')].map(e=>e.outerHTML).join('\\n')"))
+                    self.fail(cdp.evaluate("'Controls: '+JSON.stringify([...document.querySelectorAll('[role=combobox]')].map(e=>e.outerHTML))+'\\n'+document.body.innerText+'\\nEditors: '+[...document.querySelectorAll('[role=textbox]')].map(e=>e.outerHTML).join('\\n')+'\\nTextareas: '+[...document.querySelectorAll('textarea')].map(e=>e.outerHTML).join('\\n')"))
+                def replace_editor(selector, value):
+                    cdp.click(f"document.querySelector({json.dumps(selector)})")
+                    cdp.call('Input.dispatchKeyEvent',{'type':'keyDown','key':'Control','code':'ControlLeft','modifiers':2})
+                    cdp.call('Input.dispatchKeyEvent',{'type':'keyDown','key':'a','code':'KeyA','modifiers':2})
+                    cdp.call('Input.dispatchKeyEvent',{'type':'keyUp','key':'a','code':'KeyA','modifiers':2})
+                    cdp.call('Input.dispatchKeyEvent',{'type':'keyUp','key':'Control','code':'ControlLeft'})
+                    cdp.call('Input.insertText',{'text':value})
                 wait("document.querySelector('#login') && !document.querySelector('#login').hidden")
                 self.assertTrue(cdp.evaluate("document.querySelector('#app')?.hasAttribute('data-v-app')"), "Vue must mount the application")
                 # Theme works before login and persists through a complete reload.
@@ -248,6 +258,63 @@ class Browser(unittest.TestCase):
                 pathlib.Path('/tmp/hydra-services-desktop.png').write_bytes(base64.b64decode(cdp.call('Page.captureScreenshot',{'format':'png'})['data']))
                 wait("document.querySelectorAll('[aria-label=\"Live service metrics\"] svg').length>=4", seconds=10)
                 wait("document.querySelector('[aria-label=\"Live service metrics\"]')?.innerText.includes('Live · every 2 seconds')", seconds=10)
+                # Hold a loopback port through a real listener bind failure,
+                # then exercise the Services page Retry action after freeing it.
+                retry_backend=socket.socket();retry_backend.bind(('127.0.0.1',0));retry_backend.listen();retry_backend.settimeout(.2)
+                def retry_echo():
+                    while not retry_backend_stop.is_set():
+                        try:peer,_=retry_backend.accept()
+                        except socket.timeout:continue
+                        except OSError:return
+                        def echo(peer):
+                            with peer:
+                                try:
+                                    while data:=peer.recv(4096):peer.sendall(data)
+                                except OSError:pass
+                        threading.Thread(target=echo,args=(peer,),daemon=True).start()
+                threading.Thread(target=retry_echo,daemon=True).start()
+                occupied=socket.socket();occupied.bind(('127.0.0.1',0));occupied.listen()
+                retry_service={'name':'Browser retry','transport':'tcp','listen_address':f'127.0.0.1:{occupied.getsockname()[1]}','upstream_address':f'127.0.0.1:{retry_backend.getsockname()[1]}','protocol_id':'raw','enabled':True}
+                cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add service').click()")
+                wait("document.querySelector('#service-form') !== null")
+                fill_service(retry_service)
+                error_deadline=time.monotonic()+8
+                while time.monotonic()<error_deadline:
+                    cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Refresh')?.click()")
+                    if cdp.evaluate("document.querySelector('#page').innerText.includes('os error 98')"):break
+                    time.sleep(.1)
+                else:self.fail('Browser retry listener did not report the held address in use')
+                self.assertIn('free the listener address, then retry.',cdp.evaluate("document.querySelector('#page').innerText"))
+                self.assertTrue(cdp.evaluate("Boolean(document.querySelector('[aria-label=\"Retry listener for Browser retry\"]'))"))
+                wait("!document.querySelector('#page').innerText.includes('Loading services…') && !document.querySelector('[aria-label=\"Retry listener for Browser retry\"]').disabled")
+                retry_revision=cdp.evaluate("Number(document.querySelector('#page').innerText.match(/Revision (\\d+)/)?.[1])")
+                occupied.close()
+                cdp.click("document.querySelector('[aria-label=\"Retry listener for Browser retry\"]')")
+                wait(f"document.querySelector('#page').innerText.includes('Retry requested for revision {retry_revision}')")
+                wait("document.querySelector('#page').innerText.includes('Pending listener and filter changes were applied at revision')",seconds=8)
+                with socket.create_connection(('127.0.0.1',int(retry_service['listen_address'].split(':')[1])),timeout=3) as client:
+                    client.sendall(b'ui-retry-bound');self.assertEqual(client.recv(64),b'ui-retry-bound')
+                with sqlite3.connect(tmp/'db') as database:
+                    self.assertEqual(database.execute('SELECT revision FROM control_state WHERE id=1').fetchone()[0],retry_revision)
+                    current_services=json.loads(database.execute('SELECT services FROM control_state WHERE id=1').fetchone()[0])
+                    retry_id=next(item['id'] for item in current_services if item['listen_address']==retry_service['listen_address'])
+                    audit=database.execute("SELECT actor_id,target,metadata FROM audit WHERE action='service.retry' AND target=?",[retry_id]).fetchone()
+                    self.assertEqual(audit[0],database.execute("SELECT id FROM users WHERE username='alice'").fetchone()[0])
+                    self.assertEqual(audit[1],retry_id)
+                    self.assertEqual(json.loads(audit[2])['expected_revision'],retry_revision)
+                # Remove only this test service, leaving the original browser
+                # fixtures and their expected service-selection counts intact.
+                cdp.evaluate('window.confirm=()=>true')
+                cdp.click("[...document.querySelectorAll('#page tr')].find(row=>row.innerText.includes('Browser retry')).querySelectorAll('button') && [...[...document.querySelectorAll('#page tr')].find(row=>row.innerText.includes('Browser retry')).querySelectorAll('button')].find(button=>button.textContent==='Delete')")
+                wait("![...document.querySelectorAll('#page tr')].some(row=>row.innerText.includes('Browser retry'))")
+                delete_revision=retry_revision+1
+                apply_deadline=time.monotonic()+8
+                while time.monotonic()<apply_deadline:
+                    cdp.evaluate("[...document.querySelectorAll('#page button')].find(button=>button.textContent==='Refresh' && !button.disabled)?.click()")
+                    if cdp.evaluate(f"document.querySelector('#page').innerText.includes('Revision {delete_revision} · applied · applied {delete_revision}')"):
+                        break
+                    time.sleep(.2)
+                else:self.fail('Deleting the retry fixture did not apply after refreshing the Services page: '+cdp.evaluate("document.querySelector('#page').innerText"))
                 cdp.click("[...document.querySelectorAll('#page tr')].find(e=>e.innerText.includes("+json.dumps(service['listen_address'])+")).querySelector('[aria-label^=\"Set color for\"]')")
                 wait("document.querySelectorAll('[role=dialog] [aria-label$=\"service color\"][aria-pressed]').length===12")
                 cdp.click("document.querySelector('[aria-label=\"Cyan service color\"]')")
@@ -255,6 +322,9 @@ class Browser(unittest.TestCase):
                 wait("!document.querySelector('[role=dialog]')")
                 cdp.evaluate("[...document.querySelectorAll('nav button')].find(b=>b.textContent==='Traffic').click()")
                 wait("document.querySelector('#traffic-live-status')?.textContent==='Live'")
+                cdp.click("document.querySelector('#traffic-service')")
+                wait("document.querySelectorAll('[role=listbox][data-state=open] [role=option]').length===3")
+                cdp.click("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].find(e=>e.textContent.trim()==="+json.dumps(service['name'])+")")
                 for _ in range(100):
                     try:
                         connection=socket.create_connection(('127.0.0.1',int(service['listen_address'].split(':')[1])),timeout=2)
@@ -380,6 +450,8 @@ class Browser(unittest.TestCase):
                     for digest,is_new in [('new',1),('known',0)]:database.execute("INSERT INTO farm_flag_observations VALUES('browser-run','local',?,?)",[digest,is_new])
                     database.execute("INSERT INTO flag_submitter_batches(id,revision,flag_count,status,started_at,input_gzip,stdout_gzip,stderr_gzip) VALUES('11111111-1111-4111-8111-111111111111',0,1,'accepted',?,?,?,?)",[int(time.time()),gzip.compress(b'["FLAG002000"]'),gzip.compress(b'submission stdout FLAG002000'),gzip.compress(b'submission stderr FLAG002000')])
                 for section in ['Filters','Traffic','Protocols','Farm','Flags','Settings','Users / audit']:
+                    if section == 'Flags':
+                        cdp.evaluate("window.__submitterViewRead=Promise.resolve(null);const fetchBeforeSubmitterCapture=window.fetch;window.fetch=async(...args)=>{const response=await fetchBeforeSubmitterCapture(...args);if(String(args[0]).endsWith('/api/v1/submitter')&&(!args[1]?.method||args[1].method==='GET'))window.__submitterViewRead=response.clone().json();return response}")
                     cdp.evaluate(f"[...document.querySelectorAll('nav button')].find(b=>b.textContent==={json.dumps(section)}).click()")
                     expected = {'Users / audit':'Users and audit','Farm':'Exploit farm','Flags':'Flag Manager'}.get(section,section)
                     wait(f"document.querySelector('#page h1')?.textContent==={json.dumps(expected)}")
@@ -412,6 +484,63 @@ class Browser(unittest.TestCase):
                         wait("[...document.querySelectorAll('td')].some(e=>e.textContent==='helper')")
                         self.assertFalse(cdp.evaluate("[...document.querySelectorAll('td')].some(e=>/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(e.textContent)&&e.cellIndex===0)"),'Actor/user references must show names')
                     if section == 'Filters':
+                        # Manage a real Python checker through the filter page.
+                        # Enforcement itself is exercised in request_checkers.py.
+                        cdp.click("[...document.querySelectorAll('#page button')].find(b=>b.textContent.includes('Request checkers'))")
+                        wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent.trim()==='Add Python checker' && !b.disabled)")
+                        cdp.click("[...document.querySelectorAll('#page button')].find(b=>b.textContent.trim()==='Add Python checker')")
+                        wait("Boolean(document.querySelector('#checker-id-input'))")
+                        wait("Boolean(document.querySelector('#checker-source-input[role=textbox][aria-multiline=true]'))")
+                        self.assertEqual(cdp.evaluate("document.querySelector('#checker-source-input').getAttribute('aria-label')"),'New Python checker source')
+
+                        # Check that the creation controls remain reachable on
+                        # a narrow screen, then return to the desktop layout.
+                        cdp.call('Emulation.setDeviceMetricsOverride',{'width':390,'height':844,'deviceScaleFactor':1,'mobile':False})
+                        reachable = cdp.evaluate("(()=>{const selectors=['#checker-id-input','#checker-source-input[role=textbox]'];const button=[...document.querySelectorAll('#page button')].find(e=>e.textContent.trim()==='Create paused checker');for(const selector of selectors){const e=document.querySelector(selector);const visual=e?.closest('.cm-editor')||e;visual.scrollIntoView({block:'center',behavior:'instant'});const r=visual.getBoundingClientRect();if(r.width===0||r.left<0||r.right>innerWidth||r.top<0||r.bottom>innerHeight)return false;}button.scrollIntoView({block:'center',behavior:'instant'});const r=button.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight&&document.documentElement.scrollWidth<=innerWidth&&document.body.scrollWidth<=innerWidth})()")
+                        reachability_debug = cdp.evaluate("(()=>{const fields=['#checker-id-input','#checker-source-input[role=textbox]'].map(selector=>{const e=document.querySelector(selector);const r=e?.getBoundingClientRect();const surface=e?.closest('.cm-editor');const s=surface?.getBoundingClientRect();return {selector,rect:r&&{x:r.x,y:r.y,width:r.width,height:r.height,right:r.right,bottom:r.bottom},surface:s&&{x:s.x,y:s.y,width:s.width,height:s.height,right:s.right,bottom:s.bottom},scroll:e?.scrollHeight,client:e?.clientHeight}});const button=[...document.querySelectorAll('#page button')].find(e=>e.textContent.trim()==='Create paused checker');return JSON.stringify({viewport:innerWidth,pageWidth:document.querySelector('#page').scrollWidth,fields,button:button?.getBoundingClientRect()})})()")
+                        self.assertTrue(reachable, 'Checker fields and create button must remain reachable at mobile width: '+reachability_debug)
+                        cdp.call('Emulation.setDeviceMetricsOverride',{'width':1280,'height':900,'deviceScaleFactor':1,'mobile':False})
+                        wait("innerWidth===1280 && innerHeight===900")
+                        cdp.evaluate("{const e=document.querySelector('#checker-id-input');e.value='browser-managed';e.dispatchEvent(new Event('input',{bubbles:true}));}")
+                        upload_source = '# UTF-8 marker: Ω 🚩\r\n\r\ndef check(request: bytes) -> bool:\r\n    return True\r\n'
+                        uploaded_script = tmp / 'browser-managed.py'
+                        uploaded_script.write_bytes(upload_source.encode('utf-8'))
+                        document = cdp.call('DOM.getDocument')['root']['nodeId']
+                        source_file_node = cdp.call('DOM.querySelector',{'nodeId':document,'selector':'#page input[type="file"]'})['nodeId']
+                        cdp.call('DOM.setFileInputFiles',{'nodeId':source_file_node,'files':[str(uploaded_script)]})
+                        wait("(()=>{const editor=document.querySelector('#checker-source-input');const surface=editor?.closest('.cm-editor');return editor?.getAttribute('role')==='textbox' && editor.innerText.includes('UTF-8 marker: Ω 🚩') && surface?.querySelector('.cm-gutters .cm-lineNumbers') && getComputedStyle(surface).backgroundColor==='rgb(0, 0, 0)' && [...editor.querySelectorAll('.cm-line span')].some(token=>getComputedStyle(token).color!==getComputedStyle(editor).color)})()")
+                        pathlib.Path('/tmp/hydra-python-checker-desktop.png').write_bytes(base64.b64decode(cdp.call('Page.captureScreenshot',{'format':'png'})['data']))
+                        cdp.evaluate("window.__checkerProgramsRead=Promise.resolve(null);const fetchBeforeCheckerCapture=window.fetch;window.fetch=async(...args)=>{const response=await fetchBeforeCheckerCapture(...args);if(String(args[0]).endsWith('/api/v1/filters/request-checkers/programs')&&(!args[1]?.method||args[1].method==='GET'))window.__checkerProgramsRead=response.clone().json();return response}")
+                        cdp.click("[...document.querySelectorAll('#page button')].find(b=>b.textContent.trim()==='Create paused checker')")
+                        wait("document.querySelector('#page').innerText.includes('browser-managed') && [...document.querySelectorAll('#page button')].some(b=>b.textContent.trim()==='Edit source')")
+                        wait(f"window.__checkerProgramsRead?.then(body=>body.programs.find(program=>program.id==='browser-managed')?.source==={json.dumps(upload_source)})")
+                        cdp.click("[...document.querySelectorAll('#page button')].find(b=>b.textContent.trim()==='Edit source')")
+                        wait("Boolean(document.querySelector('#checker-source-editor[role=textbox][aria-multiline=true]')) && [...document.querySelectorAll('#page button')].some(b=>b.textContent.trim()==='Save source')")
+                        self.assertEqual(cdp.evaluate("document.querySelector('#checker-source-editor').getAttribute('aria-label')"),'Python checker source')
+                        edited_source = '# UTF-8 marker: π 🔒\r\n\r\ndef check(request: bytes) -> bool:\r\n    return False\r\n'
+                        replace_editor('#checker-source-editor',edited_source)
+                        wait("document.querySelector('#checker-source-editor')?.innerText.includes('UTF-8 marker: π 🔒') && document.querySelector('#checker-source-editor')?.innerText.includes('return False')")
+                        cdp.call('Input.dispatchKeyEvent',{'type':'keyDown','key':'Control','code':'ControlLeft','modifiers':2})
+                        cdp.call('Input.dispatchKeyEvent',{'type':'keyDown','key':'z','code':'KeyZ','modifiers':2})
+                        cdp.call('Input.dispatchKeyEvent',{'type':'keyUp','key':'z','code':'KeyZ','modifiers':2})
+                        cdp.call('Input.dispatchKeyEvent',{'type':'keyUp','key':'Control','code':'ControlLeft'})
+                        wait("document.querySelector('#checker-source-editor')?.innerText.includes('UTF-8 marker: Ω 🚩') && document.querySelector('#checker-source-editor')?.innerText.includes('return True')")
+                        cdp.call('Input.dispatchKeyEvent',{'type':'keyDown','key':'Control','code':'ControlLeft','modifiers':2})
+                        cdp.call('Input.dispatchKeyEvent',{'type':'keyDown','key':'y','code':'KeyY','modifiers':2})
+                        cdp.call('Input.dispatchKeyEvent',{'type':'keyUp','key':'y','code':'KeyY','modifiers':2})
+                        cdp.call('Input.dispatchKeyEvent',{'type':'keyUp','key':'Control','code':'ControlLeft'})
+                        wait("document.querySelector('#checker-source-editor')?.innerText.includes('UTF-8 marker: π 🔒') && document.querySelector('#checker-source-editor')?.innerText.includes('return False')")
+                        cdp.click("document.querySelector('#checker-source-editor')")
+                        for _ in range(2):
+                            for kind in ['keyDown','keyUp']:cdp.call('Input.dispatchKeyEvent',{'type':kind,'key':'Escape','code':'Escape','windowsVirtualKeyCode':27})
+                        for kind in ['keyDown','keyUp']:cdp.call('Input.dispatchKeyEvent',{'type':kind,'key':'Tab','code':'Tab','windowsVirtualKeyCode':9})
+                        wait("document.activeElement!==document.querySelector('#checker-source-editor')")
+                        cdp.click("[...document.querySelectorAll('#page button')].find(b=>b.textContent.trim()==='Save source')")
+                        wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent.trim()==='Edit source')")
+                        wait(f"window.__checkerProgramsRead?.then(body=>body.programs.find(program=>program.id==='browser-managed')?.source==={json.dumps(edited_source)})")
+                        cdp.evaluate("window.confirm=()=>true")
+                        cdp.click("[...document.querySelectorAll('#page button')].find(b=>b.textContent.trim()==='Delete checker')")
+                        wait("document.querySelector('#page').innerText.includes('No checker programs are configured.')")
                         cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add filter').click()")
                         wait("Boolean(document.querySelector('[role=dialog]')?.innerText.includes('Match conditions'))")
                         self.assertFalse(cdp.evaluate("Boolean(document.querySelector('[role=dialog] textarea:not(#filter-description)'))"), 'Filter editor must not request an expression JSON textarea')
@@ -639,6 +768,46 @@ class Browser(unittest.TestCase):
                             with sqlite3.connect(tmp/'db') as db:self.assertEqual(db.execute('SELECT version,applied FROM protocol_activations WHERE service_id=?',[module_service_id]).fetchone(),('script-v2',1))
 
                     if section == 'Flags':
+                        wait("Boolean(document.querySelector('#submitter-forcad-ip'))")
+                        self.assertTrue(cdp.evaluate("document.querySelector('#page').innerText.includes('ForcAD')"))
+                        wait("window.__submitterViewRead?.then(view=>view.config.mode==='forcad' && !view.config.enabled && !view.config.team_token_configured)")
+                        for field,value in [('submitter-forcad-ip','127.0.0.1'),('submitter-forcad-port','8080'),('submitter-forcad-token','browser-write-only-token')]:
+                            cdp.evaluate(f"{{const e=document.getElementById({json.dumps(field)});e.value={json.dumps(value)};e.dispatchEvent(new Event('input',{{bubbles:true}}));}}")
+                        self.assertTrue(cdp.evaluate("!document.querySelector('#submitter-enabled').disabled"))
+                        cdp.click("[...document.querySelectorAll('#page button')].find(button=>button.textContent==='Save submitter')")
+                        wait("document.querySelector('#page').innerText.includes('Submitter configuration saved.')")
+                        wait("window.__submitterViewRead?.then(view=>view.config.mode==='forcad' && !view.config.enabled && view.config.forcad_ip==='127.0.0.1' && view.config.forcad_port===8080 && view.config.team_token_configured)")
+                        self.assertEqual(cdp.evaluate("document.querySelector('#submitter-forcad-token').value"),'')
+                        self.assertEqual(cdp.evaluate("document.querySelector('#submitter-forcad-token').placeholder"),'Saved token; leave blank to keep it')
+                        self.assertNotIn('browser-write-only-token',cdp.evaluate("document.querySelector('#page').innerText"))
+                        pathlib.Path('/tmp/hydra-forcad-submit-ui.png').write_bytes(base64.b64decode(cdp.call('Page.captureScreenshot',{'format':'png'} )['data']))
+                        cdp.evaluate("{const e=document.querySelector('#submitter-forcad-port');e.value='8081';e.dispatchEvent(new Event('input',{bubbles:true}));}")
+                        cdp.click("[...document.querySelectorAll('#page button')].find(button=>button.textContent==='Save submitter')")
+                        wait("document.querySelector('#page').innerText.includes('Submitter configuration saved.')")
+                        wait("window.__submitterViewRead?.then(view=>view.config.forcad_port===8081 && view.config.team_token_configured && !view.config.enabled)")
+                        cdp.click("[...document.querySelectorAll('#page [role=combobox]')].find(button=>button.textContent.trim()==='ForcAD')")
+                        wait("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].some(option=>option.textContent.trim()==='Custom Python script')")
+                        cdp.click("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].find(option=>option.textContent.trim()==='Custom Python script')")
+                        wait("Boolean(document.querySelector('#submitter-code[role=textbox][aria-multiline=true]'))")
+                        self.assertEqual(cdp.evaluate("document.querySelector('#submitter-code').getAttribute('aria-label')"),'Custom Python submitter code')
+                        custom_source = '# Submitter UTF-8: λ 🚩\n\nimport sys\n\nflags = sys.argv[1:]\n'
+                        replace_editor('#submitter-code',custom_source)
+                        wait("document.querySelector('#submitter-code')?.innerText.includes('Submitter UTF-8: λ 🚩') && document.querySelector('#submitter-code')?.innerText.includes('flags = sys.argv[1:]')")
+                        pathlib.Path('/tmp/hydra-submitter-editor.png').write_bytes(base64.b64decode(cdp.call('Page.captureScreenshot',{'format':'png'})['data']))
+                        cdp.evaluate("window.__submitterSaveGate=new Promise(resolve=>window.__releaseSubmitterSave=resolve);const originalFetch=window.fetch;window.fetch=async(...args)=>{if(String(args[0]).endsWith('/api/v1/submitter')&&args[1]?.method==='PUT'){window.fetch=originalFetch;await window.__submitterSaveGate;}return originalFetch(...args)}")
+                        cdp.click("[...document.querySelectorAll('#page button')].find(button=>button.textContent==='Save submitter')")
+                        wait("document.querySelector('#submitter-code').getAttribute('aria-disabled')==='true' && document.querySelector('#submitter-code').getAttribute('contenteditable')==='false'")
+                        cdp.click("document.querySelector('#submitter-code')")
+                        cdp.call('Input.insertText',{'text':'blocked-edit'})
+                        cdp.call('Input.dispatchKeyEvent',{'type':'keyDown','key':'Control','code':'ControlLeft','modifiers':2})
+                        cdp.call('Input.dispatchKeyEvent',{'type':'keyDown','key':'z','code':'KeyZ','modifiers':2})
+                        cdp.call('Input.dispatchKeyEvent',{'type':'keyUp','key':'z','code':'KeyZ','modifiers':2})
+                        cdp.call('Input.dispatchKeyEvent',{'type':'keyUp','key':'Control','code':'ControlLeft'})
+                        self.assertIn('Submitter UTF-8: λ 🚩',cdp.evaluate("document.querySelector('#submitter-code').innerText"))
+                        self.assertNotIn('blocked-edit',cdp.evaluate("document.querySelector('#submitter-code').innerText"))
+                        cdp.evaluate('window.__releaseSubmitterSave()')
+                        wait("document.querySelector('#page').innerText.includes('Submitter configuration saved.')")
+                        wait(f"window.__submitterViewRead?.then(view=>view.config.mode==='custom' && view.config.source==={json.dumps(custom_source)} && !view.config.enabled)")
                         self.assertTrue(cdp.evaluate("['Submission attempts','Flags','Submissions'].every(title=>[...document.querySelectorAll('#page button[aria-expanded]')].find(e=>e.textContent.trim().startsWith(title))?.getAttribute('aria-expanded')==='false')"))
                         self.assertFalse(cdp.evaluate("Boolean(document.querySelector('#flag-search') || document.querySelector('[aria-label=\"Flags per page\"]'))"))
                         for title in ['Submission attempts','Flags']:
@@ -787,6 +956,9 @@ class Browser(unittest.TestCase):
                 print('Embedded Vue, native HTTPS and real Chromium login, navigation, API calls, logout: OK')
             finally:
                 if upstream:upstream.close()
+                if occupied:occupied.close()
+                retry_backend_stop.set()
+                if retry_backend:retry_backend.close()
                 if cdp:
                     cdp.socket.close()
                 try:

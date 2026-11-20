@@ -166,6 +166,112 @@ impl ProxyControl for Rpc {
         Ok(Response::new(checker_settings(applied)))
     }
 
+    async fn list_request_checker_programs(
+        &self,
+        request: Request<v1::GetRequestCheckerSettingsRequest>,
+    ) -> Result<Response<v1::RequestCheckerPrograms>, Status> {
+        let req = request.into_inner();
+        check_provenance(req.actor.as_ref(), &req.request_id)?;
+        let checks = &self.state.telemetry.request_checks;
+        let snapshot = tokio::task::spawn_blocking({
+            let checks = checks.clone();
+            move || checks.programs_snapshot()
+        })
+        .await
+        .map_err(|_| Status::internal("checker list task failed"))?
+        .map_err(|_| Status::internal("checker programs unavailable"))?;
+        Ok(Response::new(v1::RequestCheckerPrograms {
+            revision: snapshot.revision,
+            programs: snapshot
+                .programs
+                .into_iter()
+                .map(|p| v1::RequestCheckerProgram {
+                    id: p.id,
+                    runtime: p.runtime,
+                    managed: p.managed,
+                    source: p.source,
+                })
+                .collect(),
+        }))
+    }
+
+    async fn put_request_checker_program(
+        &self,
+        request: Request<v1::PutRequestCheckerProgramRequest>,
+    ) -> Result<Response<v1::RequestCheckerPrograms>, Status> {
+        let req = request.into_inner();
+        check_provenance(req.actor.as_ref(), &req.request_id)?;
+        let checks = self.state.telemetry.request_checks.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            checks.put_program(req.revision, req.id, req.source)
+        })
+        .await
+        .map_err(|_| Status::internal("checker update task failed"))?
+        .map_err(|e| {
+            if e.is::<crate::request_checks::StaleRevision>() {
+                Status::aborted(e.to_string())
+            } else {
+                Status::invalid_argument(e.to_string())
+            }
+        })?;
+        let checks = self.state.telemetry.request_checks.clone();
+        let snapshot = tokio::task::spawn_blocking(move || checks.programs_snapshot())
+            .await
+            .map_err(|_| Status::internal("checker list task failed"))?
+            .map_err(|_| Status::internal("checker programs unavailable"))?;
+        Ok(Response::new(v1::RequestCheckerPrograms {
+            revision: snapshot.revision.max(result.revision),
+            programs: snapshot
+                .programs
+                .into_iter()
+                .map(|p| v1::RequestCheckerProgram {
+                    id: p.id,
+                    runtime: p.runtime,
+                    managed: p.managed,
+                    source: p.source,
+                })
+                .collect(),
+        }))
+    }
+
+    async fn delete_request_checker_program(
+        &self,
+        request: Request<v1::DeleteRequestCheckerProgramRequest>,
+    ) -> Result<Response<v1::RequestCheckerPrograms>, Status> {
+        let req = request.into_inner();
+        check_provenance(req.actor.as_ref(), &req.request_id)?;
+        let checks = self.state.telemetry.request_checks.clone();
+        let result =
+            tokio::task::spawn_blocking(move || checks.delete_program(req.revision, &req.id))
+                .await
+                .map_err(|_| Status::internal("checker delete task failed"))?
+                .map_err(|e| {
+                    if e.is::<crate::request_checks::StaleRevision>() {
+                        Status::aborted(e.to_string())
+                    } else {
+                        Status::invalid_argument(e.to_string())
+                    }
+                })?;
+        let checks = self.state.telemetry.request_checks.clone();
+        let snapshot = tokio::task::spawn_blocking(move || checks.programs_snapshot())
+            .await
+            .map_err(|_| Status::internal("checker list task failed"))?
+            .map_err(|_| Status::internal("checker programs unavailable"))?;
+        Ok(Response::new(v1::RequestCheckerPrograms {
+            revision: snapshot.revision.max(result.revision),
+            programs: snapshot
+                .programs
+                .into_iter()
+                .map(|p| v1::RequestCheckerProgram {
+                    id: p.id,
+                    runtime: p.runtime,
+                    managed: p.managed,
+                    source: p.source,
+                })
+                .collect(),
+        }))
+    }
+
     async fn configure_history(
         &self,
         request: Request<v1::ConfigureHistoryRequest>,

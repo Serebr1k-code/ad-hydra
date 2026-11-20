@@ -52,6 +52,10 @@ export const operations = {
     "method": "DELETE",
     "path": "/api/v1/filters/{id}"
   },
+  "delete_request_checker_program": {
+    "method": "DELETE",
+    "path": "/api/v1/filters/request-checkers/programs/{program_id}"
+  },
   "delete_service": {
     "method": "DELETE",
     "path": "/api/v1/services/{id}"
@@ -160,6 +164,10 @@ export const operations = {
     "method": "GET",
     "path": "/api/v1/protocols"
   },
+  "list_request_checker_programs": {
+    "method": "GET",
+    "path": "/api/v1/filters/request-checkers/programs"
+  },
   "list_users": {
     "method": "GET",
     "path": "/api/v1/users"
@@ -204,6 +212,10 @@ export const operations = {
     "method": "GET",
     "path": "/api/v1/system/proxy"
   },
+  "put_request_checker_program": {
+    "method": "PUT",
+    "path": "/api/v1/filters/request-checkers/programs/{program_id}"
+  },
   "refresh": {
     "method": "POST",
     "path": "/api/v1/auth/refresh"
@@ -215,6 +227,10 @@ export const operations = {
   "retry": {
     "method": "POST",
     "path": "/api/v1/farm/runs/{id}/retry"
+  },
+  "retry_service": {
+    "method": "POST",
+    "path": "/api/v1/services/{id}/retry"
   },
   "rotate": {
     "method": "DELETE",

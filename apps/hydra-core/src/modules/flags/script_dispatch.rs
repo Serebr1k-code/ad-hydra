@@ -1,6 +1,6 @@
 //! Durable immediate/manual dispatch; one bounded Python child at a time.
 use super::{
-    Flags,
+    Flags, forcad,
     script_config::{SubmitterConfig, encode_compressed},
 };
 use crate::{
@@ -68,7 +68,12 @@ impl Flags {
                 Ok(db.prepare("SELECT s.id FROM submissions s JOIN flags f ON f.id=s.flag_id WHERE s.state IN ('queued','retry') AND (?2 OR s.next_attempt<=?1) AND s.attempts<10 AND f.category='captured' ORDER BY s.created_at,s.rowid LIMIT ?3")?.query_map(params![now(),forced,limit],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?)
             }).await?;
             let mut attempted = 0;
-            for chunk in ids.chunks(config.batch_size as usize) {
+            let effective_batch_size = if config.mode == "forcad" {
+                config.batch_size.min(100)
+            } else {
+                config.batch_size
+            };
+            for chunk in ids.chunks(effective_batch_size as usize) {
                 if cancel.is_cancelled() {
                     break;
                 }
@@ -147,17 +152,36 @@ impl Flags {
             return Ok(0);
         }
         let flag_count = items.len() as u32;
+        let forcad_mode = config.mode == "forcad";
         let result = if let Some(runtime) = self.settings.script_runtime.clone() {
-            submitter_process::run(
-                runtime,
-                config.source,
-                config.python_packages,
-                items.iter().map(|i| i.value.clone()).collect(),
-                batch_id.clone(),
-                std::time::Duration::from_secs(config.timeout_seconds),
-                cancel,
-            )
-            .await
+            let flags = items.iter().map(|i| i.value.clone()).collect();
+            let timeout = std::time::Duration::from_secs(config.timeout_seconds);
+            if config.mode == "forcad" {
+                submitter_process::run_forcad(
+                    runtime,
+                    flags,
+                    batch_id.clone(),
+                    timeout,
+                    cancel,
+                    submitter_process::ForcadRuntimeConfig {
+                        ip: config.forcad_ip.clone(),
+                        port: config.forcad_port,
+                        team_token: config.team_token.clone(),
+                    },
+                )
+                .await
+            } else {
+                submitter_process::run(
+                    runtime,
+                    config.source,
+                    config.python_packages,
+                    flags,
+                    batch_id.clone(),
+                    timeout,
+                    cancel,
+                )
+                .await
+            }
         } else {
             Err(anyhow::anyhow!("host Python runtime is unavailable"))
         };
@@ -187,18 +211,57 @@ impl Flags {
                     .to_vec(),
             ),
         };
+        let forcad_results = if forcad_mode {
+            parse_forcad_results(&out, items.len())
+        } else {
+            None
+        };
+        let per_flag = forcad_results.clone();
+        let mut batch_success = success;
+        let mut status = status;
+        if let Some(results) = &forcad_results {
+            let complete = results.iter().all(|v| {
+                matches!(
+                    v.as_str(),
+                    "accepted" | "already_stolen" | "own" | "invalid"
+                )
+            });
+            let all_accepted = results
+                .iter()
+                .all(|v| matches!(v.as_str(), "accepted" | "already_stolen"));
+            batch_success = complete && all_accepted;
+            status = if !complete {
+                "retry"
+            } else if all_accepted {
+                "accepted"
+            } else {
+                "completed_with_rejections"
+            };
+        } else if forcad_mode {
+            batch_success = false;
+            status = "retry";
+        }
         let out = encode_compressed(&out)?;
         let err = encode_compressed(&err)?;
         let audit_actor = initiator;
         self.auth.db.run(move|db| {
             let tx=db.transaction()?;
-            for item in items {
-                let state=if success {"accepted"} else if item.attempts+1>=10 {"failed"} else {"retry"};
-                let changed=tx.execute("UPDATE submissions SET state=?2,response=?3,next_attempt=?4 WHERE id=?1 AND state='inflight'",params![item.id,state,serde_json::json!({"adapter":"python","batch_id":batch_id,"accepted":success,"exit_code":code}).to_string(),now()+30])?;
-                if changed>0 { audit::append_change(&tx,&audit_actor,"submissions.result",&item.id,&batch_id,success,now(),&serde_json::json!({"initiated_by":item.initiated,"state":state,"attempts":item.attempts+1,"batch_id":batch_id}))?; }
+            for (index, item) in items.into_iter().enumerate() {
+                let verdict = per_flag.as_ref().and_then(|results| results.get(index)).map(String::as_str);
+                let (accepted, state) = if per_flag.is_some() {
+                    match verdict {
+                        Some("accepted" | "already_stolen") => (true, "accepted"),
+                        Some("own" | "invalid") => (false, "failed"),
+                        _ => (false, if item.attempts+1>=10 {"failed"} else {"retry"}),
+                    }
+                } else if forcad_mode { (false, if item.attempts+1>=10 {"failed"} else {"retry"}) }
+                  else if success { (true, "accepted") }
+                  else { (false, if item.attempts+1>=10 {"failed"} else {"retry"}) };
+                let changed=tx.execute("UPDATE submissions SET state=?2,response=?3,next_attempt=?4 WHERE id=?1 AND state='inflight'",params![item.id,state,serde_json::json!({"adapter":if per_flag.is_some(){"forcad"}else{"python"},"batch_id":batch_id,"accepted":accepted,"verdict":verdict,"exit_code":code}).to_string(),now()+30])?;
+                if changed>0 { audit::append_change(&tx,&audit_actor,"submissions.result",&item.id,&batch_id,accepted,now(),&serde_json::json!({"initiated_by":item.initiated,"state":state,"attempts":item.attempts+1,"batch_id":batch_id}))?; }
             }
             tx.execute("UPDATE flag_submitter_batches SET status=?2,finished_at=?3,exit_code=?4,stdout_gzip=?5,stderr_gzip=?6 WHERE id=?1",params![batch_id,status,now(),code,out,err])?;
-            audit::append(&tx,&audit_actor,"submitter.batch.finish",&batch_id,&batch_id,success,now())?;
+            audit::append(&tx,&audit_actor,"submitter.batch.finish",&batch_id,&batch_id,batch_success,now())?;
             rotate_logs(&tx,&batch_id)?;
             tx.commit()?;Ok(flag_count)
         }).await
@@ -214,6 +277,10 @@ impl Flags {
             })
             .await
     }
+}
+
+fn parse_forcad_results(stdout: &[u8], expected: usize) -> Option<Vec<String>> {
+    forcad::parse_results(stdout, expected)
 }
 
 // All retained gzip blobs share a 64 MiB, 1000 batch, seven day budget.

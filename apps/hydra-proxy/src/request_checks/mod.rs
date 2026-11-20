@@ -3,6 +3,7 @@ use anyhow::{Context, ensure};
 use hydra_domain::Service;
 use serde::{Deserialize, Serialize};
 mod settings;
+use settings::ManagedManifest;
 pub(crate) use settings::{Policy, Settings, StaleRevision};
 use std::{
     collections::HashSet,
@@ -24,13 +25,15 @@ const RESTART_DELAY: Duration = Duration::from_secs(2);
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
-    id: String,
-    services: Vec<String>,
-    script: PathBuf,
-    timeout_ms: u64,
-    on_error: Fallback,
+    pub(super) id: String,
+    pub(super) services: Vec<String>,
+    pub(super) script: PathBuf,
+    pub(super) timeout_ms: u64,
+    pub(super) on_error: Fallback,
     #[serde(default)]
-    runtime: Runtime,
+    pub(super) runtime: Runtime,
+    #[serde(skip)]
+    pub(super) managed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -52,8 +55,9 @@ pub(crate) enum Runtime {
 pub(crate) struct Checks {
     current: RwLock<settings::Applied>,
     path: Option<PathBuf>,
+    root: Option<PathBuf>,
     update: Mutex<()>,
-    checkers: Vec<Checker>,
+    checkers: RwLock<Vec<std::sync::Arc<Checker>>>,
     status: Mutex<Status>,
 }
 
@@ -64,9 +68,11 @@ struct Status {
     last_logged: Option<Instant>,
 }
 
-struct Checker {
+pub(super) struct Checker {
     policy: Config,
     state: PathBuf,
+    pub(super) managed: bool,
+    retired: std::sync::atomic::AtomicBool,
     worker: tokio::sync::Mutex<WorkerSlot>,
 }
 
@@ -78,15 +84,86 @@ struct WorkerSlot {
 
 impl Checks {
     pub(crate) fn open(root: &Path, configs: Vec<Config>) -> anyhow::Result<Self> {
-        ensure!(configs.len() <= 4, "at most four request checkers");
-        if configs.is_empty() {
-            return Ok(Self::default());
+        let mut configs = configs;
+        let root = if root.is_absolute() {
+            root.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(root)
+        };
+        private_directory(&root)?;
+        let managed_dir = root.join("managed");
+        private_directory(&managed_dir)?;
+        let manifest = root.join("managed.json");
+        let mut active = HashSet::new();
+        if manifest.exists() {
+            let meta = manifest.symlink_metadata()?;
+            ensure!(
+                meta.is_file()
+                    && meta.len() <= 2 * 1024 * 1024
+                    && meta.mode() & 0o077 == 0
+                    && meta.uid() == nix::unistd::geteuid().as_raw(),
+                "invalid managed checker manifest"
+            );
+            let saved: ManagedManifest = serde_json::from_slice(&std::fs::read(&manifest)?)?;
+            ensure!(
+                saved.programs.len() <= 4,
+                "managed checker manifest exceeds checker limit"
+            );
+            active = saved
+                .programs
+                .iter()
+                .map(|entry| entry.file.clone())
+                .collect();
+            for entry in saved.programs {
+                let id = entry.id;
+                validate_id(&id)?;
+                ensure!(
+                    Path::new(&entry.file)
+                        .file_name()
+                        .is_some_and(|n| n == std::ffi::OsStr::new(&entry.file))
+                        && !entry.file.contains(".."),
+                    "invalid managed checker filename"
+                );
+                let path = managed_dir.join(entry.file);
+                let meta = path.symlink_metadata()?;
+                ensure!(
+                    meta.is_file()
+                        && meta.len() <= 256 * 1024
+                        && meta.mode() & 0o077 == 0
+                        && meta.uid() == nix::unistd::geteuid().as_raw(),
+                    "invalid managed checker source"
+                );
+                configs.push(Config {
+                    id,
+                    services: vec![],
+                    script: path,
+                    timeout_ms: 250,
+                    on_error: Fallback::Block,
+                    runtime: Runtime::Python,
+                    managed: true,
+                });
+            }
         }
-        private_directory(root)?;
+        for entry in std::fs::read_dir(&managed_dir)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "py")
+                && !path
+                    .file_name()
+                    .is_some_and(|name| active.contains(&name.to_string_lossy().to_string()))
+            {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        ensure!(configs.len() <= 4, "at most four request checkers");
+        private_directory(&root)?;
         let root = root.canonicalize()?;
         let mut ids = HashSet::new();
-        let mut checks = Self::default();
+        let mut checks = Self {
+            root: Some(root.clone()),
+            ..Self::default()
+        };
         for mut policy in configs {
+            validate_id(&policy.id)?;
             ensure!(
                 !policy.id.is_empty()
                     && policy.id.len() <= 32
@@ -111,17 +188,24 @@ impl Checks {
             );
             let script = policy.script.canonicalize()?;
             ensure!(
-                !script.starts_with(&root),
+                policy.managed || !script.starts_with(&root),
                 "request checker script must be outside writable checker state"
             );
             policy.script = script;
             let state = root.join(&policy.id);
             private_directory(&state)?;
-            checks.checkers.push(Checker {
-                policy,
-                state,
-                worker: Default::default(),
-            });
+            let managed = policy.managed;
+            checks
+                .checkers
+                .get_mut()
+                .unwrap()
+                .push(std::sync::Arc::new(Checker {
+                    policy,
+                    state,
+                    managed,
+                    retired: std::sync::atomic::AtomicBool::new(false),
+                    worker: Default::default(),
+                }));
         }
         checks.path = Some(root.join("settings.json"));
         checks.load_settings()?;
@@ -133,13 +217,13 @@ impl Checks {
             return true;
         };
         if service.forwarding.is_some() {
-            self.failure(checker, service, "incompatible forwarding destination");
+            self.failure(&checker, service, "incompatible forwarding destination");
             return false;
         }
         match checker.check(bytes, timeout_ms).await {
             Ok(allow) => allow,
             Err(reason) => {
-                self.failure(checker, service, reason);
+                self.failure(&checker, service, reason);
                 matches!(on_error, Fallback::Allow)
             }
         }
@@ -147,15 +231,15 @@ impl Checks {
 
     pub(crate) fn framing_failure(&self, service: &Service) -> bool {
         self.checker(service).is_none_or(|(checker, _, on_error)| {
-            self.failure(checker, service, "HTTP request framing failed");
+            self.failure(&checker, service, "HTTP request framing failed");
             service.forwarding.is_none() && matches!(on_error, Fallback::Allow)
         })
     }
 
-    fn checker(&self, service: &Service) -> Option<(&Checker, u64, Fallback)> {
+    fn checker(&self, service: &Service) -> Option<(std::sync::Arc<Checker>, u64, Fallback)> {
         let current = self.current.read().unwrap_or_else(|e| e.into_inner());
-        let &(index, timeout_ms, on_error) = current.services.get(&service.id)?;
-        Some((&self.checkers[index], timeout_ms, on_error))
+        let (checker, timeout_ms, on_error) = current.services.get(&service.id)?;
+        Some((checker.clone(), *timeout_ms, *on_error))
     }
 
     fn failure(&self, checker: &Checker, service: &Service, reason: &'static str) {
@@ -178,6 +262,21 @@ impl Checks {
     }
 }
 
+impl Drop for Checker {
+    fn drop(&mut self) {
+        if self.managed && self.retired.load(std::sync::atomic::Ordering::Acquire) {
+            let path = self.policy.script.clone();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn_blocking(move || {
+                    let _ = std::fs::remove_file(path);
+                });
+            } else {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
 fn private_directory(path: &Path) -> anyhow::Result<()> {
     match std::fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}
@@ -188,6 +287,19 @@ fn private_directory(path: &Path) -> anyhow::Result<()> {
     ensure!(
         meta.is_dir() && meta.uid() == nix::unistd::geteuid().as_raw() && meta.mode() & 0o077 == 0,
         "request checker state must be a private directory owned by Proxy"
+    );
+    Ok(())
+}
+
+pub(crate) fn validate_id(id: &str) -> anyhow::Result<()> {
+    ensure!(
+        !id.is_empty()
+            && id.len() <= 32
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            && id != "managed",
+        "invalid request checker ID"
     );
     Ok(())
 }
@@ -360,6 +472,91 @@ fn add_wasm_command(command: &mut Command) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_python_programs_commit_revision_and_survive_restart() {
+        let root = std::env::temp_dir().join(format!("hydra-managed-{}", uuid::Uuid::new_v4()));
+        let checks = Checks::open(&root, vec![]).unwrap();
+        let settings = checks
+            .put_program(
+                0,
+                "managed-one".into(),
+                "def check(request):\n    return True\n".into(),
+            )
+            .unwrap();
+        assert_eq!(settings.revision, 1);
+        assert_eq!(checks.programs_snapshot().unwrap().programs.len(), 1);
+        assert!(
+            checks
+                .put_program(0, "managed-one".into(), "bad".into())
+                .is_err()
+        );
+        drop(checks);
+
+        let restored = Checks::open(&root, vec![]).unwrap();
+        let snapshot = restored.programs_snapshot().unwrap();
+        let revision = snapshot.revision;
+        let programs = snapshot.programs;
+        assert_eq!(revision, 1);
+        assert_eq!(programs[0].id, "managed-one");
+        assert!(programs[0].source.contains("return True"));
+        let settings = restored.delete_program(revision, "managed-one").unwrap();
+        assert_eq!(settings.revision, 2);
+        drop(restored);
+
+        let empty = Checks::open(&root, vec![]).unwrap();
+        assert!(empty.programs_snapshot().unwrap().programs.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_manifest_commit_keeps_previous_program_and_cleans_candidate() {
+        let root =
+            std::env::temp_dir().join(format!("hydra-managed-rollback-{}", uuid::Uuid::new_v4()));
+        let checks = Checks::open(&root, vec![]).unwrap();
+        let created = checks
+            .put_program(
+                0,
+                "checker1".into(),
+                "def check(request):\n return True\n".into(),
+            )
+            .unwrap();
+        let old_source = checks.programs_snapshot().unwrap().programs[0]
+            .source
+            .clone();
+        let old_manifest = std::fs::read(root.join("managed.json")).unwrap();
+        std::fs::remove_file(root.join("managed.json")).unwrap();
+        std::fs::create_dir(root.join("managed.json")).unwrap();
+        assert!(
+            checks
+                .put_program(
+                    created.revision,
+                    "checker1".into(),
+                    "def check(request):\n return False\n".into()
+                )
+                .is_err()
+        );
+        assert_eq!(
+            checks.programs_snapshot().unwrap().programs[0].source,
+            old_source
+        );
+        std::fs::remove_dir(root.join("managed.json")).unwrap();
+        std::fs::write(root.join("managed.json"), old_manifest).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            root.join("managed.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        drop(checks);
+        let reopened = Checks::open(&root, vec![]).unwrap();
+        assert_eq!(
+            reopened.programs_snapshot().unwrap().programs[0].source,
+            old_source
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use hydra_domain::Transport;
 
     fn local_service() -> Service {
@@ -441,6 +638,7 @@ def check(request):
                 timeout_ms: 500,
                 on_error,
                 runtime: Runtime::Python,
+                managed: false,
             }]
         };
         let service = local_service();
@@ -500,6 +698,7 @@ def check(request):
                 timeout_ms: 1000,
                 on_error: Fallback::Block,
                 runtime: Runtime::Wasm,
+                managed: false,
             }]
         };
         let directory = root.join("workers");

@@ -19,6 +19,7 @@ pub struct Settings {
     pub traffic_history_per_service_mib: u32,
     #[serde(default = "hydra_compression::default_level")]
     pub traffic_history_compression_level: i32,
+    #[serde(default = "default_flag_pattern")]
     pub flag_pattern: Option<String>,
     #[serde(default)]
     pub auto_submit_captured: bool,
@@ -33,13 +34,30 @@ impl Default for Settings {
         Self {
             traffic_history_per_service_mib: hydra_domain::history::default_per_service_mib(),
             traffic_history_compression_level: hydra_compression::DEFAULT_LEVEL,
-            flag_pattern: None,
+            flag_pattern: default_flag_pattern(),
             auto_submit_captured: false,
             checker: None,
             sandbox: None,
             execution_mode: ExecutionMode::default(),
             host_runtime: None,
         }
+    }
+}
+fn default_flag_pattern() -> Option<String> {
+    Some("[A-Z0-9]{31}=".into())
+}
+#[cfg(test)]
+mod flag_pattern_defaults {
+    use super::Settings;
+
+    #[test]
+    fn omitted_pattern_uses_forcad_but_explicit_null_disables_it() {
+        let omitted: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(omitted.flag_pattern.as_deref(), Some("[A-Z0-9]{31}="));
+        let disabled: Settings = serde_json::from_str(r#"{"flag_pattern":null}"#).unwrap();
+        assert_eq!(disabled.flag_pattern, None);
+        let custom: Settings = serde_json::from_str(r#"{"flag_pattern":"CUSTOM_[0-9]+"}"#).unwrap();
+        assert_eq!(custom.flag_pattern.as_deref(), Some("CUSTOM_[0-9]+"));
     }
 }
 #[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]

@@ -1,4 +1,5 @@
 {
+  "flag_pattern": "[A-Z0-9]{31}=",
   "socket": "/run/hydra/proxy.sock",
   "state_file": "/var/lib/hydra/proxy/last-good.json",
   "limits": {

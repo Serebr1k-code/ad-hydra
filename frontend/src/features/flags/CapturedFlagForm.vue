@@ -25,7 +25,7 @@ async function save(){
  <section class="space-y-3 rounded border p-4">
   <h2 class="text-lg font-semibold">Paste captured flags</h2>
   <form class="space-y-3" @submit.prevent="save">
-   <div><Label for="flag-paste">Text containing flags</Label><Textarea id="flag-paste" v-model="text" rows="5" required :disabled="busy" placeholder="Paste output or a list of captured flags…" autocomplete="off" spellcheck="false" /></div>
+   <div><Label for="flag-paste">Text containing flags</Label><Textarea id="flag-paste" v-model="text" rows="5" required :disabled="busy" placeholder="AAAAAABBBBBBCCCCCCDDDDDDEEEEEE1=&#10;Paste output or a list of captured flags…" autocomplete="off" spellcheck="false" /></div>
    <div class="grid gap-3 sm:grid-cols-2"><div><Label>Service (optional)</Label><Select v-model="service" :disabled="busy"><SelectTrigger aria-label="Pasted flags service"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">Unspecified</SelectItem><SelectItem v-for="item in services" :key="item.id" :value="item.id">{{item.name}}</SelectItem></SelectContent></Select></div><div><Label for="flag-target">Authorized target ID (optional)</Label><Input id="flag-target" v-model="target" maxlength="128" :disabled="busy" /></div></div>
    <p class="text-sm text-muted-foreground">The saved extraction regex selects full matches verbatim. Flags are not trimmed, recased or decoded. Duplicates queue once; up to 256 matches per paste. Automatic submission sends queued flags when enabled; otherwise use Run saved submitter now.</p>
    <p v-if="error" role="alert" class="text-destructive">{{error}}</p><p v-if="notice" role="status">{{notice}}</p>

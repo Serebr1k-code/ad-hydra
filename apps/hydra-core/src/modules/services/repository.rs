@@ -25,6 +25,14 @@ impl std::fmt::Display for Conflict {
     }
 }
 impl std::error::Error for Conflict {}
+#[derive(Debug)]
+pub struct ServiceNotFound;
+impl std::fmt::Display for ServiceNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "service not found")
+    }
+}
+impl std::error::Error for ServiceNotFound {}
 #[derive(Clone)]
 pub struct Control {
     pub db: Database,
@@ -212,6 +220,41 @@ impl Control {
             tx.commit()?;
             Ok(())
         }).await
+    }
+
+    /// Reapply the current enabled service snapshot without changing desired state.
+    pub async fn retry_service(
+        &self,
+        actor: Actor,
+        expected_revision: u64,
+        id: String,
+        request: String,
+    ) -> anyhow::Result<u64> {
+        let revision = self.db.run(move |db| {
+            let tx = db.transaction()?;
+            let desired = load(&tx)?;
+            if desired.services.revision != expected_revision {
+                return Err(Conflict.into());
+            }
+            let service = desired.services.services.iter().find(|service| service.id == id)
+                .ok_or_else(|| anyhow::Error::new(ServiceNotFound))?;
+            anyhow::ensure!(service.enabled, "disabled services cannot be retried");
+            let revision = desired.services.revision;
+            audit::append_change(
+                &tx,
+                &actor,
+                "service.retry",
+                &id,
+                &request,
+                true,
+                crate::modules::auth::now(),
+                &serde_json::json!({"expected_revision":expected_revision,"revision":revision,"status":"retry_requested"}),
+            )?;
+            tx.commit()?;
+            Ok(revision)
+        }).await?;
+        self.changed.notify_one();
+        Ok(revision)
     }
     pub async fn attribution(&self) -> anyhow::Result<Vec<Record>> {
         self.db.run(|db|{Ok(db.prepare("SELECT kind,id,created_by,updated_by,strftime('%Y-%m-%dT%H:%M:%SZ',created_at,'unixepoch'),strftime('%Y-%m-%dT%H:%M:%SZ',updated_at,'unixepoch'),hit_count FROM control_attribution ORDER BY kind,id LIMIT 384")?.query_map([],|r|Ok(Record{kind:r.get(0)?,id:r.get(1)?,created_by:r.get(2)?,updated_by:r.get(3)?,created_at:r.get(4)?,updated_at:r.get(5)?,hit_count:r.get::<_,i64>(6)? as u64}))?.collect::<Result<Vec<_>,_>>()?)}).await

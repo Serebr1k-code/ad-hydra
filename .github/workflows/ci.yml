@@ -71,7 +71,9 @@ jobs:
             --component rustfmt --component clippy \
             --target wasm32-unknown-unknown --target x86_64-unknown-linux-musl
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler musl-tools
+          sudo apt-get install -y protobuf-compiler musl-tools bubblewrap libseccomp2
+          bwrap --unshare-user --unshare-pid --die-with-parent \
+            --ro-bind / / --proc /proc --dev /dev /usr/bin/true
           python3 -m pip install -r scripts/requirements.txt
       - name: Cache Cargo dependencies and compiled targets
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -110,6 +112,8 @@ jobs:
       - run: python3 tests/e2e/flags_controls.py
       - run: python3 tests/e2e/python_submitter.py
       - run: python3 tests/e2e/operations.py
+      - run: python3 tests/e2e/request_checkers.py
+      - run: python3 tests/e2e/service_retry.py
       - run: python3 tests/e2e/diagnostics.py
       - name: Embedded Vue browser smoke
         run: |

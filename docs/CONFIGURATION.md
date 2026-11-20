@@ -59,7 +59,7 @@ For Python or WASM checks that use private persistent files, see [request checke
 | `/etc/hydra/proxy.json` | Local socket, state file, global transport limits, and passive traffic flag pattern | When `hydra-proxy` starts |
 | systemd unit settings and `/etc/hydra/` TLS files | Console bind address, HTTPS origin, and certificate paths | When `hydra-core` starts |
 
-On builds with the ForcAD default, an omitted `flag_pattern` in Proxy JSON uses `[A-Z0-9]{31}=` for traffic markers. Set a custom regex for another format or set it to `null` to turn off those markers. See [traffic flag detection](traffic-view.md).
+An omitted `flag_pattern` in Core operations configuration and Proxy JSON uses `[A-Z0-9]{31}=` for the ForcAD default flag format. Set a custom regex for another format or set it to `null` to turn off traffic markers. See [traffic flag detection](traffic-view.md).
 
 For routine remote access, keep the console bound to loopback and use the SSH tunnel from the README. If you change the console's public origin, match Core's configured origin to the exact HTTPS URL operators open, including its port when present.
 

@@ -1,6 +1,6 @@
 {
   "traffic_history_per_service_mib": 128,
-  "flag_pattern": "FLAG\\{[A-Za-z0-9_]{1,64}\\}",
+  "flag_pattern": "[A-Z0-9]{31}=",
   "auto_submit_captured": false,
   "checker": null,
   "sandbox": null

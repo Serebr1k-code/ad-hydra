@@ -425,6 +425,7 @@ impl utoipa::OpenApi for ControlApi {
     fn openapi() -> utoipa::openapi::OpenApi {
         let mut doc = ServiceApi::openapi();
         doc.merge(crate::modules::filters::FilterApi::openapi());
+        doc.merge(super::retry::RetryApi::openapi());
         doc
     }
 }
@@ -441,6 +442,7 @@ pub fn router(control: Control) -> Router {
             axum::routing::patch(update_service).delete(delete_service),
         )
         .with_state(control.clone())
+        .merge(super::retry::router(control.clone()))
         .merge(crate::modules::filters::router(control))
 }
 

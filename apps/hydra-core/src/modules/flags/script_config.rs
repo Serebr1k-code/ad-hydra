@@ -4,13 +4,15 @@ use crate::modules::{
     auth::now,
 };
 use rusqlite::{OptionalExtension, params};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, ser::SerializeStruct};
 use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 
-#[derive(Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SubmitterConfig {
+    #[serde(default = "custom_mode")]
+    pub mode: String,
     #[serde(default = "batch_size")]
     pub batch_size: u32,
     pub revision: i64,
@@ -19,11 +21,50 @@ pub struct SubmitterConfig {
     #[serde(default)]
     pub python_packages: Vec<String>,
     pub source: String,
+    #[serde(default)]
+    pub forcad_ip: String,
+    #[serde(default = "forcad_port")]
+    pub forcad_port: u16,
+    #[serde(default)]
+    #[schema(write_only = true)]
+    pub team_token: String,
+    #[serde(default, deserialize_with = "ignore_read_only_bool")]
+    #[schema(read_only = true)]
+    pub team_token_configured: bool,
     #[serde(default = "timeout")]
     pub timeout_seconds: u64,
 }
+fn ignore_read_only_bool<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    let _ = serde::de::IgnoredAny::deserialize(deserializer)?;
+    Ok(false)
+}
+impl Serialize for SubmitterConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut out = serializer.serialize_struct("SubmitterConfig", 11)?;
+        out.serialize_field("mode", &self.mode)?;
+        out.serialize_field("batch_size", &self.batch_size)?;
+        out.serialize_field("revision", &self.revision)?;
+        out.serialize_field("enabled", &self.enabled)?;
+        out.serialize_field("flag_pattern", &self.flag_pattern)?;
+        out.serialize_field("python_packages", &self.python_packages)?;
+        out.serialize_field("source", &self.source)?;
+        out.serialize_field("forcad_ip", &self.forcad_ip)?;
+        out.serialize_field("forcad_port", &self.forcad_port)?;
+        out.serialize_field("team_token_configured", &self.team_token_configured)?;
+        out.serialize_field("timeout_seconds", &self.timeout_seconds)?;
+        out.end()
+    }
+}
 fn batch_size() -> u32 {
     240
+}
+fn custom_mode() -> String {
+    "custom".into()
+}
+fn forcad_port() -> u16 {
+    8080
 }
 fn timeout() -> u64 {
     20
@@ -35,7 +76,7 @@ impl SubmitterConfig {
             "Python source exceeds 2 MiB or contains NUL"
         );
         anyhow::ensure!(
-            !self.enabled || !self.source.trim().is_empty(),
+            !self.enabled || self.mode == "forcad" || !self.source.trim().is_empty(),
             "Python source is required before enabling submission"
         );
         anyhow::ensure!(
@@ -46,6 +87,33 @@ impl SubmitterConfig {
             (1..=240).contains(&self.batch_size),
             "batch size must be 1..240 flags"
         );
+        anyhow::ensure!(
+            self.mode == "custom" || self.mode == "forcad",
+            "unknown submitter mode"
+        );
+        if self.mode == "forcad" {
+            anyhow::ensure!(
+                self.forcad_ip.is_empty() || self.forcad_ip.parse::<std::net::IpAddr>().is_ok(),
+                "ForcAD server must be an unbracketed IP address"
+            );
+            anyhow::ensure!(self.forcad_port != 0, "ForcAD port must be 1..65535");
+            anyhow::ensure!(
+                self.team_token.len() <= 512
+                    && self
+                        .team_token
+                        .bytes()
+                        .all(|byte| (0x21..=0x7e).contains(&byte)),
+                "invalid ForcAD team token"
+            );
+            anyhow::ensure!(
+                !self.enabled || (!self.team_token.is_empty() && !self.forcad_ip.is_empty()),
+                "configure the ForcAD IP and team token before enabling submission"
+            );
+            anyhow::ensure!(
+                self.batch_size <= 100,
+                "ForcAD batch size must be 1..100 flags"
+            );
+        }
         crate::modules::farm::validate_python_packages(&self.python_packages)?;
         compile_pattern(&self.flag_pattern)
     }
@@ -104,16 +172,33 @@ pub struct SubmitterView {
 }
 
 pub(super) fn load(db: &rusqlite::Connection) -> anyhow::Result<Option<SubmitterConfig>> {
-    let row=db.query_row("SELECT revision,enabled,flag_pattern,python_packages,source,timeout_seconds,batch_size FROM flag_submitter_config WHERE id=1",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,bool>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,u32>(5)? as u64,r.get::<_,u32>(6)?))).optional()?;
+    let row=db.query_row("SELECT revision,enabled,flag_pattern,python_packages,source,timeout_seconds,batch_size,mode,forcad_ip,forcad_port,team_token FROM flag_submitter_config WHERE id=1",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,bool>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,u32>(5)? as u64,r.get::<_,u32>(6)?,r.get::<_,String>(7)?,r.get::<_,String>(8)?,r.get::<_,u16>(9)?,r.get::<_,String>(10)?))).optional()?;
     row.map(
-        |(revision, enabled, flag_pattern, packages, source, timeout_seconds, batch_size)| {
+        |(
+            revision,
+            enabled,
+            flag_pattern,
+            packages,
+            source,
+            timeout_seconds,
+            batch_size,
+            mode,
+            forcad_ip,
+            forcad_port,
+            team_token,
+        )| {
             Ok(SubmitterConfig {
+                mode,
                 batch_size,
                 revision,
                 enabled,
                 flag_pattern,
                 python_packages: serde_json::from_str(&packages)?,
                 source,
+                forcad_ip,
+                forcad_port,
+                team_token_configured: !team_token.is_empty(),
+                team_token,
                 timeout_seconds,
             })
         },
@@ -124,26 +209,34 @@ impl Flags {
     pub async fn configure_submitter(
         &self,
         actor: Actor,
-        config: SubmitterConfig,
+        mut config: SubmitterConfig,
     ) -> anyhow::Result<()> {
         let _guard = self.configuration.lock().await;
+        if config.team_token.is_empty() {
+            config.team_token = self
+                .script
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|saved| saved.team_token.clone())
+                .unwrap_or_default();
+        }
+        config.team_token_configured = !config.team_token.is_empty();
         anyhow::ensure!((0..i64::MAX).contains(&config.revision), "invalid revision");
         let regex = config.validate()?;
         anyhow::ensure!(
             !config.enabled || self.settings.script_runtime.is_some(),
             "host Python runtime/uv is not configured by the operator"
         );
-        let mut cached = config.clone();
-        cached.revision += 1;
-        self.auth.db.run(move|db|{
+        let cached = self.auth.db.run(move|db|{
             let tx=db.transaction()?;
             let old=tx.query_row("SELECT revision FROM flag_submitter_config WHERE id=1",[],|r|r.get::<_,i64>(0)).optional()?;
             anyhow::ensure!(old.unwrap_or(0)==config.revision,"submitter revision conflict; reload configuration");
-            tx.execute("INSERT INTO flag_submitter_config(id,revision,enabled,flag_pattern,python_packages,source,timeout_seconds,updated_at,author_id,batch_size) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,enabled=excluded.enabled,flag_pattern=excluded.flag_pattern,python_packages=excluded.python_packages,source=excluded.source,timeout_seconds=excluded.timeout_seconds,updated_at=excluded.updated_at,author_id=excluded.author_id,batch_size=excluded.batch_size",params![config.revision+1,config.enabled,config.flag_pattern,serde_json::to_string(&config.python_packages)?,config.source,config.timeout_seconds as u32,now(),actor.id,config.batch_size])?;
+            tx.execute("INSERT INTO flag_submitter_config(id,revision,enabled,flag_pattern,python_packages,source,timeout_seconds,updated_at,author_id,batch_size,mode,forcad_ip,forcad_port,team_token) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,enabled=excluded.enabled,flag_pattern=excluded.flag_pattern,python_packages=excluded.python_packages,source=excluded.source,timeout_seconds=excluded.timeout_seconds,updated_at=excluded.updated_at,author_id=excluded.author_id,batch_size=excluded.batch_size,mode=excluded.mode,forcad_ip=excluded.forcad_ip,forcad_port=excluded.forcad_port,team_token=excluded.team_token",params![config.revision+1,config.enabled,config.flag_pattern,serde_json::to_string(&config.python_packages)?,config.source,config.timeout_seconds as u32,now(),actor.id,config.batch_size,config.mode,config.forcad_ip,config.forcad_port,config.team_token])?;
             // New captures become eligible immediately; the worker serializes bounded batches.
             tx.execute("UPDATE flag_submitter_clock SET next_batch_at=?1 WHERE id=1",[now()])?;
-            audit::append_change(&tx,&actor,"submitter.configure","python-submitter",&uuid::Uuid::new_v4().to_string(),true,now(),&serde_json::json!({"revision":config.revision+1,"enabled":config.enabled,"source_sha256":format!("{:x}",Sha256::digest(config.source.as_bytes())),"interval_seconds":1}))?;
-            tx.commit()?;Ok(())
+            audit::append_change(&tx,&actor,"submitter.configure","python-submitter",&uuid::Uuid::new_v4().to_string(),true,now(),&serde_json::json!({"revision":config.revision+1,"enabled":config.enabled,"mode":config.mode,"source_sha256":format!("{:x}",Sha256::digest(config.source.as_bytes())),"interval_seconds":1}))?;
+            tx.commit()?;load(db)?.ok_or_else(||anyhow::anyhow!("submitter config did not persist"))
         }).await?;
         *self.farm_regex.write().unwrap_or_else(|e| e.into_inner()) = Some(regex);
         *self.script.write().unwrap_or_else(|e| e.into_inner()) = Some(cached);
@@ -156,12 +249,21 @@ impl Flags {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .unwrap_or_else(|| SubmitterConfig {
-                batch_size: 240,
+                mode: "forcad".into(),
+                batch_size: 100,
                 revision: 0,
                 enabled: false,
-                flag_pattern: self.settings.pattern.clone().unwrap_or_default(),
+                flag_pattern: self
+                    .settings
+                    .pattern
+                    .clone()
+                    .unwrap_or_else(|| "[A-Z0-9]{31}=".into()),
                 python_packages: Vec::new(),
                 source: String::new(),
+                forcad_ip: String::new(),
+                forcad_port: 8080,
+                team_token: String::new(),
+                team_token_configured: false,
                 timeout_seconds: 20,
             });
         let (queued_flags, next_batch_at, last_batch) = self

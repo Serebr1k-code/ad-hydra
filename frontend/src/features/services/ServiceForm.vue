@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onMounted, nextTick, reactive, ref } from 'vue'
-import type { ServiceInput } from '@/generated/contracts'
-import { api, errorMessage } from '@/shared/api/client'
+import { onBeforeUnmount, onMounted, nextTick, reactive, ref } from 'vue'
+import type { RetryAccepted, RetryInput, ServiceInput } from '@/generated/contracts'
+import { api, ApiError, errorMessage } from '@/shared/api/client'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
@@ -31,10 +31,16 @@ const protection = ref<ServiceProtection | null>(initial?.protection ? { ...init
 const catalog=ref<DecoderCatalog>({items:[],activations:[]})
 const loadingDecoders=ref(true), decodersReady=ref(false)
 const savedId=ref(initial?.id), savedRevision=ref(props.revision)
+const savedEnabled=ref(initial?.enabled ?? false)
 onMounted(async()=>{try{catalog.value=await api<DecoderCatalog>('/protocols');decodersReady.value=true;if(initial)form.protocol_id=selectedDecoder(initial,catalog.value)}catch(cause){error.value=errorMessage(cause)}finally{loadingDecoders.value=false}})
 onMounted(async()=>{if(props.initialSection==='forwarding'){await nextTick();requestAnimationFrame(()=>{const panel=document.getElementById('service-forwarding-settings');panel?.scrollIntoView({block:'start'});panel?.focus({preventScroll:true})})}})
 const saving = ref(false)
 const error = ref('')
+const showRetry = ref(false)
+const retrying = ref(false)
+const retryGeneration = ref(0)
+let retryTimer: ReturnType<typeof setTimeout> | undefined
+onBeforeUnmount(() => { retryGeneration.value++; if (retryTimer) clearTimeout(retryTimer) })
 async function save() {
   if (saving.value || !decodersReady.value) return
   error.value = !form.name.trim()||new TextEncoder().encode(form.name.trim()).length>256?'Enter a service name up to 256 UTF-8 bytes.':validateEndpoints(form.listen_address, form.upstream_address) || validateProtection(protection.value) || validateForwarding(forwarding.value)
@@ -43,10 +49,54 @@ async function save() {
   emit('busy', true)
   try {
     const input: ServiceInput & ProtectionService & {name?:string} = { ...form, name:form.name.trim(), forwarding:forwarding.value, protection: protection.value, listen_address: form.listen_address.trim(), upstream_address: form.upstream_address.trim(), protocol_id: form.protocol_id.trim(), expected_revision: savedRevision.value }
+    savedEnabled.value = input.enabled
     await saveWithDecoder(input,savedId.value,input.protocol_id,catalog.value,(id,revision)=>{savedId.value=id;savedRevision.value=revision})
+    showRetry.value = false
     emit('saved')
-  } catch (cause) { error.value = errorMessage(cause) }
+  } catch (cause) {
+    error.value = errorMessage(cause)
+    showRetry.value = Boolean(savedId.value && savedEnabled.value && error.value.startsWith('Service saved;'))
+  }
   finally { saving.value = false; emit('busy', false) }
+}
+function wait(ms: number) {
+  return new Promise<void>(resolve => { retryTimer = setTimeout(() => { retryTimer = undefined; resolve() }, ms) })
+}
+async function retryListener() {
+  if (!savedId.value || !savedEnabled.value || retrying.value || saving.value) return
+  retrying.value = true
+  const generation = ++retryGeneration.value
+  error.value = ''
+  try {
+    const payload: RetryInput = { expected_revision: savedRevision.value }
+    const result = await api<RetryAccepted>(`/services/${encodeURIComponent(savedId.value)}/retry`, 'POST', payload)
+    if (generation !== retryGeneration.value) return
+    error.value = `Retry requested for revision ${result.revision}. Pending listener and filter changes apply together.`
+    for (let attempt = 0; attempt < 20 && generation === retryGeneration.value; attempt++) {
+      await wait(750)
+      if (generation !== retryGeneration.value) return
+      const current = await api<{ revision: number; applied_revision: number; apply_status: string; apply_error?: string | null }>('/services')
+      if (generation !== retryGeneration.value) return
+      if (current.applied_revision >= result.revision && current.apply_status === 'applied') {
+        error.value = 'Listener snapshot applied. If decoder activation is still pending, save the service again to retry that step.'
+        break
+      }
+      if (current.apply_error) error.value = `${current.apply_error} Free the listener address, then retry.`
+      if (attempt === 19) error.value = `${error.value} Retry remains pending; refresh Services to check again.`
+    }
+  } catch (cause) {
+    if (generation !== retryGeneration.value) return
+    if (cause instanceof ApiError && cause.status === 409) {
+      try {
+        const current = await api<{ revision: number }>('/services')
+        if (generation !== retryGeneration.value) return
+        savedRevision.value = current.revision
+        error.value = `Service configuration changed. Refreshed to revision ${current.revision}; retry again. Your draft was not saved.`
+      } catch { error.value = errorMessage(cause) }
+    } else error.value = errorMessage(cause)
+  } finally {
+    if (generation === retryGeneration.value) retrying.value = false
+  }
 }
 </script>
 
@@ -91,6 +141,10 @@ async function save() {
     <ForwardingForm v-model="forwarding" :disabled="saving" :transport="form.transport" :listen-address="form.listen_address" />
     <ServiceProtectionForm v-model="protection" :disabled="saving" :transport="form.transport" />
     <p v-if="error" role="alert" class="text-sm text-destructive">{{ error }}</p>
-    <Button id="service-save" type="submit" :disabled="saving || !decodersReady">{{ saving ? 'Saving…' : 'Save service' }}</Button>
+    <div v-if="showRetry && savedId && savedEnabled" class="space-y-2 rounded-md border p-3">
+      <p class="text-sm text-muted-foreground">If a listener bind failed, free the listener address, then retry. The retry leaves this form draft unsaved.</p>
+      <Button id="service-retry-listener" type="button" variant="outline" :disabled="saving || retrying" @click="retryListener">{{ retrying ? 'Retrying…' : 'Retry listener' }}</Button>
+    </div>
+    <Button id="service-save" type="submit" :disabled="saving || retrying || !decodersReady">{{ saving ? 'Saving…' : 'Save service' }}</Button>
   </form>
 </template>

@@ -1,5 +1,6 @@
 mod adapters;
 mod browse;
+mod forcad;
 mod http;
 mod imports;
 mod manual;
@@ -84,6 +85,12 @@ impl Flags {
             .migrate(
                 19,
                 include_str!("../../../../../migrations/0019_submitter_io.sql"),
+            )
+            .await?;
+        auth.db
+            .migrate(
+                27,
+                include_str!("../../../../../migrations/0027_forcad_submitter.sql"),
             )
             .await?;
         auth.db

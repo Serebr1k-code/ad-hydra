@@ -4,9 +4,11 @@ A request checker runs before Proxy forwards client traffic to a local service. 
 
 ## Register a Python checker
 
-Install `bubblewrap`, the system `python3`, and the `libseccomp.so.2` runtime on the Proxy host. Bubblewrap must support unprivileged user namespaces. The stock installer does not install these optional packages.
+The Hydra installer installs `bubblewrap`, the system `python3`, and the `libseccomp.so.2` runtime. Bubblewrap must support unprivileged user namespaces. On an existing installation, install those packages with the host distribution's package manager before enabling Python checkers.
 
-Save a trusted Python script to a location readable by `hydra-proxy`, such as `/etc/hydra/checkers/web.py`. Keep the script outside writable worker state, and make it writable only by your administrator. Define `check(request: bytes) -> bool`. Returning `True` allows traffic to continue through the existing filters. Returning `False` closes the TCP connection or drops the UDP datagram.
+Managed Python checkers can be created from **Filters → Request checkers** by pasting source or uploading a `.py` file (up to 256 KiB). The UI stores managed source in Proxy's private checker program store; it does not accept filesystem paths. New programs start paused. Select one or more services and save checker settings to enable it. You can edit or delete managed source from the UI. Deleting a program preserves its `/state` data.
+
+Legacy checkers can still be configured by an administrator in Proxy JSON with an absolute `script` path. Those entries appear read-only in the UI; service assignments, timeout, and error fallback remain editable. Define `check(request: bytes) -> bool`. Returning `True` allows traffic to continue through the existing filters. Returning `False` closes the TCP connection or drops the UDP datagram.
 
 This example reads an optional file containing a maximum request size:
 
@@ -21,7 +23,7 @@ def check(request: bytes) -> bool:
     return len(request) <= int(LIMIT.read_text(encoding="utf-8"))
 ```
 
-Add the following property to the existing Proxy JSON (typically `/etc/hydra/proxy.json`). Replace the service identifier with the ID shown by the Services API. One checker can cover several explicit service IDs. Each service can have one checker.
+For legacy path-based checkers, add the following property to the existing Proxy JSON (typically `/etc/hydra/proxy.json`). Replace the service identifier with the ID shown by the Services API. One checker can cover several explicit service IDs. Each service can have one checker.
 
 ```json
 "request_checkers": [
@@ -36,7 +38,7 @@ Add the following property to the existing Proxy JSON (typically `/etc/hydra/pro
 ]
 ```
 
-Restart `hydra-proxy` when registering or replacing a checker program. `on_error` can be `allow` or `block`; it covers timeout, exceptions, invalid decisions, a worker that cannot start, and concurrent requests when the worker is busy. It also covers HTTP framing failures. Checker errors appear next to Proxy status and in the Proxy journal. The status shows the error count and most recent error for the current Proxy process. Requests and script output are excluded from checker error logs.
+Managed source changes are applied by the Proxy program registry without choosing a host path. `on_error` can be `allow` or `block`; it covers timeout, exceptions, invalid decisions, a worker that cannot start, and concurrent requests when the worker is busy. It also covers HTTP framing failures. Checker errors appear next to Proxy status and in the Proxy journal. The status shows the error count and most recent error for the current Proxy process. Requests and script output are excluded from checker error logs.
 
 ## Register a WASM checker
 
@@ -73,4 +75,4 @@ Python uses ordinary file APIs and WASM uses WASI file APIs. It can write only t
 - Other TCP services use one client read at a time. A read is not a protocol message boundary. Use this mode only for checks that work with arbitrary chunk boundaries.
 - Checkers receive at most 1 MiB per input. The error action applies to a larger input.
 
-Program registration is a local administrator operation. Console users can change the policy of registered programs. They cannot select arbitrary paths or mount directories.
+The UI can create, edit, and delete bounded managed Python source, and assign managed or legacy programs to services. Console users cannot select arbitrary paths or mount directories. Managed source and the registry are retained under Proxy's private state directory across restarts; per-checker mutable files remain under `/state` and survive program deletion.

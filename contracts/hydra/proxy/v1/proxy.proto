@@ -12,6 +12,9 @@ service ProxyControl {
   rpc ConfigureHistory(ConfigureHistoryRequest) returns (ConfigureHistoryReply);
   rpc GetRequestCheckerSettings(GetRequestCheckerSettingsRequest) returns (RequestCheckerSettings);
   rpc SetRequestCheckerSettings(SetRequestCheckerSettingsRequest) returns (RequestCheckerSettings);
+  rpc ListRequestCheckerPrograms(GetRequestCheckerSettingsRequest) returns (RequestCheckerPrograms);
+  rpc PutRequestCheckerProgram(PutRequestCheckerProgramRequest) returns (RequestCheckerPrograms);
+  rpc DeleteRequestCheckerProgram(DeleteRequestCheckerProgramRequest) returns (RequestCheckerPrograms);
   rpc ApplyConfigSnapshot(ApplyConfigSnapshotRequest) returns (ApplyResult);
   rpc ApplyServiceSnapshot(ApplyServiceSnapshotRequest) returns (ApplyResult);
   rpc ApplyRuleSnapshot(ApplyRuleSnapshotRequest) returns (ApplyResult);
@@ -240,6 +243,10 @@ message SetRequestCheckerSettingsRequest {
   Actor actor = 2;
   string request_id = 3;
 }
+message RequestCheckerProgram { string id = 1; string runtime = 2; bool managed = 3; string source = 4; }
+message RequestCheckerPrograms { uint64 revision = 1; repeated RequestCheckerProgram programs = 2; }
+message PutRequestCheckerProgramRequest { Actor actor = 1; string request_id = 2; uint64 revision = 3; string id = 4; string source = 5; }
+message DeleteRequestCheckerProgramRequest { Actor actor = 1; string request_id = 2; uint64 revision = 3; string id = 4; }
 message ApplyServiceSnapshotRequest {
   uint64 revision = 1;
   string request_id = 2;

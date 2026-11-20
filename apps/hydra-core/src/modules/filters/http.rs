@@ -1,4 +1,8 @@
 use super::checker_http::{self, RequestCheckerPolicy, RequestCheckerSettings};
+use super::checker_program_http::{
+    self as checker_program_http, DeleteProgramInput, PutProgramInput, RequestCheckerProgram,
+    RequestCheckerPrograms,
+};
 use crate::modules::services::{
     Control,
     http::{Error, ListQuery, ListResponse, Revision, actor, list, remove, request},
@@ -480,7 +484,10 @@ async fn from_message(
         from_message,
         preview_filter,
         checker_http::request_checker_settings,
-        checker_http::update_request_checker_settings
+        checker_http::update_request_checker_settings,
+        checker_program_http::list_request_checker_programs,
+        checker_program_http::put_request_checker_program,
+        checker_program_http::delete_request_checker_program
     ),
     components(schemas(
         FilterInput,
@@ -491,6 +498,10 @@ async fn from_message(
         FilterPreviewInput,
         RequestCheckerPolicy,
         RequestCheckerSettings,
+        RequestCheckerProgram,
+        RequestCheckerPrograms,
+        PutProgramInput,
+        DeleteProgramInput,
         ListResponse
     ))
 )]

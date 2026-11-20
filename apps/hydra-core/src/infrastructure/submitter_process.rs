@@ -26,6 +26,21 @@ pub(crate) struct ScriptOutput {
     pub timed_out: bool,
     pub cancelled: bool,
 }
+#[derive(Clone)]
+pub(crate) struct ForcadRuntimeConfig {
+    pub ip: String,
+    pub port: u16,
+    pub team_token: String,
+}
+struct ScriptRequest {
+    settings: HostRuntimeSettings,
+    source: String,
+    packages: Vec<String>,
+    flags: Vec<String>,
+    batch_id: String,
+    timeout: Duration,
+    cancel: CancellationToken,
+}
 impl ScriptOutput {
     fn empty() -> Self {
         Self {
@@ -91,6 +106,58 @@ pub(crate) async fn run(
     timeout: Duration,
     cancel: CancellationToken,
 ) -> anyhow::Result<ScriptOutput> {
+    run_inner(
+        ScriptRequest {
+            settings,
+            source,
+            packages,
+            flags,
+            batch_id,
+            timeout,
+            cancel,
+        },
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn run_forcad(
+    settings: HostRuntimeSettings,
+    flags: Vec<String>,
+    batch_id: String,
+    timeout: Duration,
+    cancel: CancellationToken,
+    config: ForcadRuntimeConfig,
+) -> anyhow::Result<ScriptOutput> {
+    let source = include_str!("../modules/flags/templates/forcad_submitter.py").to_string();
+    run_inner(
+        ScriptRequest {
+            settings,
+            source,
+            packages: vec![],
+            flags,
+            batch_id,
+            timeout,
+            cancel,
+        },
+        Some(config),
+    )
+    .await
+}
+
+async fn run_inner(
+    request: ScriptRequest,
+    forcad: Option<ForcadRuntimeConfig>,
+) -> anyhow::Result<ScriptOutput> {
+    let ScriptRequest {
+        settings,
+        source,
+        packages,
+        flags,
+        batch_id,
+        timeout,
+        cancel,
+    } = request;
     anyhow::ensure!(settings.uv.is_absolute(), "uv path must be absolute");
     anyhow::ensure!(
         !source.is_empty() && source.len() <= 2 * 1024 * 1024,
@@ -98,7 +165,7 @@ pub(crate) async fn run(
     );
     anyhow::ensure!(
         !flags.is_empty()
-            && flags.len() <= 256
+            && flags.len() <= if forcad.is_some() { 100 } else { 256 }
             && flags.iter().map(String::len).sum::<usize>() <= 60 * 1024
             && flags
                 .iter()
@@ -139,14 +206,39 @@ pub(crate) async fn run(
         .open(&entrypoint)?;
     script.write_all(source.as_bytes())?;
     drop(script);
+    if let Some(config) = forcad {
+        anyhow::ensure!(
+            config.ip.parse::<std::net::IpAddr>().is_ok() && config.port != 0,
+            "invalid ForcAD address"
+        );
+        anyhow::ensure!(
+            config.team_token.len() <= 512
+                && config
+                    .team_token
+                    .bytes()
+                    .all(|byte| (0x21..=0x7e).contains(&byte)),
+            "invalid ForcAD token"
+        );
+        let path = directory.join("forcad.json");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        serde_json::to_writer(
+            file,
+            &serde_json::json!({"ip":config.ip,"port":config.port,"team_token":config.team_token}),
+        )?;
+    }
     let mut command = Command::new(&settings.uv);
     command.args(["run", "--no-project"]);
     for package in packages {
         command.arg("--with").arg(package);
     }
+    command.args(["python", "-u"]).arg(&entrypoint);
+    // The built-in adapter resolves its private config beside submit.py, leaving
+    // sys.argv[1:] as the exact captured flags for the established script contract.
     command
-        .args(["python", "-u"])
-        .arg(&entrypoint)
         .args(flags)
         .current_dir(&directory)
         .env_clear()

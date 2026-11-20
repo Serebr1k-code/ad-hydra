@@ -32,9 +32,18 @@ impl Flags {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("save a Python submitter first"))?;
         anyhow::ensure!(
-            !config.source.trim().is_empty() && self.settings.script_runtime.is_some(),
-            "save Python source and configure the uv runtime first"
+            self.settings.script_runtime.is_some(),
+            "configure the uv runtime first"
         );
+        if config.mode == "forcad" {
+            anyhow::ensure!(
+                config.forcad_ip.parse::<std::net::IpAddr>().is_ok()
+                    && !config.team_token.is_empty(),
+                "configure the ForcAD IP and team token first"
+            );
+        } else {
+            anyhow::ensure!(!config.source.trim().is_empty(), "save Python source first");
+        }
         let request = RunRequest {
             id: uuid::Uuid::new_v4().to_string(),
             count,
