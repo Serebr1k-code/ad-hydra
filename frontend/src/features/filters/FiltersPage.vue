@@ -10,7 +10,7 @@ import type { DecoderCatalog } from './fieldCatalog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import FilterRuleCard from './FilterRuleCard.vue'
+import FilterRow from './FilterRow.vue'
 import RequestCheckerSettings from './RequestCheckerSettings.vue'
 import { setFilterEnabled, type FilterRule } from './filterState'
 import { createPendingReconciliation } from './pendingReconciliation'
@@ -176,8 +176,8 @@ onMounted(async () => {
     <p v-if="error || reconciliationError || data?.apply_error" role="alert" class="text-sm text-destructive">{{ error || reconciliationError || data?.apply_error }}</p><p v-if="notice" role="status">{{ notice }}</p>
     <p v-if="busy" role="status">Loading filters…</p>
     <p v-else-if="data && !data.items.length" class="text-muted-foreground">No filters. New enabled filters enforce as soon as the proxy applies them. Shadow mode and saved-traffic testing are optional.</p>
-    <div v-if="data?.items.length" aria-label="Filter rules" class="space-y-3">
-      <FilterRuleCard v-for="row in rows" :key="row.id" :filter="row" :service-name="[row.service_id, ...(row.additional_service_ids ?? [])].map(id => serviceNames[id] ?? id).join(', ')" :service-color="serviceColors[row.service_id] ?? defaultServiceColor(row.service_id)" :selected="selected.includes(row.id)" :disabled="busy || Boolean(savingState)" :saving="savingState === row.id" :apply-status="reconciliationError ? 'error' : data.apply_status" @select="toggleSelection(row.id, $event)" @state="setState(row, $event)" @edit="edit(row)" @test="test(row)" @enforce="enforce(row)" @remove="remove(row)" />
+    <div v-if="data?.items.length" aria-label="Filter rules" class="rounded-md border">
+      <FilterRow v-for="row in rows" :key="row.id" :filter="row" :service-name="[row.service_id, ...(row.additional_service_ids ?? [])].map(id => serviceNames[id] ?? id).join(', ')" :service-color="serviceColors[row.service_id] ?? defaultServiceColor(row.service_id)" :selected="selected.includes(row.id)" :disabled="busy || Boolean(savingState)" :saving="savingState === row.id" :apply-status="reconciliationError ? 'error' : data.apply_status" @select="toggleSelection(row.id, $event)" @state="setState(row, $event)" @edit="edit(row)" @test="test(row)" @enforce="enforce(row)" @remove="remove(row)" />
     </div>
     <div class="flex gap-2"><Button v-if="after" variant="outline" :disabled="busy" @click="load('')">First page</Button><Button v-if="data?.next_cursor" variant="outline" :disabled="busy" @click="load(data.next_cursor)">Next page</Button></div>
   </section>
