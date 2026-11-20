@@ -144,7 +144,10 @@ fn validates_transport_and_limits() {
 fn regex_input_is_not_truncated_into_match() {
     let mut r = rule("a", Action::Allow);
     r.expression = predicate(Comparison::Regex, FieldValue::String("^a".into()));
-    let fields = BTreeMap::from([("protocol.x".into(), FieldValue::String("a".repeat(16385)))]);
+    let fields = BTreeMap::from([(
+        "protocol.x".into(),
+        FieldValue::String("a".repeat(MAX_EVALUATED_FIELD_BYTES + 1)),
+    )]);
     assert!(
         compile(vec![r])
             .unwrap()
@@ -546,4 +549,33 @@ fn condition_direction_scopes_support_mixed_or_and_do_not_correlate_opposite_sid
             assert_eq!(compiled.evaluate(&context(&fields)).hits.len(), expected);
         }
     }
+}
+
+/// A 16 KiB read plus the raw overlap tail exceeds the rule-input cap. Live rules
+/// must still match on the window instead of silently becoming Unknown.
+#[test]
+fn live_rules_match_fields_larger_than_the_rule_input_cap() {
+    let mut r = rule("large", Action::DropConnection);
+    r.expression = predicate(Comparison::Contains, FieldValue::Bytes(vec![0xde, 0xad]));
+    let compiled = compile(vec![r]).unwrap();
+    // 17_407 is the largest TCP raw window (16 KiB read plus the 1023-byte tail).
+    for size in [15_000usize, 17_407, 65_559] {
+        let mut bytes = vec![b'a'; size];
+        bytes[0] = 0xde;
+        bytes[1] = 0xad;
+        let fields = BTreeMap::from([("protocol.x".into(), FieldValue::Bytes(bytes))]);
+        assert_eq!(
+            compiled.evaluate(&context(&fields)).hits.len(),
+            1,
+            "size {size}"
+        );
+    }
+    let mut text = rule("large-text", Action::DropConnection);
+    text.expression = predicate(Comparison::Contains, FieldValue::String("cmd=".into()));
+    let compiled = compile(vec![text]).unwrap();
+    let fields = BTreeMap::from([(
+        "protocol.x".into(),
+        FieldValue::String(format!("cmd={}", "a".repeat(64 * 1024))),
+    )]);
+    assert_eq!(compiled.evaluate(&context(&fields)).hits.len(), 1);
 }

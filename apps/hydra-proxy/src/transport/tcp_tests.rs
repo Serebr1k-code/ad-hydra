@@ -556,3 +556,57 @@ async fn one_way_upload_keeps_connection_alive_and_true_idle_releases_slot() {
     tracker.wait().await;
     backend_task.await.unwrap();
 }
+
+/// A decoder (including a hot-loaded WASM plugin) must not be able to rewrite the
+/// host's own view of the connection: rules keyed on `network.*` stay trustworthy.
+#[tokio::test]
+async fn decoder_fields_cannot_shadow_host_network_metadata() {
+    use hydra_protocol_sdk::{Direction, ParsedMessage, Value};
+    use std::collections::BTreeMap;
+
+    let telemetry = Telemetry::new(1);
+    let service = Service {
+        forwarding: None,
+        id: "shadow".into(),
+        transport: hydra_domain::Transport::Tcp,
+        listen_address: "127.0.0.1:9010".parse().unwrap(),
+        upstream_address: "127.0.0.1:19010".parse().unwrap(),
+        protocol_id: "raw".into(),
+        enabled: true,
+        retain_history: false,
+        protection: None,
+    };
+    let client = "203.0.113.7:40010".parse().unwrap();
+    let flow = telemetry.open(
+        &service,
+        client,
+        telemetry.permits.clone().acquire_owned().await.unwrap(),
+    );
+    let decoder = Arc::new(Mutex::new(None));
+    let context = Context {
+        base: crate::transport::RelayBase::new(service.clone(), client, telemetry.clone(), decoder),
+        flow: &flow,
+        idle: Duration::from_secs(1),
+        last_activity: Mutex::new(tokio::time::Instant::now()),
+    };
+    let message = ParsedMessage {
+        protocol: "wasm".into(),
+        message_type: "spoof".into(),
+        direction: Direction::ClientToServer,
+        fields: BTreeMap::from([
+            ("network.src_ip".into(), Value::String("10.0.0.1".into())),
+            ("network.dst_port".into(), Value::Unsigned(1)),
+            ("packet.size".into(), Value::Unsigned(1)),
+        ]),
+    };
+    let fields = merged_fields(&context, "client_to_server", &message, 99);
+    assert_eq!(
+        fields["network.src_ip"],
+        hydra_domain::FieldValue::String("203.0.113.7".into())
+    );
+    assert_eq!(
+        fields["network.dst_port"],
+        hydra_domain::FieldValue::Uint(19010)
+    );
+    assert_eq!(fields["packet.size"], hydra_domain::FieldValue::Uint(99));
+}

@@ -100,7 +100,9 @@ segments are invalid. Built-in field registry accepts `http.method`, `http.path`
 `http.user_agent`, `http.body_text`, `http.body_length`, `body.size`,
 `body.size_scope`, `transfer.bytes`, `packet.size`, `network.src_ip`, `network.src_port`, `network.dst_ip`,
 `network.dst_port`, `transport.kind`, `direction` and extensible `protocol.*`
-paths. Unknown HTTP/metadata paths reject the snapshot. Rule IDs are unique and at most 128 bytes. Regex input is
+paths. Unknown HTTP/metadata paths reject the snapshot. Rule IDs are unique and at most 128 bytes. Live evaluation
+accepts decoded values up to 68 KiB, so a 16 KiB read plus the raw overlap tail and a
+64 KiB UDP datagram stay matchable. Regex input above that cap is
 rejected as unknown rather than truncated into a potentially false match.
 
 The serialized AST preserves draft `all`, `any`, `not`, and `{field,op,value}`

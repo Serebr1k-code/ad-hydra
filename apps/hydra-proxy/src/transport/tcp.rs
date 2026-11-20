@@ -364,17 +364,7 @@ fn inspect_message(
     } else {
         "server_to_client"
     };
-    let mut fields = c.network_fields(direction);
-    fields.insert(
-        "packet.size".into(),
-        hydra_domain::FieldValue::Uint(size as u64),
-    );
-    fields.extend(
-        message
-            .fields
-            .iter()
-            .map(|(k, v)| (k.clone(), domain_value(v))),
-    );
+    let fields = merged_fields(c, direction, &message, size);
     let raw_payload = message.protocol == "raw";
     let message_id = if raw_payload {
         String::new()
@@ -386,6 +376,26 @@ fn inspect_message(
     }
     c.telemetry
         .evaluate(&c.config, &c.flow.id, &fields, safe_http, &message_id)
+}
+/// Host-owned network metadata is inserted last, so a decoder cannot shadow
+/// `network.*` or `packet.size` with values of its own.
+fn merged_fields(
+    c: &Context<'_>,
+    direction: &str,
+    message: &hydra_protocol_sdk::ParsedMessage,
+    size: usize,
+) -> std::collections::BTreeMap<String, hydra_domain::FieldValue> {
+    let mut fields: std::collections::BTreeMap<String, hydra_domain::FieldValue> = message
+        .fields
+        .iter()
+        .map(|(k, v)| (k.clone(), domain_value(v)))
+        .collect();
+    fields.extend(c.network_fields(direction));
+    fields.insert(
+        "packet.size".into(),
+        hydra_domain::FieldValue::Uint(size as u64),
+    );
+    fields
 }
 fn inspect_raw(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
     if inspect_transfer(c, direction, bytes) {

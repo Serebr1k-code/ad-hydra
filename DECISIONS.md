@@ -370,3 +370,15 @@ The editor intersects field paths and types across its selected decoders. The co
 ### Networkless Python and WASI request checkers
 
 Proxy can optionally launch a persistent Python or WASI sandbox for configured services. It evaluates client input before forwarding and uses a configured fallback on errors. One worker processes one framed input at a time, and concurrent requests use the fallback instead of entering a queue. Each worker gets a private writable directory mounted at `/state`. The host directory is keyed by checker ID under the Proxy state directory. Stateful scripts retain files independently of worker or Proxy restarts. The protobuf status additions expose an error count and the latest safe diagnostic string. Proxy persists console policy edits atomically with a separate revision. The host administrator registers the actual Python or WASI program in Proxy JSON. See [Request checkers](docs/REQUEST_CHECKERS.md).
+
+### Live rule evaluation of large decoder fields
+
+Rule input stays bounded at 16 KiB per value, but live evaluation now uses a separate 68 KiB cap (`MAX_EVALUATED_FIELD_BYTES`). A 16 KiB TCP read plus the raw decoder's 1023-byte overlap tail, or a 64 KiB UDP datagram, legitimately exceeds the input cap; treating those values as unknown silently disabled the rule, so `raw.bytes contains` forwarded a 20 KiB request unchanged while the same 2-byte marker was blocked in a small request. Values above the runtime cap remain unknown and are never matched on a truncated prefix, which preserves the existing guarantee that a truncated window cannot produce a match. Built-in decoders cannot reach the runtime cap, so no rule sees different bytes than before.
+
+### Audit row cap evicts instead of failing the caller
+
+`audit` keeps its 1,000,000-row ceiling, but reaching it no longer fails the transaction. `audit::append` evicts about one percent of the oldest rows before inserting, so authentication and mutations never depend on audit capacity; a full table previously made `login` return 401 for every account while `audit_no_delete` refused cleanup, requiring manual SQL. Migration 0028 replaces the delete trigger with one that permits deleting ids at or below `audit_retention.floor`; eviction raises the floor first, and every retained row stays append-only. The ceiling is still enforced and the eviction is logged with its row count.
+
+### Host network metadata wins over decoder fields
+
+Field merging in the TCP path now inserts decoder output first and host-owned `network.src_ip`, `network.src_port`, `network.dst_ip`, `network.dst_port`, `transport.kind` and `packet.size` last. A native or WASM decoder could previously return those keys and shadow the real connection, so a source-based rule or a size limit could be bypassed by the plugin that is supposed to describe the protocol. `body.size`, `transfer.bytes` and `direction` were already protected by host-side annotation.

@@ -46,6 +46,7 @@ impl Database {
                 (12,include_str!("../../../../../migrations/0012_traffic_search.sql")),
                 (13,include_str!("../../../../../migrations/0013_farm_retry.sql")),
                 (14,include_str!("../../../../../migrations/0014_account_management.sql")),
+                (28,include_str!("../../../../../migrations/0028_audit_retention.sql")),
 
             ] {
                 let checksum=format!("{:x}",Sha256::digest(migration.as_bytes()));
