@@ -241,7 +241,7 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
         <div v-if="tab === 'regex'" class="grid gap-4 md:grid-cols-2">
           <div class="space-y-2"><Label for="filter-name">{{ patternMode ? 'Tag' : 'Name' }}</Label><Input id="filter-name" v-model="form.name" required maxlength="256" /></div>
           <div class="space-y-2"><Label>Service</Label><Select v-model="form.service_id" :disabled="hasSelectedStreams"><SelectTrigger aria-label="Filter service"><SelectValue placeholder="Choose service" /></SelectTrigger><SelectContent><SelectItem v-for="service in services" :key="service.id" :value="service.id">{{ service.name }}</SelectItem></SelectContent></Select></div>
-          <fieldset v-if="services.length > 1" class="space-y-2 md:col-span-2">
+          <fieldset v-if="services.length > 1 && !patternMode" class="space-y-2 md:col-span-2">
             <legend class="text-sm font-medium">Also apply to</legend>
             <div class="flex gap-2">
               <Button type="button" variant="outline" size="sm" @click="selectAllServices">Select all services</Button>
@@ -262,26 +262,22 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
           <div v-if="!patternMode" class="space-y-2 md:col-span-2"><Label for="filter-description">Description</Label><Textarea id="filter-description" v-model="form.description" maxlength="4096" rows="2" /></div>
         </div>
 
-        <p v-if="tab === 'regex' && form.mode === 'shadow'" role="status" class="rounded-md border p-3 text-sm">Shadow mode: matches are counted, but traffic is allowed through. Choose Enforce to apply the action immediately; saved-traffic testing is optional.</p>
-
-        <p v-if="tab === 'regex' && form.mode === 'enforce'" role="status" class="rounded-md border p-3 text-sm">Saving applies this rule as soon as the proxy acknowledges the new revision. No traffic test is required.</p>
-
         <section v-if="tab === 'regex' && patternMode" class="grid gap-4 md:grid-cols-2">
           <div class="space-y-2 md:col-span-2"><Label for="filter-pattern">Pattern</Label><Input id="filter-pattern" v-model="row.pattern" class="font-mono" placeholder="\.\./" maxlength="1024" /></div>
           <div class="space-y-2"><Label>Direction</Label><Select v-model="row.direction"><SelectTrigger aria-label="Pattern direction"><SelectValue /></SelectTrigger><SelectContent><SelectItem v-for="option in directionOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem></SelectContent></Select></div>
-          <div class="flex items-end"><Button type="button" variant="ghost" size="sm" @click="patternMode = false">Advanced expression</Button></div>
+          <div class="md:col-span-2"><Button type="button" variant="outline" size="sm" @click="patternMode = false">Advanced expression</Button></div>
         </section>
         <section v-else-if="tab === 'regex'" class="space-y-2" :aria-disabled="!expressionEditable">
           <div><h3 class="font-medium">Match conditions</h3><p class="text-sm text-muted-foreground">Groups add parentheses. Choose whether all or any conditions inside a group must match. Each condition has its own direction.</p></div>
           <RuleGroupEditor :group="form.rules" :fields="availableFields" />
-          <Button type="button" variant="ghost" size="sm" @click="patternMode = true">Simple pattern</Button>
+          <Button type="button" variant="outline" size="sm" @click="patternMode = true">Simple pattern</Button>
         </section>
 
         <div v-if="tab === 'regex'" class="grid gap-4 md:grid-cols-2">
           <div class="space-y-2"><Label>Action</Label><Select v-model="form.actionType"><SelectTrigger aria-label="Filter action"><SelectValue /></SelectTrigger><SelectContent><SelectItem v-if="!supportsChosenAction" :value="form.actionType" disabled>Action unavailable for selected services</SelectItem><SelectItem v-if="form.actionType === '__preserve__'" value="__preserve__">Keep existing advanced action</SelectItem><SelectItem v-if="supportsHttp" value="block">Block HTTP request</SelectItem><SelectItem value="alert">Alert</SelectItem><SelectItem value="log">Log</SelectItem><SelectItem value="allow">Allow</SelectItem><SelectItem v-if="supportsTcp" value="drop_connection">Block transfer (close TCP connection)</SelectItem><SelectItem v-if="supportsUdp" value="drop_datagram">Block transfer (drop UDP datagram)</SelectItem><SelectItem value="tag">Tag</SelectItem></SelectContent></Select></div>
           <div v-if="form.actionType === 'block'" class="space-y-2"><Label for="filter-status">HTTP block status</Label><Input id="filter-status" v-model.number="form.httpStatus" type="number" min="400" max="599" /></div>
           <div v-else-if="form.actionType === 'tag'" class="space-y-2"><Label for="filter-tag">Tag</Label><Input id="filter-tag" v-model="form.tag" required maxlength="128" /></div>
-          <div class="space-y-2"><Label for="filter-expires">Expires (optional)</Label><Input id="filter-expires" v-model="form.expires" type="datetime-local" /></div>
+          <div v-if="!patternMode" class="space-y-2"><Label for="filter-expires">Expires (optional)</Label><Input id="filter-expires" v-model="form.expires" type="datetime-local" /></div>
           <label class="flex items-center gap-2 self-end pb-2"><Checkbox :model-value="form.enabled" @update:model-value="value => form.enabled = value === true" /><span class="text-sm">Enabled</span></label>
         </div>
         <p v-if="ruleError || error" role="alert" class="text-sm text-destructive">{{ ruleError || error }}</p>
