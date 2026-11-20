@@ -6,7 +6,9 @@ import '@xterm/xterm/css/xterm.css'
 import {Button} from '@/components/ui/button'
 import type {TerminalChunk} from './terminal'
 import {TranscriptWriter} from './terminalWriter'
+import {useTheme} from '@/app/theme'
 const props=defineProps<{chunks:TerminalChunk[];truncated?:boolean}>()
+const {theme}=useTheme()
 const host=ref<HTMLElement>(),status=ref(''),following=ref(true)
 let terminal:Terminal|undefined,fit:FitAddon|undefined,observer:ResizeObserver|undefined,frame:number|undefined,disposed=false
 let writer:TranscriptWriter|undefined,rebuilding=false
@@ -14,8 +16,9 @@ function resize(){if(!host.value||host.value.clientWidth<30||host.value.clientHe
 function render(){writer?.set(props.chunks)}
 function follow(){following.value=true;terminal?.scrollToBottom()}
 watch(()=>props.chunks,render)
+watch(theme,(value)=>{if(terminal)terminal.options.theme={background:value==='oled'?'#000000':'#151515',foreground:value==='oled'?'#ededed':'#e8e8e8'}})
 onMounted(()=>{
- terminal=new Terminal({disableStdin:true,convertEol:true,cursorBlink:false,cursorInactiveStyle:'none',scrollback:2000,fontSize:13,fontFamily:'ui-monospace, SFMono-Regular, Menlo, monospace',screenReaderMode:true,theme:{background:'#151515',foreground:'#e8e8e8'},linkHandler:{activate:()=>{}},allowProposedApi:false,altClickMovesCursor:false,windowOptions:{}})
+ terminal=new Terminal({disableStdin:true,convertEol:true,cursorBlink:false,cursorInactiveStyle:'none',scrollback:2000,fontSize:13,fontFamily:'ui-monospace, SFMono-Regular, Menlo, monospace',screenReaderMode:true,theme:{background:theme.value==='oled'?'#000000':'#151515',foreground:theme.value==='oled'?'#ededed':'#e8e8e8'},linkHandler:{activate:()=>{}},allowProposedApi:false,altClickMovesCursor:false,windowOptions:{}})
  fit=new FitAddon();terminal.loadAddon(fit);terminal.open(host.value!);terminal.onScroll(()=>{if(terminal&&!rebuilding)following.value=terminal.buffer.active.viewportY>=terminal.buffer.active.baseY})
  let viewport:number|undefined
  writer=new TranscriptWriter({reset:()=>{if(!terminal)return;rebuilding=true;viewport=terminal.buffer.active.viewportY;const follow=following.value;terminal.reset();following.value=follow},write:(text,done)=>terminal?.write(text,done)},()=>{if(disposed)return;if(following.value)terminal?.scrollToBottom();else if(viewport!==undefined)terminal?.scrollToLine(viewport);viewport=undefined;rebuilding=false;status.value=`${props.chunks.length} captured text chunks`})

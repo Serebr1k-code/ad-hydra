@@ -17,6 +17,11 @@
  --primary: #e8e8e8; --primary-foreground: #171717; --secondary: #292929;
  --muted-foreground: #aaa; --destructive: #da6a6a; --border: #393939; --ring: #aaa;
 }
+:root[data-theme="oled"] {
+ --background: #000; --foreground: #ededed; --card: #000;
+ --primary: #ededed; --primary-foreground: #000; --secondary: #101010;
+ --muted-foreground: #b0b0b0; --destructive: #ff7777; --border: #3d3d3d; --ring: #bdbdbd;
+}
 @layer base {
  * { @apply border-border; }
  body { @apply m-0 bg-background text-foreground antialiased; font-family: system-ui, sans-serif; }
