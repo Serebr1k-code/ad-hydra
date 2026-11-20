@@ -38,8 +38,13 @@ class FlagControls(unittest.TestCase):
                 headers={'Origin':origin,'Content-Type':'application/json'}
                 if token:headers['Authorization']='Bearer '+token
                 request=urllib.request.Request('http://127.0.0.1:'+address+'/api/v1'+path, None if body is None else json.dumps(body).encode(), headers, method=method)
-                with urllib.request.urlopen(request,timeout=10) as response:
-                    return json.load(response) if response.status!=204 else None
+                try:
+                    with urllib.request.urlopen(request,timeout=10) as response:
+                        return json.load(response) if response.status!=204 else None
+                except urllib.error.HTTPError as error:
+                    detail=error.read(512).decode('utf-8','replace')
+                    error.close()
+                    raise AssertionError(f'{method or ("POST" if body is not None else "GET")} {path} returned HTTP {error.code}: {detail}') from error
             def wait(fetch, predicate):
                 until=time.monotonic()+20
                 while time.monotonic()<until:
@@ -59,7 +64,7 @@ class FlagControls(unittest.TestCase):
                 recorded=root/'received.jsonl'
                 source='import json,sys\nwith open('+repr(str(recorded))+',"a",encoding="utf-8") as f: f.write(json.dumps(sys.argv[1:],ensure_ascii=False)+"\\n")\n'
                 config=api('/submitter')['config']
-                config.update(enabled=False,source=source,flag_pattern=r'FLAG\{[^}]+\}',python_packages=[],batch_size=1)
+                config.update(mode='custom',enabled=False,source=source,flag_pattern=r'FLAG\{[^}]+\}',python_packages=[],batch_size=1)
                 api('/submitter',config,'PUT')
                 for service in ['docs','ark']:
                     api('/farm/services',{'id':service,'name':service.title(),'port':12345},'PUT')
