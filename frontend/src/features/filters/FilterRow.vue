@@ -19,16 +19,16 @@ const statusId = computed(() => `filter-application-${props.filter.id}`)
 </script>
 
 <template>
-  <article data-filter-card :data-filter-id="filter.id" :data-service-id="filter.service_id" class="flex flex-wrap items-center gap-3 border-b border-l-4 px-2 py-2 last:border-b-0" :style="{ borderLeftColor: serviceColor }" :aria-label="filter.name">
+  <article data-filter-card :data-filter-id="filter.id" :data-service-id="filter.service_id" class="flex flex-wrap items-center gap-2 border-b border-l-4 px-2 py-0.5 text-[13px] last:border-b-0" :style="{ borderLeftColor: serviceColor }" :aria-label="filter.name">
     <Checkbox :model-value="selected" :disabled="disabled" :aria-label="'Select ' + filter.name" @update:model-value="emit('select', $event === true)" />
     <Switch :model-value="filter.desired_enabled" :disabled="disabled" :aria-label="'Enable ' + filter.name" :aria-describedby="statusId" :aria-busy="saving" @update:model-value="emit('state', $event)" />
     <span data-filter-desired :data-enabled="filter.desired_enabled" class="sr-only">{{ filter.desired_enabled ? 'Desired: enabled' : 'Desired: disabled' }}</span>
-    <code v-if="pattern" class="max-w-80 truncate font-mono text-[13px]">{{ pattern }}</code>
-    <span v-else class="text-sm text-muted-foreground">Advanced condition</span>
-    <span class="max-w-60 truncate text-xs text-muted-foreground">{{ filter.name }}</span>
-    <span class="rounded border px-2 py-0.5 text-xs text-muted-foreground">{{ direction }}</span>
-    <span v-if="filter.mode === 'shadow'" class="rounded border px-2 py-0.5 text-xs text-muted-foreground">shadow</span>
-    <dl class="ml-auto flex items-center gap-4 text-xs text-muted-foreground">
+    <code v-if="pattern" class="max-w-80 truncate font-mono">{{ pattern }}</code>
+    <span v-else class="text-muted-foreground">Advanced condition</span>
+    <span class="max-w-60 truncate text-[11px] text-muted-foreground">{{ filter.name }}</span>
+    <span class="rounded border px-1.5 text-[11px] leading-5 text-muted-foreground">{{ direction }}</span>
+    <span v-if="filter.mode === 'shadow'" class="rounded border px-1.5 text-[11px] leading-5 text-muted-foreground">shadow</span>
+    <dl class="ml-auto flex items-center gap-3 text-[11px] text-muted-foreground">
       <div><dt class="sr-only">Author</dt><dd>{{ username(filter.created_by) }}</dd></div>
       <div><dt class="sr-only">Last editor</dt><dd>{{ username(filter.updated_by) }}</dd></div>
       <div><dt class="sr-only">Hits</dt><dd class="tabular-nums">{{ filter.hit_count }}</dd></div>
@@ -38,10 +38,10 @@ const statusId = computed(() => `filter-application-${props.filter.id}`)
       <span class="sr-only">{{ saving ? 'Saving desired state…' : application.label }}</span>
     </span>
     <div class="flex items-center gap-1">
-      <Button variant="ghost" size="sm" :disabled="disabled" @click="emit('edit')">Edit</Button>
-      <Button variant="ghost" size="sm" :disabled="disabled" @click="emit('test')">Test</Button>
-      <Button v-if="filter.mode === 'shadow'" variant="ghost" size="sm" :disabled="disabled" @click="emit('enforce')">Enforce</Button>
-      <Button variant="ghost" size="sm" class="text-destructive" :disabled="disabled" @click="emit('remove')">Delete</Button>
+      <Button variant="ghost" size="xs" :disabled="disabled" @click="emit('edit')">Edit</Button>
+      <Button variant="ghost" size="xs" :disabled="disabled" @click="emit('test')">Test</Button>
+      <Button v-if="filter.mode === 'shadow'" variant="ghost" size="xs" :disabled="disabled" @click="emit('enforce')">Enforce</Button>
+      <Button variant="ghost" size="xs" class="text-destructive" :disabled="disabled" @click="emit('remove')">Delete</Button>
     </div>
   </article>
 </template>
