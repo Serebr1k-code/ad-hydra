@@ -95,6 +95,42 @@ pub struct ServiceInput {
     #[serde(default = "history_enabled")]
     pub retain_history: bool,
     pub protection: Option<ProtectionInput>,
+    /// TLS termination and/or upstream TLS. Omit to keep the service plaintext.
+    pub tls: Option<TlsInput>,
+}
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TlsInput {
+    pub terminate: bool,
+    #[serde(default)]
+    pub upstream: bool,
+    #[serde(default)]
+    pub insecure: bool,
+    /// PEM chain the Proxy presents. Required when `terminate` is set.
+    pub certificate_pem: Option<String>,
+    /// PEM private key. Omit on update to keep the stored key.
+    pub private_key_pem: Option<String>,
+    pub server_name: Option<String>,
+}
+impl TlsInput {
+    /// An update may omit the key: the stored one stays in place.
+    fn into_tls(self, previous: Option<&hydra_domain::ServiceTls>) -> hydra_domain::ServiceTls {
+        let private_key_pem = self
+            .private_key_pem
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| previous.and_then(|p| p.private_key_pem.clone()));
+        hydra_domain::ServiceTls {
+            terminate: self.terminate,
+            upstream: self.upstream,
+            insecure: self.insecure,
+            certificate_pem: self
+                .certificate_pem
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| previous.and_then(|p| p.certificate_pem.clone())),
+            private_key_pem,
+            server_name: self.server_name.filter(|value| !value.trim().is_empty()),
+        }
+    }
 }
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -112,12 +148,28 @@ fn history_enabled() -> bool {
 }
 impl ServiceInput {
     async fn into_service(self, id: String, control: &Control) -> Result<Service, Error> {
+        self.into_service_with_previous(id, control, None).await
+    }
+    async fn into_service_with_previous(
+        self,
+        id: String,
+        control: &Control,
+        previous: Option<&Service>,
+    ) -> Result<Service, Error> {
         let forwarding = match self.forwarding {
             Some(f) => Some(f.resolve(control).await.map_err(Error::from)?),
             None => None,
         };
+        let tls = self
+            .tls
+            .map(|tls| tls.into_tls(previous.and_then(|p| p.tls.as_ref())));
+        if let Some(tls) = &tls {
+            tls.validate()
+                .map_err(|error| Error::Invalid(anyhow::anyhow!(error)))?;
+        }
         Ok(Service {
             forwarding,
+            tls,
             id,
             transport: self.transport,
             listen_address: self.listen_address,
@@ -204,6 +256,13 @@ pub(crate) async fn list(
         if kind == "service" {
             value["color"] = colors.get(&id).cloned().into();
             value["name"] = names.get(&id).cloned().unwrap_or_else(|| id.clone()).into();
+            // The private key reaches the Proxy over the local socket only.
+            if let Some(tls) = value.get_mut("tls").and_then(|tls| tls.as_object_mut()) {
+                let configured = tls
+                    .remove("private_key_pem")
+                    .is_some_and(|key| !key.is_null());
+                tls.insert("private_key_configured".into(), configured.into());
+            }
         }
         if id <= query.after || (!q.is_empty() && !value.to_string().contains(&q)) {
             continue;
@@ -349,7 +408,14 @@ pub async fn update_service(
     let a = actor(&c, &headers).await?;
     let revision = input.expected_revision;
     let name = input.name.clone();
-    let service = input.into_service(id, &c).await?;
+    let previous = c
+        .desired()
+        .await
+        .ok()
+        .and_then(|desired| desired.services.services.into_iter().find(|s| s.id == id));
+    let service = input
+        .into_service_with_previous(id, &c, previous.as_ref())
+        .await?;
     c.put_named_service(a, revision, service, false, name, request())
         .await
         .map(|v| (StatusCode::ACCEPTED, Json(v)).into_response())

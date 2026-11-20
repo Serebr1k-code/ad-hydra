@@ -2,6 +2,7 @@ pub(crate) mod protection;
 mod routing;
 mod session;
 mod tcp;
+pub(crate) mod tls;
 mod udp;
 use crate::{config::Limits, telemetry::Telemetry};
 use hydra_domain::{Service, ServiceSnapshot, Transport};

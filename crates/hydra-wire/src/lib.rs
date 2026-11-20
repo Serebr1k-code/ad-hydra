@@ -14,6 +14,14 @@ impl From<&ServiceSnapshot> for v1::ApplyServiceSnapshotRequest {
                 .iter()
                 .map(|s| v1::ServiceConfig {
                     forwarding: s.forwarding.as_ref().map(Into::into),
+                    tls: s.tls.as_ref().map(|t| v1::ServiceTls {
+                        terminate: t.terminate,
+                        upstream: t.upstream,
+                        insecure: t.insecure,
+                        certificate_pem: t.certificate_pem.clone().unwrap_or_default(),
+                        private_key_pem: t.private_key_pem.clone().unwrap_or_default(),
+                        server_name: t.server_name.clone().unwrap_or_default(),
+                    }),
                     id: s.id.clone(),
                     transport: match s.transport {
                         Transport::Tcp => 1,
@@ -40,41 +48,50 @@ impl From<&ServiceSnapshot> for v1::ApplyServiceSnapshotRequest {
 impl TryFrom<&v1::ApplyServiceSnapshotRequest> for ServiceSnapshot {
     type Error = String;
     fn try_from(r: &v1::ApplyServiceSnapshotRequest) -> Result<Self, String> {
-        let services =
-            r.services
-                .iter()
-                .map(|s| {
-                    Ok(Service {
-                        forwarding: s.forwarding.as_ref().map(TryInto::try_into).transpose()?,
-                        id: s.id.clone(),
-                        transport: match s.transport {
-                            1 => Transport::Tcp,
-                            2 => Transport::Udp,
-                            _ => return Err("invalid transport".into()),
-                        },
-                        listen_address: s
-                            .listen_address
-                            .parse()
-                            .map_err(|_| "invalid numeric listen endpoint")?,
-                        upstream_address: s
-                            .upstream_address
-                            .parse()
-                            .map_err(|_| "invalid numeric upstream endpoint")?,
-                        protocol_id: s.protocol_id.clone(),
-                        enabled: s.enabled,
-                        retain_history: s.retain_history,
-                        protection: s.protection.as_ref().map(|p| {
-                            hydra_domain::ServiceProtection {
-                                max_active_flows: p.max_active_flows,
-                                tcp_connections_per_second: p.tcp_connections_per_second,
-                                udp_datagrams_per_second: p.udp_datagrams_per_second,
-                                bytes_per_second: p.bytes_per_second,
-                                idle_timeout_ms: p.idle_timeout_ms,
-                            }
+        let services = r
+            .services
+            .iter()
+            .map(|s| {
+                Ok(Service {
+                    forwarding: s.forwarding.as_ref().map(TryInto::try_into).transpose()?,
+                    tls: s.tls.as_ref().map(|t| hydra_domain::ServiceTls {
+                        terminate: t.terminate,
+                        upstream: t.upstream,
+                        insecure: t.insecure,
+                        certificate_pem: Some(t.certificate_pem.clone()).filter(|v| !v.is_empty()),
+                        private_key_pem: Some(t.private_key_pem.clone()).filter(|v| !v.is_empty()),
+                        server_name: Some(t.server_name.clone()).filter(|v| !v.is_empty()),
+                    }),
+                    id: s.id.clone(),
+                    transport: match s.transport {
+                        1 => Transport::Tcp,
+                        2 => Transport::Udp,
+                        _ => return Err("invalid transport".into()),
+                    },
+                    listen_address: s
+                        .listen_address
+                        .parse()
+                        .map_err(|_| "invalid numeric listen endpoint")?,
+                    upstream_address: s
+                        .upstream_address
+                        .parse()
+                        .map_err(|_| "invalid numeric upstream endpoint")?,
+                    protocol_id: s.protocol_id.clone(),
+                    enabled: s.enabled,
+                    retain_history: s.retain_history,
+                    protection: s
+                        .protection
+                        .as_ref()
+                        .map(|p| hydra_domain::ServiceProtection {
+                            max_active_flows: p.max_active_flows,
+                            tcp_connections_per_second: p.tcp_connections_per_second,
+                            udp_datagrams_per_second: p.udp_datagrams_per_second,
+                            bytes_per_second: p.bytes_per_second,
+                            idle_timeout_ms: p.idle_timeout_ms,
                         }),
-                    })
                 })
-                .collect::<Result<Vec<_>, String>>()?;
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let snapshot = Self {
             revision: r.revision,
             services,
@@ -118,6 +135,7 @@ mod tests {
                     bytes_per_second: 8388608,
                     idle_timeout_ms: 30000,
                 }),
+                tls: None,
             }],
             ..Default::default()
         };

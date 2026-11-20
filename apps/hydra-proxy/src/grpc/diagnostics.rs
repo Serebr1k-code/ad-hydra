@@ -303,6 +303,7 @@ mod history_tests {
             enabled: true,
             retain_history: true,
             protection: None,
+            tls: None,
         };
         history.apply_services(std::slice::from_ref(&service));
         let flow_id = uuid::Uuid::new_v4().to_string();

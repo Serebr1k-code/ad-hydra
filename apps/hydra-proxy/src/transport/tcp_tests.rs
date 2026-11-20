@@ -16,6 +16,7 @@ async fn raw_flow_closure_emits_testable_size_metadata_without_payloads() {
         enabled: true,
         retain_history: false,
         protection: None,
+        tls: None,
     };
     let flow = telemetry.open(
         &service,
@@ -66,6 +67,7 @@ async fn raw_byte_filter_matches_across_reads_without_emitting_payload_telemetry
         enabled: true,
         retain_history: false,
         protection: None,
+        tls: None,
     };
     let protocols = crate::inspection::protocols::Protocols::open(
         std::env::temp_dir().join(format!("hydra-raw-filter-{}", uuid::Uuid::new_v4())),
@@ -159,6 +161,7 @@ async fn byte_limit_stops_incomplete_uploads_before_forwarding_the_excess() {
             enabled: true,
             retain_history: false,
             protection: None,
+            tls: None,
         };
         if profile == "wasm" {
             let module =
@@ -291,6 +294,7 @@ async fn utf8_tcp_inspection_emits_text_events_in_both_directions() {
         enabled: true,
         retain_history: false,
         protection: None,
+        tls: None,
     };
     let telemetry = Telemetry::new(1);
     let mut events = telemetry.events.subscribe();
@@ -408,6 +412,7 @@ async fn service_caps_isolate_same_ip_clients_and_global_cap_counts_rejections()
                 bytes_per_second: 1024,
                 idle_timeout_ms: 5000,
             }),
+            tls: None,
         };
         let (sender, receiver) = watch::channel(Some(service.clone()));
         senders.push(sender);
@@ -495,6 +500,7 @@ async fn one_way_upload_keeps_connection_alive_and_true_idle_releases_slot() {
             bytes_per_second: 0,
             idle_timeout_ms: 400,
         }),
+        tls: None,
     };
     let telemetry = Telemetry::new(1);
     let (received_tx, mut received_rx) = mpsc::channel(16);
@@ -575,6 +581,7 @@ async fn decoder_fields_cannot_shadow_host_network_metadata() {
         enabled: true,
         retain_history: false,
         protection: None,
+        tls: None,
     };
     let client = "203.0.113.7:40010".parse().unwrap();
     let flow = telemetry.open(

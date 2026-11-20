@@ -107,6 +107,7 @@ async fn failed_persistence_preserves_revision_and_replay_checks_content() {
         enabled: false,
         retain_history: true,
         protection: None,
+        tls: None,
     });
     assert!(
         state
@@ -192,6 +193,7 @@ async fn combined_snapshot_moves_dependent_rules_and_service_together() {
         enabled: false,
         retain_history: true,
         protection: None,
+        tls: None,
     };
     let rule = hydra_domain::Rule {
         id: "rule".into(),

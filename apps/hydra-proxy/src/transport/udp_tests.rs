@@ -14,6 +14,7 @@ async fn byte_limits_work_before_udp_decoding_and_keep_directions_separate() {
             enabled: true,
             retain_history: false,
             protection: None,
+            tls: None,
         };
         let telemetry = Telemetry::new(1);
         telemetry.replace_rules(
@@ -116,6 +117,7 @@ async fn saved_udp_sessions_keep_clients_binary_empty_datagrams_and_idle_closure
             bytes_per_second: 1024,
             idle_timeout_ms: 80,
         }),
+        tls: None,
     };
     let telemetry = Telemetry::new(4);
     let mut events = telemetry.events.subscribe();

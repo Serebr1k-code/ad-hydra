@@ -12,6 +12,7 @@ fn service() -> Service {
         enabled: true,
         retain_history: true,
         protection: None,
+        tls: None,
     }
 }
 fn predicate(op: Comparison, expected: FieldValue) -> Expression {

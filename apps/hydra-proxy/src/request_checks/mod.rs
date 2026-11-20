@@ -569,6 +569,7 @@ mod tests {
             enabled: true,
             retain_history: false,
             protection: None,
+            tls: None,
             forwarding: None,
         }
     }

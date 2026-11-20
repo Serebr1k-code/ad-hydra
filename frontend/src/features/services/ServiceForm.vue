@@ -11,6 +11,8 @@ import ForwardingForm from './ForwardingForm.vue'
 import {forwardingDraft,validateForwarding} from './forwarding'
 import ServiceProtectionForm from './ServiceProtectionForm.vue'
 import { validateProtection, type ProtectionService, type ServiceProtection } from './protection'
+import { tlsDraft, tlsPayload, validateTls } from './tls'
+import { Textarea } from '@/components/ui/textarea'
 import { validateEndpoints } from './endpoints'
 import {decoderChoices,selectedDecoder,saveWithDecoder,type DecoderCatalog} from './decoders'
 
@@ -28,6 +30,14 @@ const form = reactive({
 })
 const forwarding=ref(forwardingDraft(initial?.forwarding))
 const protection = ref<ServiceProtection | null>(initial?.protection ? { ...initial.protection } : null)
+const tls = ref(tlsDraft((initial as { tls?: Parameters<typeof tlsDraft>[0] } | undefined)?.tls))
+function toggleTls(enabled: boolean) {
+  if (enabled) {
+    tls.value = tls.value ?? { terminate: true, upstream: false, insecure: false, certificate_pem: '', private_key_pem: '', server_name: '', private_key_configured: false }
+    return
+  }
+  tls.value = null
+}
 const catalog=ref<DecoderCatalog>({items:[],activations:[]})
 const loadingDecoders=ref(true), decodersReady=ref(false)
 const savedId=ref(initial?.id), savedRevision=ref(props.revision)
@@ -43,12 +53,12 @@ let retryTimer: ReturnType<typeof setTimeout> | undefined
 onBeforeUnmount(() => { retryGeneration.value++; if (retryTimer) clearTimeout(retryTimer) })
 async function save() {
   if (saving.value || !decodersReady.value) return
-  error.value = !form.name.trim()||new TextEncoder().encode(form.name.trim()).length>256?'Enter a service name up to 256 UTF-8 bytes.':validateEndpoints(form.listen_address, form.upstream_address) || validateProtection(protection.value) || validateForwarding(forwarding.value)
+  error.value = !form.name.trim()||new TextEncoder().encode(form.name.trim()).length>256?'Enter a service name up to 256 UTF-8 bytes.':validateEndpoints(form.listen_address, form.upstream_address) || validateProtection(protection.value) || validateForwarding(forwarding.value) || validateTls(tls.value)
   if (error.value) return
   saving.value = true
   emit('busy', true)
   try {
-    const input: ServiceInput & ProtectionService & {name?:string} = { ...form, name:form.name.trim(), forwarding:forwarding.value, protection: protection.value, listen_address: form.listen_address.trim(), upstream_address: form.upstream_address.trim(), protocol_id: form.protocol_id.trim(), expected_revision: savedRevision.value }
+    const input: ServiceInput & ProtectionService & {name?:string} = { ...form, name:form.name.trim(), forwarding:forwarding.value, protection: protection.value, tls: form.transport === 'tcp' ? tlsPayload(tls.value) : null, listen_address: form.listen_address.trim(), upstream_address: form.upstream_address.trim(), protocol_id: form.protocol_id.trim(), expected_revision: savedRevision.value }
     savedEnabled.value = input.enabled
     await saveWithDecoder(input,savedId.value,input.protocol_id,catalog.value,(id,revision)=>{savedId.value=id;savedRevision.value=revision})
     showRetry.value = false
@@ -140,6 +150,42 @@ async function retryListener() {
     </div>
     <ForwardingForm v-model="forwarding" :disabled="saving" :transport="form.transport" :listen-address="form.listen_address" />
     <ServiceProtectionForm v-model="protection" :disabled="saving" :transport="form.transport" />
+    <div v-if="form.transport === 'tcp'" class="space-y-2 rounded-md border p-3">
+      <div class="flex items-center gap-2">
+        <Checkbox id="service-tls-enabled" :model-value="tls !== null" :disabled="saving" @update:model-value="value => toggleTls(value === true)" />
+        <Label for="service-tls-enabled">TLS</Label>
+      </div>
+      <template v-if="tls">
+        <div class="flex items-center gap-2">
+          <Checkbox id="service-tls-terminate" v-model="tls.terminate" :disabled="saving" />
+          <Label for="service-tls-terminate">Terminate client TLS on this listener</Label>
+        </div>
+        <div class="flex items-center gap-2">
+          <Checkbox id="service-tls-upstream" v-model="tls.upstream" :disabled="saving" />
+          <Label for="service-tls-upstream">Connect to the backend over TLS</Label>
+        </div>
+        <div v-if="tls.upstream" class="flex items-center gap-2">
+          <Checkbox id="service-tls-insecure" v-model="tls.insecure" :disabled="saving" />
+          <Label for="service-tls-insecure">Skip backend certificate verification</Label>
+        </div>
+        <template v-if="tls.terminate">
+          <div class="space-y-2">
+            <Label for="service-tls-certificate">Certificate chain (PEM)</Label>
+            <Textarea id="service-tls-certificate" v-model="tls.certificate_pem" class="min-h-[120px] font-mono text-xs" :disabled="saving" placeholder="-----BEGIN CERTIFICATE-----" />
+          </div>
+          <div class="space-y-2">
+            <Label for="service-tls-key">Private key (PEM)</Label>
+            <Textarea id="service-tls-key" v-model="tls.private_key_pem" class="min-h-[120px] font-mono text-xs" :disabled="saving" :placeholder="tls.private_key_configured ? 'Stored key kept; paste a new one to replace it' : '-----BEGIN PRIVATE KEY-----'" />
+            <p class="text-sm text-muted-foreground">The key is stored with the service and never returned by the API. Leave it empty to keep the stored key.</p>
+          </div>
+        </template>
+        <div v-if="tls.upstream" class="space-y-2">
+          <Label for="service-tls-server-name">Backend certificate name (optional)</Label>
+          <Input id="service-tls-server-name" v-model="tls.server_name" :disabled="saving" placeholder="Defaults to the backend IP address" />
+        </div>
+        <p class="text-sm text-muted-foreground">The Proxy offers HTTP/1.1 over TLS. HTTP/2-only backends stay unparsed. Terminating TLS exposes plaintext to this Proxy and to anyone who can read its memory.</p>
+      </template>
+    </div>
     <p v-if="error" role="alert" class="text-sm text-destructive">{{ error }}</p>
     <div v-if="showRetry && savedId && savedEnabled" class="space-y-2 rounded-md border p-3">
       <p class="text-sm text-muted-foreground">If a listener bind failed, free the listener address, then retry. The retry leaves this form draft unsaved.</p>

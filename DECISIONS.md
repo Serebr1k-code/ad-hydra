@@ -382,3 +382,20 @@ Rule input stays bounded at 16 KiB per value, but live evaluation now uses a sep
 ### Host network metadata wins over decoder fields
 
 Field merging in the TCP path now inserts decoder output first and host-owned `network.src_ip`, `network.src_port`, `network.dst_ip`, `network.dst_port`, `transport.kind` and `packet.size` last. A native or WASM decoder could previously return those keys and shadow the real connection, so a source-based rule or a size limit could be bypassed by the plugin that is supposed to describe the protocol. `body.size`, `transfer.bytes` and `direction` were already protected by host-side annotation.
+
+### TLS termination and upstream TLS per service
+
+The operator asked for HTTPS support next to the HTTP decoder. A decoder cannot
+decrypt TLS, so this is a transport feature: an optional `tls` block on a TCP
+service lets the Proxy terminate client TLS with an operator-supplied PEM chain
+and key, connect to the backend over TLS, or do both. Termination happens inside
+the connection task, so a slow or hostile handshake cannot stall the accept loop,
+and the handshake shares the existing connect timeout. Upstream TLS is negotiated
+before flag substitution so the forwarding pump still sees plaintext, and
+`insecure` accepts self-signed competition backends while a configured
+`server_name` supplies SNI and verification. ALPN offers HTTP/1.1 only: the native
+decoder cannot parse HTTP/2, and a mis-decoded h2 stream would be worse than an
+unparsed one. The private key travels to the Proxy over the local socket and is
+never returned by the API; reads report `private_key_configured` instead, and an
+update that omits the key keeps the stored one. Nothing is decrypted passively:
+traffic without a terminating service stays opaque, as before.

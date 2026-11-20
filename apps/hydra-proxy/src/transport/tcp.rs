@@ -28,6 +28,23 @@ pub async fn listen(
     shutdown: CancellationToken,
     tasks: TaskTracker,
 ) {
+    // The listener is rebuilt whenever the service changes, so TLS material is
+    // parsed once here instead of on every handshake.
+    let current = service.borrow().clone();
+    let acceptor = match current
+        .as_ref()
+        .and_then(|s| s.tls.as_ref())
+        .filter(|t| t.terminate)
+    {
+        Some(tls) => match crate::transport::tls::acceptor(tls) {
+            Ok(acceptor) => Some(acceptor),
+            Err(error) => {
+                tracing::error!(%error, "TLS configuration rejected; listener stays closed");
+                return;
+            }
+        },
+        None => None,
+    };
     loop {
         tokio::select! {
             biased;
@@ -40,10 +57,20 @@ pub async fn listen(
                 let Ok(permit)=telemetry.permits.clone().try_acquire_owned() else{budget.reject();telemetry.rejected.fetch_add(1,Ordering::Relaxed);continue};
                 let Some(lease)=budget.admit(true) else{telemetry.rejected.fetch_add(1,Ordering::Relaxed);continue};
                 let flow=telemetry.open(&config,addr,permit);
-                let limits=limits.clone();let shutdown=shutdown.clone();let telemetry=telemetry.clone();
+                let limits=limits.clone();let shutdown=shutdown.clone();let telemetry=telemetry.clone();let acceptor=acceptor.clone();
                 tasks.spawn(async move{
                     let mut flow=flow;
                     flow.protection=Some(lease);
+                    // Terminate client TLS inside the task so a slow handshake never
+                    // blocks the accept loop.
+                    let client: crate::transport::tls::ClientStream=match &acceptor{
+                        Some(acceptor)=>match tokio::time::timeout(Duration::from_millis(limits.connect_timeout_ms),acceptor.accept(client)).await{
+                            Ok(Ok(stream))=>Box::new(stream),
+                            Ok(Err(error))=>{tracing::debug!(%error,"client TLS handshake failed");flow.reason="tls_handshake".into();return}
+                            Err(_)=>{tracing::debug!("client TLS handshake timed out");flow.reason="tls_handshake_timeout".into();return}
+                        },
+                        None=>Box::new(client),
+                    };
                     let mut session=telemetry.protocols.read().unwrap_or_else(|e|e.into_inner()).as_ref().and_then(|p|match p.session(&config.id,&config.protocol_id){Ok(s)=>Some(s),Err(_)=>{telemetry.decoder_error(&config.id,&flow.id,"decoder_initialization_failed");None}});
                     flow.body_sizes.lock().unwrap_or_else(|e|e.into_inner()).set_http(session.as_mut().is_some_and(|s|s.http_mut().is_some()));
                     let decoder=Arc::new(Mutex::new(session));
@@ -51,8 +78,7 @@ pub async fn listen(
                         if matches!(telemetry.evaluate(&config,&flow.id,&network_fields(&config,addr,"client_to_server"),false,""),Some(Action::DropConnection)){return Err(std::io::ErrorKind::PermissionDenied.into())}
                         let forwarding_store=telemetry.forwarding.read().unwrap_or_else(|e|e.into_inner()).clone();
                         let upstream=tokio::time::timeout(Duration::from_millis(limits.connect_timeout_ms),crate::forwarding::connect(&config, forwarding_store)).await??;
-                        let mut client=client;
-                        let(cr,cw)=client.split();let(ur,uw)=tokio::io::split(upstream);
+                        let(cr,cw)=tokio::io::split(client);let(ur,uw)=tokio::io::split(upstream);
                         let idle=Duration::from_millis(budget.idle(limits.tcp_idle_ms));
                         let (block_tx,block_rx)=mpsc::channel(1);
                         let context=Context{base:RelayBase::new(config.clone(),addr,telemetry.clone(),decoder.clone()),flow:&flow,idle,last_activity:Mutex::new(tokio::time::Instant::now())};
