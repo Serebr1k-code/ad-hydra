@@ -576,6 +576,7 @@ class Browser(unittest.TestCase):
                         wait("document.querySelector('[aria-label=\"Enable browser-script\"]')?.getAttribute('aria-checked')==='false'")
                         cdp.click("document.querySelector('[aria-label=\"Enable browser-script\"]')")
                         wait("document.querySelector('[aria-label=\"Enable browser-script\"]')?.getAttribute('aria-checked')==='true'")
+                        cdp.click("[...document.querySelectorAll('#page aside[aria-label=Services] button')].find(b=>b.textContent.includes('All services'))")
                         # Default creation and editing enforce directly: no
                         # staging in Shadow and no test-message selection.
                         cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add filter').click()")
@@ -586,6 +587,7 @@ class Browser(unittest.TestCase):
                         cdp.click(f"[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].find(e=>e.textContent.trim()==={json.dumps(service['name'])})")
                         cdp.click("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Advanced expression')")
                         wait("Boolean(document.querySelector('[aria-label=\"Rule direction\"]'))")
+                        cdp.evaluate("{const e=document.querySelector('#filter-name');e.value='Browser filter';e.dispatchEvent(new Event('input',{bubbles:true}));}")
                         self.assertIn('Both directions', cdp.evaluate("document.querySelector('[aria-label=\"Rule direction\"]').textContent"))
                         cdp.click("document.querySelector('[aria-label=\"Rule direction\"]')")
                         wait("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].some(e=>e.textContent.trim()==='Client → server')")
@@ -613,7 +615,7 @@ class Browser(unittest.TestCase):
                         wait("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].some(e=>e.textContent.trim()==='any (OR)')")
                         cdp.click("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].find(e=>e.textContent.trim()==='any (OR)')")
                         cdp.evaluate("document.querySelector('[role=dialog] form').requestSubmit()")
-                        wait("!document.querySelector('[role=dialog]') && document.querySelector('#page').innerText.includes('Enforce — applies action to matches')")
+                        wait("!document.querySelector('[role=dialog]') && Boolean(document.querySelector('[data-filter-card][aria-label=\"Browser filter\"]'))")
                         self.assertEqual(cdp.evaluate("[...document.querySelectorAll('[data-filter-card] dd')].filter(e=>e.textContent==='alice').length"),2,'Filter author/editor must resolve to username')
                         self.assertEqual(cdp.evaluate("document.querySelector('[data-filter-card]').style.borderLeftColor"),'rgb(102, 217, 232)')
                         wait("document.querySelector('[data-filter-application]').dataset.state==='enabled'")
@@ -627,10 +629,10 @@ class Browser(unittest.TestCase):
                         self.assertIn('Server → client',cdp.evaluate("document.querySelectorAll('[aria-label=\"Rule direction\"]')[1].textContent"))
                         cdp.evaluate("{ const e = document.querySelector('#filter-status'); e.value='402'; e.dispatchEvent(new Event('input',{bubbles:true})); }")
                         cdp.evaluate("document.querySelector('[role=dialog] form').requestSubmit()")
-                        wait("!document.querySelector('[role=dialog]') && document.querySelector('#page').innerText.includes('Enforce — applies action to matches')")
+                        wait("!document.querySelector('[role=dialog]') && Boolean(document.querySelector('[data-filter-card][aria-label=\"Browser filter\"]'))")
                         # Saved-traffic testing is still an optional diagnostic.
-                        wait("[...document.querySelectorAll('#page button')].some(b=>b.textContent==='Test saved message'&&!b.disabled)")
-                        cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Test saved message').click()")
+                        wait("Boolean(document.querySelector('[data-filter-card] button') && [...document.querySelectorAll('[data-filter-card] button')].some(b=>b.textContent==='Test'&&!b.disabled))")
+                        cdp.evaluate("[...document.querySelectorAll('[data-filter-card] button')].find(b=>b.textContent==='Test').click()")
                         wait("Boolean(document.querySelector('[role=dialog] [aria-label=\"Test message\"]'))")
                         cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Test only').click()")
                         wait("document.querySelector('[role=dialog]').innerText.includes('Matched.')")
