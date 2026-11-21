@@ -217,3 +217,47 @@ async fn saved_udp_sessions_keep_clients_binary_empty_datagrams_and_idle_closure
     drop(store);
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn decoder_cannot_shadow_datagram_network_metadata() {
+    let decoder = std::collections::BTreeMap::from([
+        (
+            "network.src_ip".to_string(),
+            FieldValue::String("10.0.0.1".into()),
+        ),
+        ("packet.size".to_string(), FieldValue::Uint(1)),
+        (
+            "stream.text".to_string(),
+            FieldValue::String("clean".into()),
+        ),
+        ("custom".to_string(), FieldValue::String("kept".into())),
+    ]);
+    let network = std::collections::BTreeMap::from([
+        (
+            "network.src_ip".to_string(),
+            FieldValue::String("203.0.113.7".into()),
+        ),
+        ("network.dst_port".to_string(), FieldValue::Uint(9000)),
+    ]);
+    let fields = merged_datagram_fields(decoder, network, 12, b"../etc/passwd");
+    assert_eq!(
+        fields["network.src_ip"],
+        FieldValue::String("203.0.113.7".into())
+    );
+    assert_eq!(fields["network.dst_port"], FieldValue::Uint(9000));
+    assert_eq!(fields["packet.size"], FieldValue::Uint(12));
+    assert_eq!(
+        fields["stream.text"],
+        FieldValue::String("../etc/passwd".into())
+    );
+    assert_eq!(fields["custom"], FieldValue::String("kept".into()));
+}
+
+#[test]
+fn datagram_stream_text_keeps_invalid_utf8_readable() {
+    let fields = merged_datagram_fields(Default::default(), Default::default(), 5, b"\xff\xfe/../");
+    match &fields["stream.text"] {
+        FieldValue::String(text) => assert!(text.contains("/../"), "{text}"),
+        other => panic!("unexpected {other:?}"),
+    }
+}

@@ -98,6 +98,36 @@ pub struct ServiceInput {
     /// TLS termination and/or upstream TLS. Omit to keep the service plaintext.
     pub tls: Option<TlsInput>,
 }
+/// The private key reaches the Proxy over the local socket only. Every response
+/// that carries a service replaces it with `private_key_configured`.
+pub(crate) fn redact_tls_secrets(value: &mut serde_json::Value) {
+    fn redact(service: &mut serde_json::Value) {
+        if let Some(tls) = service.get_mut("tls").and_then(|tls| tls.as_object_mut()) {
+            let configured = tls
+                .remove("private_key_pem")
+                .is_some_and(|key| !key.is_null());
+            tls.insert("private_key_configured".into(), configured.into());
+        }
+    }
+    fn walk(node: &mut serde_json::Value) {
+        let has_tls =
+            matches!(node, serde_json::Value::Object(object) if object.contains_key("tls"));
+        if has_tls {
+            redact(node);
+        }
+        match node {
+            serde_json::Value::Array(items) => items.iter_mut().for_each(walk),
+            serde_json::Value::Object(object) => {
+                for child in object.values_mut() {
+                    walk(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(value)
+}
+
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TlsInput {
@@ -256,13 +286,7 @@ pub(crate) async fn list(
         if kind == "service" {
             value["color"] = colors.get(&id).cloned().into();
             value["name"] = names.get(&id).cloned().unwrap_or_else(|| id.clone()).into();
-            // The private key reaches the Proxy over the local socket only.
-            if let Some(tls) = value.get_mut("tls").and_then(|tls| tls.as_object_mut()) {
-                let configured = tls
-                    .remove("private_key_pem")
-                    .is_some_and(|key| !key.is_null());
-                tls.insert("private_key_configured".into(), configured.into());
-            }
+            redact_tls_secrets(&mut value);
         }
         if id <= query.after || (!q.is_empty() && !value.to_string().contains(&q)) {
             continue;
@@ -390,11 +414,10 @@ pub async fn create_service(
     c.put_named_service(a, revision, service, true, name, request())
         .await
         .map(|desired| {
-            (
-                StatusCode::ACCEPTED,
-                Json(CreatedServiceResponse { id, desired }),
-            )
-                .into_response()
+            let mut value =
+                serde_json::to_value(CreatedServiceResponse { id, desired }).unwrap_or_default();
+            redact_tls_secrets(&mut value);
+            (StatusCode::ACCEPTED, Json(value)).into_response()
         })
         .map_err(Error::from)
 }
@@ -418,7 +441,11 @@ pub async fn update_service(
         .await?;
     c.put_named_service(a, revision, service, false, name, request())
         .await
-        .map(|v| (StatusCode::ACCEPTED, Json(v)).into_response())
+        .map(|desired| {
+            let mut value = serde_json::to_value(desired).unwrap_or_default();
+            redact_tls_secrets(&mut value);
+            (StatusCode::ACCEPTED, Json(value)).into_response()
+        })
         .map_err(Error::from)
 }
 pub(crate) async fn remove(
@@ -469,9 +496,10 @@ async fn export_configuration(
     })
     .await
     .map_err(Error::from)?;
-    Ok(Json(
-        serde_json::json!({"schema_version":1,"services":desired.services,"filters":desired.rules}),
-    ))
+    let mut snapshot =
+        serde_json::json!({"schema_version":1,"services":desired.services,"filters":desired.rules});
+    redact_tls_secrets(&mut snapshot);
+    Ok(Json(snapshot))
 }
 #[derive(utoipa::OpenApi)]
 #[openapi(
@@ -551,5 +579,53 @@ mod history_input_tests {
         );
         drop(control);
         std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn tls_private_keys_never_leave_the_api() {
+        let mut snapshot = serde_json::json!({
+            "revision": 3,
+            "services": [
+                {
+                    "id": "web",
+                    "tls": {
+                        "terminate": true,
+                        "certificate_pem": "-----BEGIN CERTIFICATE-----x",
+                        "private_key_pem": "-----BEGIN PRIVATE KEY-----secret"
+                    }
+                },
+                { "id": "plain" }
+            ],
+            "rules": []
+        });
+        redact_tls_secrets(&mut snapshot);
+        let text = snapshot.to_string();
+        assert!(!text.contains("private_key_pem"), "{text}");
+        assert!(!text.contains("secret"), "{text}");
+        assert_eq!(
+            snapshot["services"][0]["tls"]["private_key_configured"],
+            serde_json::json!(true)
+        );
+        assert!(snapshot["services"][0]["tls"]["certificate_pem"].is_string());
+        assert!(snapshot["services"][1].get("tls").is_none());
+    }
+
+    #[test]
+    fn redaction_also_covers_nested_payloads() {
+        let mut created = serde_json::json!({
+            "id": "abc",
+            "desired": { "services": [{ "id": "web", "tls": { "private_key_pem": "secret" } }] }
+        });
+        redact_tls_secrets(&mut created);
+        assert_eq!(
+            created["desired"]["services"][0]["tls"]["private_key_configured"],
+            serde_json::json!(true)
+        );
+        assert!(!created.to_string().contains("secret"));
     }
 }

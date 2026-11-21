@@ -20,6 +20,25 @@ use tokio_util::sync::CancellationToken;
 #[cfg(test)]
 #[path = "udp_tests.rs"]
 mod tests;
+/// Decoder values go in first: host-owned network metadata, the datagram size and
+/// the raw window are inserted last so a decoder cannot shadow them.
+fn merged_datagram_fields(
+    mut decoder: std::collections::BTreeMap<String, hydra_domain::FieldValue>,
+    network: std::collections::BTreeMap<String, hydra_domain::FieldValue>,
+    size: usize,
+    bytes: &[u8],
+) -> std::collections::BTreeMap<String, hydra_domain::FieldValue> {
+    decoder.extend(network);
+    decoder.insert(
+        "packet.size".into(),
+        hydra_domain::FieldValue::Uint(size as u64),
+    );
+    decoder.insert(
+        "stream.text".into(),
+        hydra_domain::FieldValue::String(String::from_utf8_lossy(bytes).into_owned()),
+    );
+    decoder
+}
 struct Session {
     socket: Arc<UdpSocket>,
     context: Arc<Context>,
@@ -100,20 +119,19 @@ impl Context {
                     .unwrap_or_else(|e| e.into_inner())
                     .annotate(&mut message, "datagram");
                 evaluated = true;
-                let mut fields = self.network_fields(if direction == Direction::ClientToServer {
-                    "client_to_server"
-                } else {
-                    "server_to_client"
-                });
-                fields.insert(
-                    "packet.size".into(),
-                    hydra_domain::FieldValue::Uint(bytes.len() as u64),
-                );
-                fields.extend(
+                let fields = merged_datagram_fields(
                     message
                         .fields
                         .iter()
-                        .map(|(k, v)| (k.clone(), domain_value(v))),
+                        .map(|(k, v)| (k.clone(), domain_value(v)))
+                        .collect(),
+                    self.network_fields(if direction == Direction::ClientToServer {
+                        "client_to_server"
+                    } else {
+                        "server_to_client"
+                    }),
+                    bytes.len(),
+                    bytes,
                 );
                 let raw_payload = message.protocol == "raw";
                 let message_id = if raw_payload {
@@ -144,15 +162,14 @@ impl Context {
                 self.telemetry.evaluate(
                     &self.config,
                     &self.flow.id,
-                    &{
+                    &merged_datagram_fields(
                         // The fallback still has complete datagram byte metadata,
                         // even when a stateful decoder emits no parsed message.
-                        live_fields.insert(
-                            "packet.size".into(),
-                            hydra_domain::FieldValue::Uint(bytes.len() as u64),
-                        );
-                        live_fields
-                    },
+                        live_fields,
+                        Default::default(),
+                        bytes.len(),
+                        bytes,
+                    ),
                     false,
                     ""
                 ),

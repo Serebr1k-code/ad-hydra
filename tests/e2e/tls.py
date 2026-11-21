@@ -115,7 +115,7 @@ class Tls(unittest.TestCase):
 
                 token = good('POST', '/auth/login', {
                     'username': 'alice', 'password': 'test-password-1234'})['access_token']
-                good('POST', '/services', {
+                created = good('POST', '/services', {
                     'expected_revision': 0, 'transport': 'tcp',
                     'listen_address': f'127.0.0.1:{pp}',
                     'upstream_address': f'127.0.0.1:{backend.getsockname()[1]}',
@@ -129,10 +129,15 @@ class Tls(unittest.TestCase):
                         break
                     time.sleep(.05)
 
-                # The private key must never come back from the API.
+                # The private key must never come back from the API, on any route.
+                self.assertNotIn('private_key_pem', json.dumps(created))
                 listed = good('GET', '/services', token=token)['items'][0]
                 self.assertEqual(listed['tls']['private_key_configured'], True)
                 self.assertNotIn('private_key_pem', listed['tls'])
+                exported = good('GET', '/config/export', token=token)
+                self.assertNotIn('private_key_pem', json.dumps(exported))
+                self.assertEqual(
+                    exported['services']['services'][0]['tls']['private_key_configured'], True)
 
                 # A plaintext client cannot reach the upstream through a TLS listener:
                 # it gets a TLS alert or a closed socket, never the echoed payload.
@@ -157,6 +162,31 @@ class Tls(unittest.TestCase):
                 # Inspected plaintext is indexed as a normal flow.
                 flows = good('GET', '/traffic/flows', token=token)['items']
                 self.assertTrue(any(f['upstream'] for f in flows), flows)
+
+                # Replacing the certificate reaches a listener that is already open.
+                (tmp / 'second').mkdir()
+                second_certificate, second_key = self_signed(tmp / 'second')
+                self.assertNotEqual(second_certificate, certificate)
+                good('PATCH', f'/services/{created["id"]}', {
+                    'expected_revision': 1, 'transport': 'tcp',
+                    'listen_address': f'127.0.0.1:{pp}',
+                    'upstream_address': f'127.0.0.1:{backend.getsockname()[1]}',
+                    'protocol_id': 'raw', 'enabled': True,
+                    'tls': {'terminate': True, 'upstream': True, 'insecure': True,
+                            'certificate_pem': second_certificate,
+                            'private_key_pem': second_key,
+                            'server_name': 'localhost'}}, token)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if good('GET', '/system/proxy', token=token)['applied_services_revision'] == 2:
+                        break
+                    time.sleep(.05)
+                with socket.create_connection(('127.0.0.1', pp), timeout=5) as raw:
+                    with context.wrap_socket(raw, server_hostname='localhost') as client:
+                        served = client.getpeercert(binary_form=True)
+                        client.sendall(b'after reload')
+                        self.assertEqual(client.recv(65536), b'upstream-tls:after reload')
+                self.assertEqual(served, ssl.PEM_cert_to_DER_cert(second_certificate))
             finally:
                 for process in processes:
                     process.terminate()

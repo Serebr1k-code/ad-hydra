@@ -20,6 +20,15 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 #[path = "tcp_tests.rs"]
 mod tests;
 
+/// `None` when the service does not terminate TLS; the previous acceptor stays
+/// active when a reload fails, so a bad certificate cannot silently drop TLS.
+fn acceptor_for(service: Option<&Service>) -> anyhow::Result<Option<tokio_rustls::TlsAcceptor>> {
+    match service.and_then(|s| s.tls.as_ref()).filter(|t| t.terminate) {
+        Some(tls) => Ok(Some(crate::transport::tls::acceptor(tls)?)),
+        None => Ok(None),
+    }
+}
+
 pub async fn listen(
     listener: Arc<TcpListener>,
     mut service: watch::Receiver<Option<Service>>,
@@ -28,28 +37,26 @@ pub async fn listen(
     shutdown: CancellationToken,
     tasks: TaskTracker,
 ) {
-    // The listener is rebuilt whenever the service changes, so TLS material is
-    // parsed once here instead of on every handshake.
-    let current = service.borrow().clone();
-    let acceptor = match current
-        .as_ref()
-        .and_then(|s| s.tls.as_ref())
-        .filter(|t| t.terminate)
-    {
-        Some(tls) => match crate::transport::tls::acceptor(tls) {
-            Ok(acceptor) => Some(acceptor),
-            Err(error) => {
-                tracing::error!(%error, "TLS configuration rejected; listener stays closed");
-                return;
-            }
-        },
-        None => None,
+    // TLS material is parsed once per configuration change instead of on every
+    // handshake, so adding a certificate takes effect without a proxy restart.
+    let mut acceptor = match acceptor_for(service.borrow().as_ref()) {
+        Ok(acceptor) => acceptor,
+        Err(error) => {
+            tracing::error!(%error, "TLS configuration rejected; listener stays closed");
+            return;
+        }
     };
     loop {
         tokio::select! {
             biased;
             _=shutdown.cancelled()=>break,
-            changed=service.changed()=>if changed.is_err() || service.borrow().is_none(){break},
+            changed=service.changed()=>{
+                if changed.is_err() || service.borrow().is_none(){break}
+                match acceptor_for(service.borrow().as_ref()){
+                    Ok(next)=>acceptor=next,
+                    Err(error)=>tracing::error!(%error,"TLS configuration rejected; keeping the previous certificate"),
+                }
+            },
             accepted=listener.accept()=>{
                 let (client,addr)=match accepted{Ok(v)=>v,Err(error)=>{tracing::warn!(%error,"TCP accept failed");tokio::time::sleep(Duration::from_millis(50)).await;continue}};
                 let Some(config)=service.borrow().clone() else{break};
