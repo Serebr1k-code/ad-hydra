@@ -215,8 +215,7 @@ impl ServiceInput {
             .tls
             .map(|tls| tls.into_tls(previous.and_then(|p| p.tls.as_ref())));
         if let Some(tls) = &tls {
-            validate_termination(tls)
-                .map_err(|error| Error::Invalid(anyhow::anyhow!(error)))?;
+            validate_termination(tls).map_err(|error| Error::Invalid(anyhow::anyhow!(error)))?;
         }
         Ok(Service {
             forwarding,
@@ -432,11 +431,7 @@ pub async fn create_service(
         .map(|desired| {
             let mut desired = public_desired(desired);
             desired["id"] = id.clone().into();
-            (
-                StatusCode::ACCEPTED,
-                Json(desired),
-            )
-                .into_response()
+            (StatusCode::ACCEPTED, Json(desired)).into_response()
         })
         .map_err(Error::from)
 }
@@ -630,8 +625,15 @@ mod history_input_tests {
             apply_error: None,
         };
         let public = public_desired(desired);
-        assert_eq!(public["services"]["services"][0]["tls"]["private_key_configured"], true);
-        assert!(public["services"]["services"][0]["tls"].get("private_key_pem").is_none());
+        assert_eq!(
+            public["services"]["services"][0]["tls"]["private_key_configured"],
+            true
+        );
+        assert!(
+            public["services"]["services"][0]["tls"]
+                .get("private_key_pem")
+                .is_none()
+        );
         assert!(!public.to_string().contains("highly-sensitive-key"));
     }
 

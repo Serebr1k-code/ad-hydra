@@ -580,3 +580,69 @@ fn live_rules_match_fields_larger_than_the_rule_input_cap() {
     )]);
     assert_eq!(compiled.evaluate(&context(&fields)).hits.len(), 1);
 }
+
+#[test]
+fn stream_text_pattern_blocks_http_profile_payloads() {
+    let mut pattern = rule("pattern", Action::DropConnection);
+    pattern.name = "traversal".into();
+    pattern.expression = Expression::Predicate {
+        field: "stream.text".into(),
+        op: Comparison::Regex,
+        value: FieldValue::String(r"\.\./".into()),
+    };
+    let compiled = compile(vec![pattern]).unwrap();
+    let hit = BTreeMap::from([(
+        "stream.text".to_string(),
+        FieldValue::String("GET /static/../../etc/passwd HTTP/1.1".into()),
+    )]);
+    assert_eq!(
+        compiled.evaluate(&context(&hit)).action,
+        Some(Action::DropConnection)
+    );
+    let clean = BTreeMap::from([(
+        "stream.text".to_string(),
+        FieldValue::String("GET /static/app.js HTTP/1.1".into()),
+    )]);
+    assert_eq!(compiled.evaluate(&context(&clean)).action, None);
+    let absent = BTreeMap::new();
+    assert_eq!(compiled.evaluate(&context(&absent)).action, None);
+}
+
+#[test]
+fn stream_text_pattern_respects_case_and_direction_scoping() {
+    let mut pattern = rule("case", Action::DropConnection);
+    pattern.expression = Expression::Scoped {
+        direction: hydra_domain::RuleDirection::ServerToClient,
+        scoped: Box::new(Expression::Predicate {
+            field: "stream.text".into(),
+            op: Comparison::Regex,
+            value: FieldValue::String("X-Debug".into()),
+        }),
+    };
+    let compiled = compile(vec![pattern]).unwrap();
+    let upper = BTreeMap::from([
+        (
+            "stream.text".to_string(),
+            FieldValue::String("X-Debug: 1".into()),
+        ),
+        (
+            "direction".to_string(),
+            FieldValue::String("server_to_client".into()),
+        ),
+    ]);
+    assert_eq!(
+        compiled.evaluate(&context(&upper)).action,
+        Some(Action::DropConnection)
+    );
+    let lower = BTreeMap::from([
+        (
+            "stream.text".to_string(),
+            FieldValue::String("x-debug: 1".into()),
+        ),
+        (
+            "direction".to_string(),
+            FieldValue::String("server_to_client".into()),
+        ),
+    ]);
+    assert_eq!(compiled.evaluate(&context(&lower)).action, None);
+}

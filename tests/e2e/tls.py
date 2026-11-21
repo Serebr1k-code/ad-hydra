@@ -115,17 +115,37 @@ class Tls(unittest.TestCase):
 
                 token = good('POST', '/auth/login', {
                     'username': 'alice', 'password': 'test-password-1234'})['access_token']
-                good('POST', '/services', {
+                created = good('POST', '/services', {
                     'expected_revision': 0, 'transport': 'tcp',
+                    'listen_address': f'127.0.0.1:{pp}',
+                    'upstream_address': f'127.0.0.1:{backend.getsockname()[1]}',
+                    'protocol_id': 'raw', 'enabled': True,
+                    'tls': {'terminate': False, 'upstream': True, 'insecure': True,
+                            'server_name': 'localhost'}}, token)
+                service_id = created['services']['services'][0]['id']
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if good('GET', '/system/proxy', token=token)['applied_services_revision'] == 1:
+                        break
+                    time.sleep(.05)
+
+                # Begin with a plaintext listener, then enable termination on
+                # the already-bound address. The acceptor must update live.
+                with socket.create_connection(('127.0.0.1', pp), timeout=5) as client:
+                    client.sendall(b'hello over plaintext')
+                    self.assertEqual(client.recv(65536), b'upstream-tls:hello over plaintext')
+                updated = good('PATCH', f'/services/{service_id}', {
+                    'expected_revision': 1, 'transport': 'tcp',
                     'listen_address': f'127.0.0.1:{pp}',
                     'upstream_address': f'127.0.0.1:{backend.getsockname()[1]}',
                     'protocol_id': 'raw', 'enabled': True,
                     'tls': {'terminate': True, 'upstream': True, 'insecure': True,
                             'certificate_pem': certificate, 'private_key_pem': key,
                             'server_name': 'localhost'}}, token)
+                self.assertNotIn('private_key_pem', json.dumps(updated))
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
-                    if good('GET', '/system/proxy', token=token)['applied_services_revision'] == 1:
+                    if good('GET', '/system/proxy', token=token)['applied_services_revision'] == 2:
                         break
                     time.sleep(.05)
 
@@ -153,6 +173,19 @@ class Tls(unittest.TestCase):
                         client.sendall(b'hello over tls')
                         echoed = client.recv(65536)
                 self.assertEqual(echoed, b'upstream-tls:hello over tls')
+
+                # Every mutation and export response also redacts the key.
+                filter_response = good('POST', '/filters', {
+                    'expected_revision': 2, 'service_id': service_id,
+                    'name': 'tls stream marker', 'description': '', 'enabled': True,
+                    'mode': 'enforce', 'priority': 1,
+                    'expression': {'field': 'stream.text', 'op': 'regex',
+                                   'value': {'type': 'string', 'value': 'never-match'}},
+                    'action': {'type': 'drop_connection'}, 'backend': 'userspace',
+                    'expires_at_ms': None}, token)
+                self.assertNotIn('private_key_pem', json.dumps(filter_response))
+                export = good('GET', '/config/export', token=token)
+                self.assertNotIn('private_key_pem', json.dumps(export))
 
                 # Inspected plaintext is indexed as a normal flow.
                 flows = good('GET', '/traffic/flows', token=token)['items']

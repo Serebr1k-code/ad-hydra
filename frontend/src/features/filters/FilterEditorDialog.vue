@@ -10,6 +10,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Textarea } from '@/components/ui/textarea'
 import RuleGroupEditor from './RuleGroupEditor.vue'
 import { createGroup, fromExpression, toExpression, type Group } from './ruleBuilder'
+import { defaultActionType, expressionFromRow, rowFromExpression, type RowDirection } from './filterRow'
+import { SCRIPT_TEMPLATE, programIdFromName } from './scriptFilters'
+import CodeEditor from '@/components/CodeEditor.vue'
 import { fieldsForService, type DecoderCatalog } from './fieldCatalog'
 import type { RuleField } from './ruleBuilder'
 import { api, errorMessage } from '@/shared/api/client'
@@ -24,8 +27,9 @@ export interface FilterRecord extends Omit<FilterInput, 'expected_revision'> {
 }
 interface ServiceOption { id: string; name: string; transport: string; protocol_id: string }
 const emptyCatalog: DecoderCatalog = { items: [], activations: [], native_schemas: [] }
-const props = defineProps<{ open: boolean; busy: boolean; error: string; services: ServiceOption[]; catalog?: DecoderCatalog; filter?: FilterRecord; initialServiceId?: string; initialFlowIds?: string[] }>()
-const emit = defineEmits<{ 'update:open': [value: boolean]; save: [value: Omit<FilterInput, 'expected_revision'>] }>()
+export interface ScriptRecord { id: string; name: string; source: string; allowOnError: boolean; serviceId: string }
+const props = defineProps<{ open: boolean; busy: boolean; error: string; services: ServiceOption[]; catalog?: DecoderCatalog; filter?: FilterRecord; script?: ScriptRecord | null; initialTab?: 'regex' | 'script'; initialServiceId?: string; initialFlowIds?: string[] }>()
+const emit = defineEmits<{ 'update:open': [value: boolean]; save: [value: Omit<FilterInput, 'expected_revision'>]; 'save-script': [value: { id: string; source: string; serviceId: string; allowOnError: boolean }] }>()
 const isOpen = computed({ get: () => props.open, set: value => emit('update:open', value) })
 const hasSelectedStreams = computed(() => Boolean(props.initialFlowIds?.length))
 const streamProtocol = computed(() => {
@@ -70,6 +74,23 @@ const form = reactive({
   service_id: '', additional_service_ids: [] as string[], name: '', description: '', enabled: true, mode: 'enforce', priority: 10,
   actionType: 'block', httpStatus: 403, tag: '', expires: '', rules: createGroup(),
 })
+const tab = ref<'regex' | 'script'>('regex')
+const script = reactive({ name: '', source: SCRIPT_TEMPLATE, allowOnError: true })
+const onError = computed({ get: () => (script.allowOnError ? 'allow' : 'block'), set: value => { script.allowOnError = value === 'allow' } })
+const patternMode = ref(true)
+const row = reactive({ pattern: '', direction: 'both' as RowDirection })
+const directionOptions: Array<{ value: RowDirection; label: string }> = [
+  { value: 'both', label: 'Both directions' },
+  { value: 'client_to_server', label: 'Client to server' },
+  { value: 'server_to_client', label: 'Server to client' },
+]
+function currentExpression(): Record<string, unknown> {
+  if (!patternMode.value) return toExpression(form.rules, availableFields.value)
+  if (!row.pattern) throw new Error('Enter a pattern')
+  // Core validates Rust regex syntax; JS RegExp has different syntax and would
+  // reject valid Rust patterns such as `(?i)` and `\z` before they reach it.
+  return expressionFromRow({ pattern: row.pattern, direction: row.direction })
+}
 const previewRows = ref<StreamPreviewResult[]>([])
 const previewBusy = ref(false)
 const previewError = ref('')
@@ -85,8 +106,11 @@ function schedulePreview() {
   previewBusy.value = true
   previewTimer = setTimeout(async () => {
     try {
-      if (form.additional_service_ids.length) ensureSharedFields(form.rules)
-      const expression = toExpression(form.rules, availableFields.value)
+      if (form.additional_service_ids.length) {
+        if (patternMode.value) ensureSharedPattern()
+        else ensureSharedFields(form.rules)
+      }
+      const expression = currentExpression()
       const action: Record<string, unknown> = form.actionType === '__preserve__' && preservedAction.value ? preservedAction.value : form.actionType === 'block'
         ? { type: 'block', http_status: form.httpStatus }
         : form.actionType === 'tag' ? { type: 'tag', tag: form.tag } : { type: form.actionType }
@@ -118,11 +142,20 @@ watch(() => [props.open, props.filter, props.services] as const, ([open]) => {
   form.enabled = filter?.enabled ?? true
   form.mode = filter?.mode ?? 'enforce'
   form.priority = filter?.priority ?? 10
-  form.actionType = actionType
+  const chosen = props.services.find(service => service.id === form.service_id)
+  form.actionType = filter ? actionType : defaultActionType(chosen?.protocol_id ?? 'raw', chosen?.transport ?? 'tcp')
   form.httpStatus = typeof action.http_status === 'number' ? action.http_status : 403
   form.tag = typeof action.tag === 'string' ? action.tag : ''
   const localExpiration = filter?.expires_at_ms ? new Date(filter.expires_at_ms - new Date().getTimezoneOffset() * 60_000) : null
   form.expires = localExpiration ? localExpiration.toISOString().slice(0, 16) : ''
+  tab.value = props.initialTab ?? (props.script ? 'script' : 'regex')
+  script.name = props.script?.name ?? ''
+  script.source = props.script?.source ?? SCRIPT_TEMPLATE
+  script.allowOnError = props.script?.allowOnError ?? true
+  const savedRow = filter ? rowFromExpression(filter.expression) : null
+  patternMode.value = filter ? Boolean(savedRow) : true
+  row.pattern = savedRow?.pattern ?? ''
+  row.direction = savedRow?.direction ?? 'both'
   try { form.rules = filter ? fromExpression(filter.expression) : createGroup('all', defaultField.value, availableFields.value) }
   catch {
     form.rules = createGroup()
@@ -139,8 +172,22 @@ function ensureSharedFields(node: import('./ruleBuilder').RuleNode) {
     throw new Error(`Field ${node.field} is not available on every selected service.`)
   }
 }
+function ensureSharedPattern() {
+  if (!availableFields.value.some(field => field.value === 'stream.text')) {
+    throw new Error('Raw stream text is not available on every selected service.')
+  }
+}
 
 function save() {
+  if (tab.value === 'script') {
+    const name = script.name.trim()
+    if (!name) { ruleError.value = 'Enter a script name'; return }
+    if (!script.source.trim()) { ruleError.value = 'Enter script code'; return }
+    if (!form.service_id) { ruleError.value = 'Choose a service'; return }
+    ruleError.value = ''
+    emit('save-script', { id: props.script?.id ?? programIdFromName(name), source: script.source, serviceId: form.service_id, allowOnError: script.allowOnError })
+    return
+  }
   if (!expressionEditable.value) return
   if (!supportsChosenAction.value) {
     ruleError.value = 'Choose an action supported by every selected service.'
@@ -148,8 +195,11 @@ function save() {
   }
   let expression: Record<string, unknown>
   try {
-    if (form.additional_service_ids.length) ensureSharedFields(form.rules)
-    expression = toExpression(form.rules, availableFields.value)
+    if (form.additional_service_ids.length) {
+      if (patternMode.value) ensureSharedPattern()
+      else ensureSharedFields(form.rules)
+    }
+    expression = currentExpression()
     ruleError.value = ''
   }
   catch (cause) { ruleError.value = cause instanceof Error ? cause.message : 'Invalid rules'; return }
@@ -180,15 +230,28 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
 
 <template>
   <Dialog v-model:open="isOpen">
-    <DialogContent :class="hasSelectedStreams ? 'flex h-[94dvh] w-[96vw] max-w-[1800px] flex-col overflow-hidden' : 'max-h-[90vh] max-w-4xl overflow-y-auto'">
+    <DialogContent :class="hasSelectedStreams ? 'flex h-[94dvh] w-[96vw] max-w-[1800px] flex-col overflow-hidden' : tab === 'script' ? 'max-h-[92vh] max-w-5xl overflow-y-auto' : 'max-h-[90vh] max-w-4xl overflow-y-auto'">
       <DialogHeader>
-        <DialogTitle>{{ filter ? 'Edit filter' : 'Create filter' }}</DialogTitle>
-        <DialogDescription>New filters enforce when saved and applied by the proxy. Choose Shadow to observe matches without applying the action; traffic testing is optional.</DialogDescription>
+        <DialogTitle>{{ tab === 'script' ? (props.script ? 'Edit script' : 'New script') : (filter ? 'Edit filter' : 'New filter') }}</DialogTitle>
+        <DialogDescription>{{ tab === 'script' ? 'Return False from check() to block the request.' : 'Saved filters enforce as soon as the proxy applies the revision.' }}</DialogDescription>
       </DialogHeader>
       <div :class="hasSelectedStreams ? 'grid min-h-0 flex-1 gap-4 overflow-y-auto lg:grid-cols-2 lg:overflow-hidden' : ''">
       <form id="filter-editor-form" class="min-w-0 space-y-5" :class="hasSelectedStreams ? 'lg:overflow-y-auto lg:pr-3' : ''" @submit.prevent="save">
-        <div class="grid gap-4 md:grid-cols-2">
-          <div class="space-y-2"><Label for="filter-name">Name</Label><Input id="filter-name" v-model="form.name" required maxlength="256" /></div>
+        <div class="flex gap-1" role="tablist">
+          <button type="button" role="tab" :aria-selected="tab === 'regex'" class="rounded-md border px-3 py-1 text-sm" :class="tab === 'regex' ? 'bg-secondary' : 'border-transparent text-muted-foreground'" @click="tab = 'regex'">Regex</button>
+          <button type="button" role="tab" :aria-selected="tab === 'script'" class="rounded-md border px-3 py-1 text-sm" :class="tab === 'script' ? 'bg-secondary' : 'border-transparent text-muted-foreground'" @click="tab = 'script'">Script</button>
+        </div>
+        <template v-if="tab === 'script'">
+          <div class="grid gap-4 md:grid-cols-2">
+            <div class="space-y-2"><Label for="script-name">Name</Label><Input id="script-name" v-model="script.name" required maxlength="32" /></div>
+            <div class="space-y-2"><Label>Service</Label><Select v-model="form.service_id"><SelectTrigger aria-label="Script service"><SelectValue placeholder="Choose service" /></SelectTrigger><SelectContent><SelectItem v-for="service in services" :key="service.id" :value="service.id">{{ service.name }}</SelectItem></SelectContent></Select></div>
+            <div class="space-y-2"><Label>Direction</Label><div class="flex h-9 items-center rounded-md border px-3 text-sm text-muted-foreground">Client to server</div></div>
+            <div class="space-y-2"><Label for="script-error">On error</Label><Select v-model="onError"><SelectTrigger id="script-error"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="allow">Allow</SelectItem><SelectItem value="block">Block</SelectItem></SelectContent></Select></div>
+          </div>
+          <div class="script-editor space-y-2"><Label for="script-source">Python</Label><CodeEditor id="script-source" v-model="script.source" language="python" aria-label="Script source" /></div>
+        </template>
+        <div v-if="tab === 'regex'" class="grid gap-4 md:grid-cols-2">
+          <div class="space-y-2"><Label for="filter-name">{{ patternMode ? 'Tag' : 'Name' }}</Label><Input id="filter-name" v-model="form.name" required maxlength="256" /></div>
           <div class="space-y-2"><Label>Service</Label><Select v-model="form.service_id" :disabled="hasSelectedStreams"><SelectTrigger aria-label="Filter service"><SelectValue placeholder="Choose service" /></SelectTrigger><SelectContent><SelectItem v-for="service in services" :key="service.id" :value="service.id">{{ service.name }}</SelectItem></SelectContent></Select></div>
           <fieldset v-if="services.length > 1" class="space-y-2 md:col-span-2">
             <legend class="text-sm font-medium">Also apply to</legend>
@@ -207,32 +270,39 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
             <p class="text-xs text-muted-foreground">The rule editor shows fields available on every selected service.</p>
           </fieldset>
           <div class="space-y-2"><Label for="filter-mode">Mode</Label><Select v-model="form.mode"><SelectTrigger id="filter-mode"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="shadow">Shadow (observe only)</SelectItem><SelectItem value="enforce">Enforce</SelectItem></SelectContent></Select></div>
-          <div class="space-y-2"><Label for="filter-priority">Priority</Label><Input id="filter-priority" v-model.number="form.priority" type="number" min="0" max="1000000" /></div>
-          <div class="space-y-2 md:col-span-2"><Label for="filter-description">Description</Label><Textarea id="filter-description" v-model="form.description" maxlength="4096" rows="2" /></div>
+          <div v-if="!patternMode" class="space-y-2"><Label for="filter-priority">Priority</Label><Input id="filter-priority" v-model.number="form.priority" type="number" min="0" max="1000000" /></div>
+          <div v-if="!patternMode" class="space-y-2 md:col-span-2"><Label for="filter-description">Description</Label><Textarea id="filter-description" v-model="form.description" maxlength="4096" rows="2" /></div>
         </div>
 
-        <p v-if="form.mode === 'shadow'" role="status" class="rounded-md border p-3 text-sm">Shadow mode: matches are counted, but traffic is allowed through. Choose Enforce to apply the action immediately; saved-traffic testing is optional.</p>
-
-        <p v-if="form.mode === 'enforce'" role="status" class="rounded-md border p-3 text-sm">Saving applies this rule as soon as the proxy acknowledges the new revision. No traffic test is required.</p>
-
-        <section class="space-y-2" :aria-disabled="!expressionEditable">
-          <div><h3 class="font-medium">Match conditions</h3><p class="text-sm text-muted-foreground">Groups add parentheses. Choose whether all or any conditions inside a group must match. Each condition has its own direction. Conditions evaluate one message at a time; use OR to match either a client-only or a server-only condition.</p></div>
+        <section v-if="tab === 'regex' && patternMode" class="grid gap-4 md:grid-cols-2">
+          <div class="space-y-2 md:col-span-2"><Label for="filter-pattern">Pattern</Label><Input id="filter-pattern" v-model="row.pattern" class="font-mono" placeholder="\.\./" maxlength="1024" /></div>
+          <div class="space-y-2"><Label>Direction</Label><Select v-model="row.direction"><SelectTrigger aria-label="Pattern direction"><SelectValue /></SelectTrigger><SelectContent><SelectItem v-for="option in directionOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem></SelectContent></Select></div>
+          <div class="md:col-span-2"><Button type="button" variant="outline" size="sm" @click="patternMode = false">Advanced expression</Button></div>
+        </section>
+        <section v-else-if="tab === 'regex'" class="space-y-2" :aria-disabled="!expressionEditable">
+          <div><h3 class="font-medium">Match conditions</h3><p class="text-sm text-muted-foreground">Groups add parentheses. Choose whether all or any conditions inside a group must match. Each condition has its own direction.</p></div>
           <RuleGroupEditor :group="form.rules" :fields="availableFields" />
-          <p class="text-xs text-muted-foreground">Live byte limits count bytes as they arrive. HTTP counts body bytes per request; other TCP profiles count each stream direction, and UDP counts each datagram. Use Block transfer to stop the selected direction immediately; on TCP this closes the whole connection. Block HTTP request is for client requests.</p>
+          <Button type="button" variant="outline" size="sm" @click="patternMode = true">Simple pattern</Button>
         </section>
 
-        <div class="grid gap-4 md:grid-cols-2">
+        <div v-if="tab === 'regex'" class="grid gap-4 md:grid-cols-2">
           <div class="space-y-2"><Label>Action</Label><Select v-model="form.actionType"><SelectTrigger aria-label="Filter action"><SelectValue /></SelectTrigger><SelectContent><SelectItem v-if="!supportsChosenAction" :value="form.actionType" disabled>Action unavailable for selected services</SelectItem><SelectItem v-if="form.actionType === '__preserve__'" value="__preserve__">Keep existing advanced action</SelectItem><SelectItem v-if="supportsHttp" value="block">Block HTTP request</SelectItem><SelectItem value="alert">Alert</SelectItem><SelectItem value="log">Log</SelectItem><SelectItem value="allow">Allow</SelectItem><SelectItem v-if="supportsTcp" value="drop_connection">Block transfer (close TCP connection)</SelectItem><SelectItem v-if="supportsUdp" value="drop_datagram">Block transfer (drop UDP datagram)</SelectItem><SelectItem value="tag">Tag</SelectItem></SelectContent></Select></div>
           <div v-if="form.actionType === 'block'" class="space-y-2"><Label for="filter-status">HTTP block status</Label><Input id="filter-status" v-model.number="form.httpStatus" type="number" min="400" max="599" /></div>
           <div v-else-if="form.actionType === 'tag'" class="space-y-2"><Label for="filter-tag">Tag</Label><Input id="filter-tag" v-model="form.tag" required maxlength="128" /></div>
-          <div class="space-y-2"><Label for="filter-expires">Expires (optional)</Label><Input id="filter-expires" v-model="form.expires" type="datetime-local" /></div>
+          <div v-if="!patternMode" class="space-y-2"><Label for="filter-expires">Expires (optional)</Label><Input id="filter-expires" v-model="form.expires" type="datetime-local" /></div>
           <label class="flex items-center gap-2 self-end pb-2"><Checkbox :model-value="form.enabled" @update:model-value="value => form.enabled = value === true" /><span class="text-sm">Enabled</span></label>
         </div>
         <p v-if="ruleError || error" role="alert" class="text-sm text-destructive">{{ ruleError || error }}</p>
-        <DialogFooter><Button type="button" variant="outline" :disabled="busy" @click="isOpen = false">Cancel</Button><Button type="submit" :disabled="busy || !form.service_id || !expressionEditable">{{ busy ? 'Saving…' : 'Save filter' }}</Button></DialogFooter>
+        <DialogFooter><Button type="button" variant="outline" :disabled="busy" @click="isOpen = false">Cancel</Button><Button type="submit" :disabled="busy || !form.service_id || (tab === 'regex' && !expressionEditable)">{{ busy ? 'Saving…' : tab === 'script' ? 'Save script' : 'Save filter' }}</Button></DialogFooter>
       </form>
       <FilterStreamWorkspace v-if="open && initialFlowIds?.length" :flow-ids="initialFlowIds" :protocol-id="streamProtocol" :results="previewRows" :busy="previewBusy" :error="previewError" :enabled="form.enabled" :mode="form.mode" />
       </div>
     </DialogContent>
   </Dialog>
 </template>
+
+<style scoped>
+/* The shared editor is sized for short snippets; a filter script needs room. */
+.script-editor :deep(.cm-scroller) { min-height: 22rem; max-height: 30rem; }
+.script-editor :deep(.cm-content) { min-height: 22rem; }
+</style>

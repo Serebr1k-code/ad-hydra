@@ -47,12 +47,21 @@ impl Manager {
             if let Some(tls) = service.tls.as_ref() {
                 if service.enabled && tls.terminate {
                     crate::transport::tls::server_config(tls).map_err(|error| {
-                        anyhow::anyhow!("invalid TLS termination config for service {}: {error}", service.id)
+                        anyhow::anyhow!(
+                            "invalid TLS termination config for service {}: {error}",
+                            service.id
+                        )
                     })?;
                 }
                 if service.enabled && tls.upstream {
-                    crate::transport::tls::server_name(tls, service.effective_upstream())
-                        .map_err(|error| anyhow::anyhow!("invalid TLS upstream name for service {}: {error}", service.id))?;
+                    crate::transport::tls::server_name(tls, service.effective_upstream()).map_err(
+                        |error| {
+                            anyhow::anyhow!(
+                                "invalid TLS upstream name for service {}: {error}",
+                                service.id
+                            )
+                        },
+                    )?;
                 }
             }
             if let Some(f) = &service.forwarding {

@@ -606,7 +606,13 @@ async fn decoder_fields_cannot_shadow_host_network_metadata() {
             ("packet.size".into(), Value::Unsigned(1)),
         ]),
     };
-    let fields = merged_fields(&context, "client_to_server", &message, 99);
+    let fields = message_fields(
+        &context,
+        "client_to_server",
+        &message,
+        99,
+        b"GET /x HTTP/1.1",
+    );
     assert_eq!(
         fields["network.src_ip"],
         hydra_domain::FieldValue::String("203.0.113.7".into())
@@ -616,4 +622,99 @@ async fn decoder_fields_cannot_shadow_host_network_metadata() {
         hydra_domain::FieldValue::Uint(19010)
     );
     assert_eq!(fields["packet.size"], hydra_domain::FieldValue::Uint(99));
+    assert_eq!(
+        fields["stream.text"],
+        hydra_domain::FieldValue::String("GET /x HTTP/1.1".into())
+    );
+}
+
+#[tokio::test]
+async fn decoder_cannot_shadow_stream_text() {
+    use hydra_protocol_sdk::{Direction, ParsedMessage, Value};
+    use std::collections::BTreeMap;
+
+    let telemetry = Telemetry::new(1);
+    let service = Service {
+        forwarding: None,
+        id: "stream".into(),
+        transport: hydra_domain::Transport::Tcp,
+        listen_address: "127.0.0.1:9011".parse().unwrap(),
+        upstream_address: "127.0.0.1:19011".parse().unwrap(),
+        protocol_id: "raw".into(),
+        enabled: true,
+        retain_history: false,
+        protection: None,
+        tls: None,
+    };
+    let client = "203.0.113.8:40011".parse().unwrap();
+    let flow = telemetry.open(
+        &service,
+        client,
+        telemetry.permits.clone().acquire_owned().await.unwrap(),
+    );
+    let decoder = Arc::new(Mutex::new(None));
+    let context = Context {
+        base: crate::transport::RelayBase::new(service.clone(), client, telemetry.clone(), decoder),
+        flow: &flow,
+        idle: Duration::from_secs(1),
+        last_activity: Mutex::new(tokio::time::Instant::now()),
+    };
+    let message = ParsedMessage {
+        protocol: "wasm".into(),
+        message_type: "spoof".into(),
+        direction: Direction::ClientToServer,
+        fields: BTreeMap::from([("stream.text".into(), Value::String("clean".into()))]),
+    };
+    let fields = message_fields(&context, "client_to_server", &message, 8, b"../etc/passwd");
+    assert_eq!(
+        fields["stream.text"],
+        hydra_domain::FieldValue::String("../etc/passwd".into())
+    );
+}
+
+#[tokio::test]
+async fn stream_text_survives_invalid_utf8() {
+    use hydra_protocol_sdk::{Direction, ParsedMessage};
+    use std::collections::BTreeMap;
+
+    let telemetry = Telemetry::new(1);
+    let service = Service {
+        forwarding: None,
+        id: "bytes".into(),
+        transport: hydra_domain::Transport::Tcp,
+        listen_address: "127.0.0.1:9012".parse().unwrap(),
+        upstream_address: "127.0.0.1:19012".parse().unwrap(),
+        protocol_id: "raw".into(),
+        enabled: true,
+        retain_history: false,
+        protection: None,
+        tls: None,
+    };
+    let client = "203.0.113.9:40012".parse().unwrap();
+    let flow = telemetry.open(
+        &service,
+        client,
+        telemetry.permits.clone().acquire_owned().await.unwrap(),
+    );
+    let decoder = Arc::new(Mutex::new(None));
+    let context = Context {
+        base: crate::transport::RelayBase::new(service.clone(), client, telemetry.clone(), decoder),
+        flow: &flow,
+        idle: Duration::from_secs(1),
+        last_activity: Mutex::new(tokio::time::Instant::now()),
+    };
+    let message = ParsedMessage {
+        protocol: "raw".into(),
+        message_type: "payload".into(),
+        direction: Direction::ClientToServer,
+        fields: BTreeMap::new(),
+    };
+    let fields = message_fields(&context, "client_to_server", &message, 5, b"\xff\xfe/../");
+    match &fields["stream.text"] {
+        hydra_domain::FieldValue::String(text) => {
+            assert!(text.contains("/../"), "{text}");
+            assert!(text.contains('\u{fffd}'), "{text}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
 }

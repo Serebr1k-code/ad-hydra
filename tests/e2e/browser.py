@@ -542,12 +542,13 @@ class Browser(unittest.TestCase):
                         cdp.click("[...document.querySelectorAll('#page button')].find(b=>b.textContent.trim()==='Delete checker')")
                         wait("document.querySelector('#page').innerText.includes('No checker programs are configured.')")
                         cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add filter').click()")
-                        wait("Boolean(document.querySelector('[role=dialog]')?.innerText.includes('Match conditions'))")
+                        wait("Boolean(document.querySelector('[role=dialog]')?.innerText.includes('Pattern'))")
                         self.assertFalse(cdp.evaluate("Boolean(document.querySelector('[role=dialog] textarea:not(#filter-description)'))"), 'Filter editor must not request an expression JSON textarea')
+                        cdp.click("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Advanced expression')")
+                        wait("Boolean(document.querySelector('[role=dialog]')?.innerText.includes('Match conditions'))")
                         self.assertTrue(cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].some(b=>b.textContent==='Add group')"))
                         cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Add group').click()")
                         wait("document.querySelectorAll('[role=dialog] [aria-label=\"Group match mode\"]').length===2")
-                        self.assertIn('No traffic test is required', cdp.evaluate("document.querySelector('[role=dialog]').innerText"))
                         # Remove the root condition, then its only remaining group.
                         # This must edit the expression without submitting the form.
                         cdp.evaluate("document.querySelector('[role=dialog] [aria-label=\"Remove rule\"]').click()")
@@ -558,6 +559,23 @@ class Browser(unittest.TestCase):
                         self.assertFalse(cdp.evaluate("Boolean(document.querySelector('[role=dialog] [aria-label=\"Remove group\"]'))"))
                         cdp.evaluate("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Cancel').click()")
                         wait("!document.querySelector('[role=dialog]')")
+
+                        # Create a filter checker through the new script tab and
+                        # verify its per-service switch can be disabled and re-enabled.
+                        cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add filter').click()")
+                        wait("Boolean(document.querySelector('[role=dialog]'))")
+                        cdp.click("[...document.querySelectorAll('[role=dialog] button[role=tab]')].find(b=>b.textContent==='Script')")
+                        wait("Boolean(document.querySelector('#script-name') && document.querySelector('#script-source[role=textbox][aria-multiline=true]'))")
+                        cdp.evaluate("{const e=document.querySelector('#script-name');e.value='browser-script';e.dispatchEvent(new Event('input',{bubbles:true}));}")
+                        replace_editor('#script-source', 'def check(request: bytes) -> bool:\n    return True\n')
+                        cdp.click("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Save script')")
+                        wait("[...document.querySelectorAll('#page code')].some(e=>e.textContent==='browser-script')")
+                        cdp.click("[...document.querySelectorAll('#page aside[aria-label=Services] button')].find(b=>b.textContent.includes('Unused service'))")
+                        wait("!document.querySelector('[aria-label=\"Enable browser-script\"]')?.disabled")
+                        cdp.click("document.querySelector('[aria-label=\"Enable browser-script\"]')")
+                        wait("document.querySelector('[aria-label=\"Enable browser-script\"]')?.getAttribute('aria-checked')==='false'")
+                        cdp.click("document.querySelector('[aria-label=\"Enable browser-script\"]')")
+                        wait("document.querySelector('[aria-label=\"Enable browser-script\"]')?.getAttribute('aria-checked')==='true'")
                         # Default creation and editing enforce directly: no
                         # staging in Shadow and no test-message selection.
                         cdp.evaluate("[...document.querySelectorAll('#page button')].find(b=>b.textContent==='Add filter').click()")
@@ -566,6 +584,8 @@ class Browser(unittest.TestCase):
                         cdp.click("document.querySelector('[aria-label=\"Filter service\"]')")
                         wait("document.querySelectorAll('[role=listbox][data-state=open] [role=option]').length===2")
                         cdp.click(f"[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].find(e=>e.textContent.trim()==={json.dumps(service['name'])})")
+                        cdp.click("[...document.querySelectorAll('[role=dialog] button')].find(b=>b.textContent==='Advanced expression')")
+                        wait("Boolean(document.querySelector('[aria-label=\"Rule direction\"]'))")
                         self.assertIn('Both directions', cdp.evaluate("document.querySelector('[aria-label=\"Rule direction\"]').textContent"))
                         cdp.click("document.querySelector('[aria-label=\"Rule direction\"]')")
                         wait("[...document.querySelectorAll('[role=listbox][data-state=open] [role=option]')].some(e=>e.textContent.trim()==='Client → server')")

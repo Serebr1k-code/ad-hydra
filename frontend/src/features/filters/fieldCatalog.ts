@@ -16,6 +16,7 @@ export interface DecoderCatalog {
 export interface FieldService { id: string; protocol_id: string }
 
 const universal: RuleField[] = [
+  { value: 'stream.text', label: 'Raw stream window (text)', kind: 'string' },
   { value: 'body.size', label: 'Body/transfer size (live bytes)', kind: 'number' },
   { value: 'transfer.bytes', label: 'Total transferred (this direction)', kind: 'number' },
   { value: 'packet.size', label: 'Read/datagram size (bytes)', kind: 'number' },

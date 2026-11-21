@@ -1,5 +1,78 @@
 use super::*;
-use hydra_domain::{Comparison, Expression, FieldValue, Mode, Rule, RuleSnapshot, Transport};
+use hydra_domain::{
+    Action, Comparison, Expression, FieldValue, Mode, Rule, RuleSnapshot, Transport,
+};
+
+#[tokio::test]
+async fn raw_stream_text_rules_match_udp_datagrams_in_both_directions() {
+    let service = Service {
+        forwarding: None,
+        id: "udp-pattern".into(),
+        transport: Transport::Udp,
+        listen_address: "127.0.0.1:9000".parse().unwrap(),
+        upstream_address: "127.0.0.1:19000".parse().unwrap(),
+        protocol_id: "raw".into(),
+        enabled: true,
+        retain_history: false,
+        protection: None,
+        tls: None,
+    };
+    let telemetry = Telemetry::new(2);
+    telemetry.replace_rules(
+        hydra_filter_engine::CompiledSnapshot::compile(
+            RuleSnapshot {
+                revision: 1,
+                rules: vec![Rule {
+                    id: "flag-pattern".into(),
+                    service_id: service.id.clone(),
+                    additional_service_ids: vec![],
+                    name: "flag pattern".into(),
+                    description: String::new(),
+                    enabled: true,
+                    mode: Mode::Enforce,
+                    priority: 1,
+                    expression: Expression::Predicate {
+                        field: "stream.text".into(),
+                        op: Comparison::Regex,
+                        value: FieldValue::String(r"FLAG\{[A-Z0-9]+\}".into()),
+                    },
+                    action: Action::DropDatagram,
+                    backend: "userspace".into(),
+                    expires_at_ms: None,
+                }],
+            },
+            std::slice::from_ref(&service),
+        )
+        .unwrap(),
+    );
+    let protocols = crate::inspection::protocols::Protocols::open(
+        std::env::temp_dir().join(format!("hydra-udp-pattern-{}", uuid::Uuid::new_v4())),
+    )
+    .await
+    .unwrap();
+    *telemetry.protocols.write().unwrap() = Some(protocols.clone());
+    let client = "127.0.0.1:40000".parse().unwrap();
+    let flow = telemetry.open(
+        &service,
+        client,
+        telemetry.permits.clone().acquire_owned().await.unwrap(),
+    );
+    let context = Context {
+        base: RelayBase::new(
+            service.clone(),
+            client,
+            telemetry.clone(),
+            Mutex::new(Some(protocols.session(&service.id, "raw").unwrap())).into(),
+        ),
+        flow,
+        last: AtomicU64::new(0),
+        start: Instant::now(),
+    };
+
+    assert!(context.inspect(Direction::ClientToServer, b"FLAG{TEAM1}"));
+    assert!(context.inspect(Direction::ServerToClient, b"FLAG{TEAM2}"));
+    assert_eq!(telemetry.udp_dropped.load(Ordering::Relaxed), 2);
+}
 
 #[tokio::test]
 async fn byte_limits_work_before_udp_decoding_and_keep_directions_separate() {

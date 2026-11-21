@@ -52,6 +52,19 @@ impl Context {
         self.last
             .store(self.start.elapsed().as_millis() as u64, Ordering::Relaxed);
     }
+    fn inspection_fields(
+        &self,
+        direction: &str,
+        bytes: &[u8],
+        decoded: std::collections::BTreeMap<String, hydra_domain::FieldValue>,
+    ) -> std::collections::BTreeMap<String, hydra_domain::FieldValue> {
+        let mut fields = self.base.inspected_fields(direction, decoded, bytes.len());
+        fields.insert(
+            "stream.text".into(),
+            hydra_domain::FieldValue::String(String::from_utf8_lossy(bytes).into_owned()),
+        );
+        fields
+    }
     fn inspect(&self, direction: Direction, bytes: &[u8]) -> bool {
         // Retain observed bytes before enforcement, matching TCP history.
         self.flow.record_history(direction, bytes);
@@ -100,20 +113,19 @@ impl Context {
                     .unwrap_or_else(|e| e.into_inner())
                     .annotate(&mut message, "datagram");
                 evaluated = true;
-                let mut fields = self.network_fields(if direction == Direction::ClientToServer {
-                    "client_to_server"
-                } else {
-                    "server_to_client"
-                });
-                fields.insert(
-                    "packet.size".into(),
-                    hydra_domain::FieldValue::Uint(bytes.len() as u64),
-                );
-                fields.extend(
-                    message
-                        .fields
-                        .iter()
-                        .map(|(k, v)| (k.clone(), domain_value(v))),
+                let decoded = message
+                    .fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), domain_value(v)))
+                    .collect();
+                let fields = self.inspection_fields(
+                    if direction == Direction::ClientToServer {
+                        "client_to_server"
+                    } else {
+                        "server_to_client"
+                    },
+                    bytes,
+                    decoded,
                 );
                 let raw_payload = message.protocol == "raw";
                 let message_id = if raw_payload {
@@ -147,11 +159,18 @@ impl Context {
                     &{
                         // The fallback still has complete datagram byte metadata,
                         // even when a stateful decoder emits no parsed message.
-                        live_fields.insert(
+                        let mut fields = live_fields;
+                        fields.insert(
                             "packet.size".into(),
                             hydra_domain::FieldValue::Uint(bytes.len() as u64),
                         );
-                        live_fields
+                        fields.insert(
+                            "stream.text".into(),
+                            hydra_domain::FieldValue::String(
+                                String::from_utf8_lossy(bytes).into_owned(),
+                            ),
+                        );
+                        fields
                     },
                     false,
                     ""
