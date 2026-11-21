@@ -137,7 +137,7 @@ watch(() => [props.open, props.filter, props.services] as const, ([open]) => {
   expressionEditable.value = true
   form.service_id = filter?.service_id ?? props.initialServiceId ?? props.services[0]?.id ?? ''
   form.additional_service_ids = [...(filter?.additional_service_ids ?? [])]
-  form.name = filter?.name ?? 'New filter'
+  form.name = filter?.name ?? ''
   form.description = filter?.description ?? ''
   form.enabled = filter?.enabled ?? true
   form.mode = filter?.mode ?? 'enforce'
@@ -243,7 +243,7 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
         </div>
         <template v-if="tab === 'script'">
           <div class="grid gap-4 md:grid-cols-2">
-            <div class="space-y-2"><Label for="script-name">Name</Label><Input id="script-name" v-model="script.name" required maxlength="32" /></div>
+            <div class="space-y-2"><Label for="script-name">Name</Label><Input id="script-name" v-model="script.name" required :disabled="Boolean(props.script)" maxlength="32" /></div>
             <div class="space-y-2"><Label>Service</Label><Select v-model="form.service_id"><SelectTrigger aria-label="Script service"><SelectValue placeholder="Choose service" /></SelectTrigger><SelectContent><SelectItem v-for="service in services" :key="service.id" :value="service.id">{{ service.name }}</SelectItem></SelectContent></Select></div>
             <div class="space-y-2"><Label>Direction</Label><div class="flex h-9 items-center rounded-md border px-3 text-sm text-muted-foreground">Client to server</div></div>
             <div class="space-y-2"><Label for="script-error">On error</Label><Select v-model="onError"><SelectTrigger id="script-error"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="allow">Allow</SelectItem><SelectItem value="block">Block</SelectItem></SelectContent></Select></div>
@@ -251,7 +251,7 @@ function buildPayload(overrides: Record<string, unknown>): Omit<FilterInput, 'ex
           <div class="script-editor space-y-2"><Label for="script-source">Python</Label><CodeEditor id="script-source" v-model="script.source" language="python" aria-label="Script source" /></div>
         </template>
         <div v-if="tab === 'regex'" class="grid gap-4 md:grid-cols-2">
-          <div class="space-y-2"><Label for="filter-name">{{ patternMode ? 'Tag' : 'Name' }}</Label><Input id="filter-name" v-model="form.name" required maxlength="256" /></div>
+          <div class="space-y-2"><Label for="filter-name">{{ patternMode ? 'Tag' : 'Name' }}</Label><Input id="filter-name" v-model="form.name" :required="!patternMode" :placeholder="patternMode ? 'tag (optional)' : ''" maxlength="256" /></div>
           <div class="space-y-2"><Label>Service</Label><Select v-model="form.service_id" :disabled="hasSelectedStreams"><SelectTrigger aria-label="Filter service"><SelectValue placeholder="Choose service" /></SelectTrigger><SelectContent><SelectItem v-for="service in services" :key="service.id" :value="service.id">{{ service.name }}</SelectItem></SelectContent></Select></div>
           <fieldset v-if="services.length > 1" class="space-y-2 md:col-span-2">
             <legend class="text-sm font-medium">Also apply to</legend>

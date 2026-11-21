@@ -65,9 +65,29 @@ pub fn acceptor(tls: &ServiceTls) -> anyhow::Result<TlsAcceptor> {
 
 /// Upstream connector. `insecure` accepts self-signed competition backends.
 pub fn connector(tls: &ServiceTls) -> anyhow::Result<TlsConnector> {
+    Ok(TlsConnector::from(client_config(tls.insecure)?))
+}
+
+/// Client configuration only varies by `insecure`, so build it once instead of
+/// rebuilding the root store for every upstream connection.
+fn client_config(insecure: bool) -> anyhow::Result<Arc<rustls::ClientConfig>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<bool, Arc<rustls::ClientConfig>>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(Default::default()));
+    let mut cached = cache.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(config) = cached.get(&insecure) {
+        return Ok(config.clone());
+    }
+    let config = Arc::new(build_client_config(insecure)?);
+    cached.insert(insecure, config.clone());
+    Ok(config)
+}
+
+fn build_client_config(insecure: bool) -> anyhow::Result<rustls::ClientConfig> {
     let builder = rustls::ClientConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()?;
-    let mut config = if tls.insecure {
+    let mut config = if insecure {
         builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AcceptAny(provider())))
@@ -78,7 +98,7 @@ pub fn connector(tls: &ServiceTls) -> anyhow::Result<TlsConnector> {
         builder.with_root_certificates(roots).with_no_client_auth()
     };
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(TlsConnector::from(Arc::new(config)))
+    Ok(config)
 }
 
 /// The upstream name used for SNI and verification: explicit, else the upstream IP.
@@ -146,5 +166,21 @@ impl ServerCertVerifier for AcceptAny {
     }
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_config_is_built_once_per_verification_mode() {
+        let first = client_config(false).unwrap();
+        let second = client_config(false).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        let insecure = client_config(true).unwrap();
+        assert!(!Arc::ptr_eq(&first, &insecure));
+        assert_eq!(insecure.alpn_protocols, vec![b"http/1.1".to_vec()]);
+        assert_eq!(first.alpn_protocols, vec![b"http/1.1".to_vec()]);
     }
 }

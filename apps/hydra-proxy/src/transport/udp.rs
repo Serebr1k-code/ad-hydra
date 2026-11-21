@@ -20,6 +20,25 @@ use tokio_util::sync::CancellationToken;
 #[cfg(test)]
 #[path = "udp_tests.rs"]
 mod tests;
+/// Decoder values go in first: host-owned network metadata, the datagram size and
+/// the raw window are inserted last so a decoder cannot shadow them.
+fn merged_datagram_fields(
+    mut decoder: std::collections::BTreeMap<String, hydra_domain::FieldValue>,
+    network: std::collections::BTreeMap<String, hydra_domain::FieldValue>,
+    size: usize,
+    bytes: &[u8],
+) -> std::collections::BTreeMap<String, hydra_domain::FieldValue> {
+    decoder.extend(network);
+    decoder.insert(
+        "packet.size".into(),
+        hydra_domain::FieldValue::Uint(size as u64),
+    );
+    decoder.insert(
+        "stream.text".into(),
+        hydra_domain::FieldValue::String(String::from_utf8_lossy(bytes).into_owned()),
+    );
+    decoder
+}
 struct Session {
     socket: Arc<UdpSocket>,
     context: Arc<Context>,
@@ -156,22 +175,14 @@ impl Context {
                 self.telemetry.evaluate(
                     &self.config,
                     &self.flow.id,
-                    &{
+                    &merged_datagram_fields(
                         // The fallback still has complete datagram byte metadata,
                         // even when a stateful decoder emits no parsed message.
-                        let mut fields = live_fields;
-                        fields.insert(
-                            "packet.size".into(),
-                            hydra_domain::FieldValue::Uint(bytes.len() as u64),
-                        );
-                        fields.insert(
-                            "stream.text".into(),
-                            hydra_domain::FieldValue::String(
-                                String::from_utf8_lossy(bytes).into_owned(),
-                            ),
-                        );
-                        fields
-                    },
+                        live_fields,
+                        Default::default(),
+                        bytes.len(),
+                        bytes,
+                    ),
                     false,
                     ""
                 ),

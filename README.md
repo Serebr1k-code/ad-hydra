@@ -97,6 +97,7 @@ cargo build --locked --workspace
 
 - [Traffic viewer](docs/traffic-view.md) and [service limits and favourites](docs/traffic-protection.md)
 - [Python and WASM request checkers](docs/REQUEST_CHECKERS.md)
+- [Writing Python exploits for Farm](docs/exploits-python.ru.md) (in Russian)
 - [Custom WASM decoders](docs/CUSTOM_DECODERS.md)
 - [Installation and recovery](docs/INSTALL.md) and [manual systemd deployment](deploy/README.md)
 - [CI builds and release archives](docs/CI_RELEASES.md)

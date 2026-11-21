@@ -20,6 +20,15 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 #[path = "tcp_tests.rs"]
 mod tests;
 
+/// `None` when the service does not terminate TLS; the previous acceptor stays
+/// active when a reload fails, so a bad certificate cannot silently drop TLS.
+fn acceptor_for(service: Option<&Service>) -> anyhow::Result<Option<tokio_rustls::TlsAcceptor>> {
+    match service.and_then(|s| s.tls.as_ref()).filter(|t| t.terminate) {
+        Some(tls) => Ok(Some(crate::transport::tls::acceptor(tls)?)),
+        None => Ok(None),
+    }
+}
+
 pub async fn listen(
     listener: Arc<TcpListener>,
     mut service: watch::Receiver<Option<Service>>,
@@ -29,9 +38,10 @@ pub async fn listen(
     tasks: TaskTracker,
 ) {
     // The acceptor is shared by concurrent handshakes and replaced atomically
-    // when Core applies a new service revision, including TLS mode or cert changes.
+    // when Core applies a new service revision. Keep the previous acceptor if a
+    // new certificate fails to build so an invalid update cannot break traffic.
     let mut current = service.borrow().clone();
-    let mut acceptor = match make_acceptor(current.as_ref()) {
+    let mut acceptor = match acceptor_for(current.as_ref()) {
         Ok(acceptor) => acceptor,
         Err(error) => {
             tracing::error!(%error, "TLS configuration rejected; listener stays closed");
@@ -45,14 +55,11 @@ pub async fn listen(
             changed=service.changed()=>{
                 if changed.is_err() { break; }
                 current = service.borrow().clone();
-                acceptor = match make_acceptor(current.as_ref()) {
-                    Ok(acceptor) => acceptor,
-                    Err(error) => {
-                        tracing::error!(%error, "updated TLS configuration rejected; listener closed");
-                        return;
-                    }
-                };
                 if current.is_none() { break; }
+                match acceptor_for(current.as_ref()) {
+                    Ok(next) => acceptor = next,
+                    Err(error) => tracing::error!(%error, "TLS configuration rejected; keeping the previous certificate"),
+                }
             },
             accepted=listener.accept()=>{
                 let (client,addr)=match accepted{Ok(v)=>v,Err(error)=>{tracing::warn!(%error,"TCP accept failed");tokio::time::sleep(Duration::from_millis(50)).await;continue}};
@@ -97,13 +104,6 @@ pub async fn listen(
             }
         }
     }
-}
-fn make_acceptor(service: Option<&Service>) -> anyhow::Result<Option<tokio_rustls::TlsAcceptor>> {
-    service
-        .and_then(|service| service.tls.as_ref())
-        .filter(|tls| tls.terminate)
-        .map(crate::transport::tls::acceptor)
-        .transpose()
 }
 struct Context<'a> {
     base: RelayBase,

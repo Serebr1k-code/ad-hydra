@@ -39,9 +39,8 @@ const programs = ref<ScriptProgram[]>([])
 const policies = ref<ScriptPolicy[]>([])
 const programsRevision = ref(0)
 const policiesRevision = ref(0)
-// Keep all configured checkers visible in a service view so a disabled checker
-// can be re-enabled for that service after its policy assignment is removed.
-const scripts = computed<ScriptRow[]>(() => buildScriptRows(programs.value, policies.value))
+const scripts = computed<ScriptRow[]>(() => buildScriptRows(programs.value, policies.value)
+  .filter(row => !query.value || row.name.toLowerCase().includes(query.value.trim().toLowerCase())))
 const testOpen = ref(false)
 const testing = ref<Pick<FilterRecord, 'id' | 'name' | 'service_id' | 'additional_service_ids'>>()
 const error = ref('')
