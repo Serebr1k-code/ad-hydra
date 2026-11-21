@@ -685,6 +685,7 @@ mod tests {
             enabled: true,
             retain_history,
             protection: None,
+            tls: None,
         }
     }
     async fn stored(store: &HistoryStore, id: &str) -> FlowHistory {

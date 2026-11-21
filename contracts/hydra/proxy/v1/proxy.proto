@@ -172,6 +172,17 @@ message ServiceConfig {
   bool retain_history = 7;
   ServiceProtection protection = 8;
   ForwardingConfig forwarding = 9;
+  ServiceTls tls = 10;
+}
+// TLS termination and/or upstream TLS for one service. PEM material stays on this
+// local socket and is never returned by the HTTP API.
+message ServiceTls {
+  bool terminate = 1;
+  bool upstream = 2;
+  bool insecure = 3;
+  string certificate_pem = 4;
+  string private_key_pem = 5;
+  string server_name = 6;
 }
 message ServiceProtection {
   uint64 max_active_flows = 1;

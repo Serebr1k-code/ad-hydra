@@ -2,6 +2,7 @@ pub(crate) mod protection;
 mod routing;
 mod session;
 mod tcp;
+pub(crate) mod tls;
 mod udp;
 use crate::{config::Limits, telemetry::Telemetry};
 use hydra_domain::{Service, ServiceSnapshot, Transport};
@@ -43,6 +44,17 @@ impl Manager {
     pub async fn prepare(&self, snapshot: &ServiceSnapshot) -> anyhow::Result<Prepared> {
         routing::reject_local_loops(snapshot)?;
         for service in &snapshot.services {
+            if let Some(tls) = service.tls.as_ref() {
+                if service.enabled && tls.terminate {
+                    crate::transport::tls::server_config(tls).map_err(|error| {
+                        anyhow::anyhow!("invalid TLS termination config for service {}: {error}", service.id)
+                    })?;
+                }
+                if service.enabled && tls.upstream {
+                    crate::transport::tls::server_name(tls, service.effective_upstream())
+                        .map_err(|error| anyhow::anyhow!("invalid TLS upstream name for service {}: {error}", service.id))?;
+                }
+            }
             if let Some(f) = &service.forwarding {
                 hydra_rewrite::validate(f)?;
             }

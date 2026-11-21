@@ -3744,6 +3744,11 @@ components:
           type: string
         retain_history:
           type: boolean
+        tls:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/TlsInput'
+            description: TLS termination and/or upstream TLS. Omit to keep the service plaintext.
         transport:
           type: string
         upstream_address:
@@ -4167,6 +4172,32 @@ components:
       properties:
         message_id:
           type: string
+      additionalProperties: false
+    TlsInput:
+      type: object
+      required:
+      - terminate
+      properties:
+        certificate_pem:
+          type:
+          - string
+          - 'null'
+          description: PEM chain the Proxy presents. Required when `terminate` is set.
+        insecure:
+          type: boolean
+        private_key_pem:
+          type:
+          - string
+          - 'null'
+          description: PEM private key. Omit on update to keep the stored key.
+        server_name:
+          type:
+          - string
+          - 'null'
+        terminate:
+          type: boolean
+        upstream:
+          type: boolean
       additionalProperties: false
     TokenResponse:
       type: object

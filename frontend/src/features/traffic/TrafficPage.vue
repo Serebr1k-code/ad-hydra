@@ -15,11 +15,13 @@ import { parseEventFrame } from '@/shared/api/sse'
 import { useRouter } from 'vue-router'
 import { toggleStream, type StreamSelection } from './streamSelection'
 import type { FavoriteChange } from './FlowFavoriteButton.vue'
-const rows=ref<Flow[]>([]),services=ref<{id:string;name:string;protocol_id:string;color?:string|null}[]>([]),service=ref('all'),selected=ref<Flow>()
+const rows=ref<Flow[]>([]),services=ref<{id:string;name:string;protocol_id:string;color?:string|null;tls?:boolean}[]>([]),service=ref('all'),selected=ref<Flow>()
 const cursor=ref<number|null>(),query=ref(''),loading=ref(false),error=ref(''),serviceError=ref(''),advanced=ref(false)
-const liveState=ref<LiveState>('connecting'),liveNotice=ref(''),conversation=ref<InstanceType<typeof FlowConversation>>()
+const flagPattern=ref(''),liveState=ref<LiveState>('connecting'),liveNotice=ref(''),conversation=ref<InstanceType<typeof FlowConversation>>()
 const router=useRouter(),filterSelection=ref<StreamSelection|null>(null)
 const selectedProtocol=computed(()=>services.value.find(s=>s.id===selected.value?.service_id)?.protocol_id??'raw')
+const selectedServiceTls=computed(()=>services.value.find(s=>s.id===selected.value?.service_id)?.tls===true)
+function configureTls(){const id=selected.value?.service_id;if(id)void router.push({path:'/services',query:{tls:id}})}
 const expanded=ref(false)
 const scrollLocked=useScrollLock(document.body)
 watch(expanded,value=>{scrollLocked.value=value})
@@ -96,7 +98,7 @@ onMounted(async()=>{
   do {
    const page=await api<ListResponse>('/services?limit=100'+(after?'&after='+encodeURIComponent(after):''))
    if(disposed)return
-   services.value.push(...page.items.map(s=>({id:text(s.id),name:text(s.name)||text(s.id),protocol_id:text(s.protocol_id)||'raw',color:typeof s.color==='string'?s.color:null})))
+   services.value.push(...page.items.map(s=>({id:text(s.id),name:text(s.name)||text(s.id),protocol_id:text(s.protocol_id)||'raw',color:typeof s.color==='string'?s.color:null,tls:Boolean(s.tls)})))
    after=page.next_cursor??''
   }while(after&&services.value.length<128)
  }catch(e){serviceError.value=errorMessage(e)}
@@ -105,6 +107,10 @@ onMounted(async()=>{
   const catalog=await api<{activations:{service_id:string;id:string;version:string;applied:boolean}[]}>('/protocols')
   if(disposed)return
   services.value=services.value.map(item=>({...item,protocol_id:serviceProtocol(item,catalog.activations)}))
+ }catch(e){serviceError.value=errorMessage(e)}
+ try {
+  const settings=await api<{flag_pattern?:string|null}>('/system/settings')
+  if(!disposed&&typeof settings.flag_pattern==='string')flagPattern.value=settings.flag_pattern
  }catch(e){serviceError.value=errorMessage(e)}
  await load()
  if(!disposed)void events(receive,controller.signal,state=>{liveState.value=state;if(state==='live')reconcile()})
@@ -119,7 +125,7 @@ onUnmounted(()=>{scrollLocked.value=false;document.removeEventListener('keydown'
   <Alert v-if="error||serviceError" variant="destructive"><AlertDescription>{{error||serviceError}}</AlertDescription></Alert>
   <div class="overflow-hidden rounded-md border bg-card" :class="expanded?'min-h-0 flex-1':'h-[calc(100dvh-230px)] min-h-[640px] md:min-h-[480px]'"><TrafficWorkspace><template #sessions>
    <SessionList :rows="visible" :show-blocked="showBlocked" :favorites-only="favoritesOnly" @favorites-only="favoritesOnly=$event" @favorite="favoriteChanged" @error="error=$event" @show-blocked="showBlocked=$event" :services="services" :service="service" :selected="selected?.flow_id??''" :loading="loading" :more="Boolean(cursor)" :filter-selection="filterSelection?.flow_ids??[]" :filter-selection-service="filterSelection?.service_id??''" @service="service=$event" @select="selected=$event" @toggle-filter="toggleFilter" @refresh="load()" @more="load(true)" />
-   </template><FlowConversation class="flex-1" ref="conversation" v-if="selected" :key="selected.flow_id+':'+selectedProtocol" :flow-id="selected.flow_id" :flow="selected" :protocol-id="selectedProtocol" :show-blocked="showBlocked" @favorite="favoriteChanged" />
+   </template><FlowConversation class="flex-1" ref="conversation" v-if="selected" :key="selected.flow_id+':'+selectedProtocol" :flow-id="selected.flow_id" :flow="selected" :protocol-id="selectedProtocol" :show-blocked="showBlocked" :flag-pattern="flagPattern" :service-tls="selectedServiceTls" @configure-tls="configureTls" @favorite="favoriteChanged" />
    <section v-else id="traffic-stream" class="flex min-h-80 items-center justify-center p-8 text-center"><div><h2 class="!mt-0">Follow traffic session</h2><p class="text-sm text-muted-foreground">Choose a service and select a session to inspect its conversation.</p></div></section>
   </TrafficWorkspace></div>
  </section>

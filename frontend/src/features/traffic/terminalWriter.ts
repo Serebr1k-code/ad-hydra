@@ -1,5 +1,5 @@
 import type {TerminalChunk} from './terminal'
-import {coloredChunks} from './terminalColors'
+import {coloredChunks,flagChunks} from './terminalColors'
 interface Output {reset():void;write(text:string,done:()=>void):void}
 /** One in-flight parser write and one coalesced desired transcript. Reset only after parsing drains. */
 export class TranscriptWriter {
@@ -7,8 +7,8 @@ export class TranscriptWriter {
  private pending:TerminalChunk[]|undefined
  private writing=false
  private disposed=false
- constructor(private output:Output,private completed:()=>void=()=>{}){}
- set(chunks:TerminalChunk[]){if(this.disposed)return;this.pending=coloredChunks(chunks);this.flush()}
+ constructor(private output:Output,private completed:()=>void=()=>{},private flags:()=>RegExp|null=()=>null){}
+ set(chunks:TerminalChunk[]){if(this.disposed)return;this.pending=flagChunks(coloredChunks(chunks),this.flags());this.flush()}
  dispose(){this.disposed=true;this.pending=undefined}
  private flush(){
   if(this.disposed||this.writing||!this.pending)return

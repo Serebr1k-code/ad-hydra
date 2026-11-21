@@ -95,6 +95,42 @@ pub struct ServiceInput {
     #[serde(default = "history_enabled")]
     pub retain_history: bool,
     pub protection: Option<ProtectionInput>,
+    /// TLS termination and/or upstream TLS. Omit to keep the service plaintext.
+    pub tls: Option<TlsInput>,
+}
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TlsInput {
+    pub terminate: bool,
+    #[serde(default)]
+    pub upstream: bool,
+    #[serde(default)]
+    pub insecure: bool,
+    /// PEM chain the Proxy presents. Required when `terminate` is set.
+    pub certificate_pem: Option<String>,
+    /// PEM private key. Omit on update to keep the stored key.
+    pub private_key_pem: Option<String>,
+    pub server_name: Option<String>,
+}
+impl TlsInput {
+    /// An update may omit the key: the stored one stays in place.
+    fn into_tls(self, previous: Option<&hydra_domain::ServiceTls>) -> hydra_domain::ServiceTls {
+        let private_key_pem = self
+            .private_key_pem
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| previous.and_then(|p| p.private_key_pem.clone()));
+        hydra_domain::ServiceTls {
+            terminate: self.terminate,
+            upstream: self.upstream,
+            insecure: self.insecure,
+            certificate_pem: self
+                .certificate_pem
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| previous.and_then(|p| p.certificate_pem.clone())),
+            private_key_pem,
+            server_name: self.server_name.filter(|value| !value.trim().is_empty()),
+        }
+    }
 }
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -110,14 +146,81 @@ pub struct ProtectionInput {
 fn history_enabled() -> bool {
     true
 }
+fn validate_termination(tls: &hydra_domain::ServiceTls) -> Result<(), String> {
+    tls.validate()?;
+    if !tls.terminate {
+        return Ok(());
+    }
+    let certificate = tls.certificate_pem.as_deref().unwrap_or_default();
+    let key = tls.private_key_pem.as_deref().unwrap_or_default();
+    let certificates: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut std::io::Cursor::new(certificate))
+            .collect::<Result<_, _>>()
+            .map_err(|_| "invalid TLS certificate PEM".to_owned())?;
+    let private_key = rustls_pemfile::private_key(&mut std::io::Cursor::new(key))
+        .map_err(|_| "invalid TLS private-key PEM".to_owned())?
+        .ok_or_else(|| "TLS private-key PEM contains no private key".to_owned())?;
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|_| "unsupported TLS protocol configuration".to_owned())?
+        .with_no_client_auth()
+        .with_single_cert(certificates, private_key)
+        .map_err(|_| "TLS certificate and private key do not match".to_owned())?;
+    Ok(())
+}
+
+fn redact_tls_service(service: &mut serde_json::Value) {
+    if let Some(tls) = service.get_mut("tls").and_then(|v| v.as_object_mut()) {
+        let configured = tls
+            .remove("private_key_pem")
+            .is_some_and(|key| !key.is_null());
+        tls.insert("private_key_configured".into(), configured.into());
+    }
+}
+
+fn redact_tls_private_keys(snapshot: &mut serde_json::Value) {
+    if let Some(services) = snapshot.get_mut("services").and_then(|v| v.as_array_mut()) {
+        for service in services {
+            redact_tls_service(service);
+        }
+    }
+}
+
+/// Convert an internal desired snapshot to its public HTTP representation.
+/// TLS private keys remain in Core storage and the local Core-to-Proxy contract only.
+pub(crate) fn public_desired(desired: super::Desired) -> serde_json::Value {
+    let mut value = serde_json::to_value(desired).expect("desired snapshot is serializable");
+    if let Some(services) = value.get_mut("services") {
+        redact_tls_private_keys(services);
+    }
+    value
+}
+
 impl ServiceInput {
     async fn into_service(self, id: String, control: &Control) -> Result<Service, Error> {
+        self.into_service_with_previous(id, control, None).await
+    }
+    async fn into_service_with_previous(
+        self,
+        id: String,
+        control: &Control,
+        previous: Option<&Service>,
+    ) -> Result<Service, Error> {
         let forwarding = match self.forwarding {
             Some(f) => Some(f.resolve(control).await.map_err(Error::from)?),
             None => None,
         };
+        let tls = self
+            .tls
+            .map(|tls| tls.into_tls(previous.and_then(|p| p.tls.as_ref())));
+        if let Some(tls) = &tls {
+            validate_termination(tls)
+                .map_err(|error| Error::Invalid(anyhow::anyhow!(error)))?;
+        }
         Ok(Service {
             forwarding,
+            tls,
             id,
             transport: self.transport,
             listen_address: self.listen_address,
@@ -204,6 +307,8 @@ pub(crate) async fn list(
         if kind == "service" {
             value["color"] = colors.get(&id).cloned().into();
             value["name"] = names.get(&id).cloned().unwrap_or_else(|| id.clone()).into();
+            // The private key reaches the Proxy over the local socket only.
+            redact_tls_service(&mut value);
         }
         if id <= query.after || (!q.is_empty() && !value.to_string().contains(&q)) {
             continue;
@@ -309,12 +414,6 @@ pub async fn service_color(
         .map_err(Error::from)?;
     Ok(Json(input))
 }
-#[derive(Serialize)]
-struct CreatedServiceResponse {
-    id: String,
-    #[serde(flatten)]
-    desired: super::Desired,
-}
 #[utoipa::path(post,path="/api/v1/services",request_body=ServiceInput,responses((status=202,description="Created service snapshot; id identifies the newly created service",body=Object),(status=409)),tag="services")]
 pub async fn create_service(
     State(c): State<Control>,
@@ -331,9 +430,11 @@ pub async fn create_service(
     c.put_named_service(a, revision, service, true, name, request())
         .await
         .map(|desired| {
+            let mut desired = public_desired(desired);
+            desired["id"] = id.clone().into();
             (
                 StatusCode::ACCEPTED,
-                Json(CreatedServiceResponse { id, desired }),
+                Json(desired),
             )
                 .into_response()
         })
@@ -349,10 +450,17 @@ pub async fn update_service(
     let a = actor(&c, &headers).await?;
     let revision = input.expected_revision;
     let name = input.name.clone();
-    let service = input.into_service(id, &c).await?;
+    let previous = c
+        .desired()
+        .await
+        .ok()
+        .and_then(|desired| desired.services.services.into_iter().find(|s| s.id == id));
+    let service = input
+        .into_service_with_previous(id, &c, previous.as_ref())
+        .await?;
     c.put_named_service(a, revision, service, false, name, request())
         .await
-        .map(|v| (StatusCode::ACCEPTED, Json(v)).into_response())
+        .map(|v| (StatusCode::ACCEPTED, Json(public_desired(v))).into_response())
         .map_err(Error::from)
 }
 pub(crate) async fn remove(
@@ -365,7 +473,7 @@ pub(crate) async fn remove(
     let a = actor(&c, &headers).await?;
     c.delete(a, q.expected_revision, kind, id, request())
         .await
-        .map(|v| (StatusCode::ACCEPTED, Json(v)).into_response())
+        .map(|v| (StatusCode::ACCEPTED, Json(public_desired(v))).into_response())
         .map_err(Error::from)
 }
 #[utoipa::path(delete,path="/api/v1/services/{id}",params(("id"=String,Path),("expected_revision"=u64,Query)),responses((status=202,body=Object),(status=409)),tag="services")]
@@ -403,9 +511,12 @@ async fn export_configuration(
     })
     .await
     .map_err(Error::from)?;
-    Ok(Json(
-        serde_json::json!({"schema_version":1,"services":desired.services,"filters":desired.rules}),
-    ))
+    let public = public_desired(desired);
+    Ok(Json(serde_json::json!({
+        "schema_version": 1,
+        "services": public["services"].clone(),
+        "filters": public["rules"].clone()
+    })))
 }
 #[derive(utoipa::OpenApi)]
 #[openapi(
@@ -485,5 +596,56 @@ mod history_input_tests {
         );
         drop(control);
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn public_desired_redacts_private_keys_and_preserves_configured_state() {
+        let desired = super::super::Desired {
+            services: hydra_domain::ServiceSnapshot {
+                revision: 3,
+                services: vec![Service {
+                    forwarding: None,
+                    tls: Some(hydra_domain::ServiceTls {
+                        terminate: true,
+                        upstream: false,
+                        insecure: false,
+                        certificate_pem: Some("certificate".into()),
+                        private_key_pem: Some("highly-sensitive-key".into()),
+                        server_name: None,
+                    }),
+                    id: "svc".into(),
+                    transport: Transport::Tcp,
+                    listen_address: "127.0.0.1:24001".parse().unwrap(),
+                    upstream_address: "127.0.0.1:24002".parse().unwrap(),
+                    protocol_id: "raw".into(),
+                    enabled: true,
+                    retain_history: true,
+                    protection: None,
+                }],
+            },
+            rules: hydra_domain::RuleSnapshot::default(),
+            applied_revision: 3,
+            services_applied_revision: 3,
+            rules_applied_revision: 3,
+            apply_error: None,
+        };
+        let public = public_desired(desired);
+        assert_eq!(public["services"]["services"][0]["tls"]["private_key_configured"], true);
+        assert!(public["services"]["services"][0]["tls"].get("private_key_pem").is_none());
+        assert!(!public.to_string().contains("highly-sensitive-key"));
+    }
+
+    #[test]
+    fn invalid_tls_certificate_is_rejected_before_service_submission() {
+        let malformed = hydra_domain::ServiceTls {
+            terminate: true,
+            certificate_pem: Some("-----BEGIN CERTIFICATE-----\ninvalid".into()),
+            private_key_pem: Some("-----BEGIN PRIVATE KEY-----\ninvalid".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_termination(&malformed).unwrap_err(),
+            "invalid TLS certificate PEM"
+        );
     }
 }

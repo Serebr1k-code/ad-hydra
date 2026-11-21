@@ -16,6 +16,7 @@ async fn raw_flow_closure_emits_testable_size_metadata_without_payloads() {
         enabled: true,
         retain_history: false,
         protection: None,
+        tls: None,
     };
     let flow = telemetry.open(
         &service,
@@ -66,6 +67,7 @@ async fn raw_byte_filter_matches_across_reads_without_emitting_payload_telemetry
         enabled: true,
         retain_history: false,
         protection: None,
+        tls: None,
     };
     let protocols = crate::inspection::protocols::Protocols::open(
         std::env::temp_dir().join(format!("hydra-raw-filter-{}", uuid::Uuid::new_v4())),
@@ -159,6 +161,7 @@ async fn byte_limit_stops_incomplete_uploads_before_forwarding_the_excess() {
             enabled: true,
             retain_history: false,
             protection: None,
+            tls: None,
         };
         if profile == "wasm" {
             let module =
@@ -291,6 +294,7 @@ async fn utf8_tcp_inspection_emits_text_events_in_both_directions() {
         enabled: true,
         retain_history: false,
         protection: None,
+        tls: None,
     };
     let telemetry = Telemetry::new(1);
     let mut events = telemetry.events.subscribe();
@@ -408,6 +412,7 @@ async fn service_caps_isolate_same_ip_clients_and_global_cap_counts_rejections()
                 bytes_per_second: 1024,
                 idle_timeout_ms: 5000,
             }),
+            tls: None,
         };
         let (sender, receiver) = watch::channel(Some(service.clone()));
         senders.push(sender);
@@ -495,6 +500,7 @@ async fn one_way_upload_keeps_connection_alive_and_true_idle_releases_slot() {
             bytes_per_second: 0,
             idle_timeout_ms: 400,
         }),
+        tls: None,
     };
     let telemetry = Telemetry::new(1);
     let (received_tx, mut received_rx) = mpsc::channel(16);
@@ -555,4 +561,59 @@ async fn one_way_upload_keeps_connection_alive_and_true_idle_releases_slot() {
     tracker.close();
     tracker.wait().await;
     backend_task.await.unwrap();
+}
+
+/// A decoder (including a hot-loaded WASM plugin) must not be able to rewrite the
+/// host's own view of the connection: rules keyed on `network.*` stay trustworthy.
+#[tokio::test]
+async fn decoder_fields_cannot_shadow_host_network_metadata() {
+    use hydra_protocol_sdk::{Direction, ParsedMessage, Value};
+    use std::collections::BTreeMap;
+
+    let telemetry = Telemetry::new(1);
+    let service = Service {
+        forwarding: None,
+        id: "shadow".into(),
+        transport: hydra_domain::Transport::Tcp,
+        listen_address: "127.0.0.1:9010".parse().unwrap(),
+        upstream_address: "127.0.0.1:19010".parse().unwrap(),
+        protocol_id: "raw".into(),
+        enabled: true,
+        retain_history: false,
+        protection: None,
+        tls: None,
+    };
+    let client = "203.0.113.7:40010".parse().unwrap();
+    let flow = telemetry.open(
+        &service,
+        client,
+        telemetry.permits.clone().acquire_owned().await.unwrap(),
+    );
+    let decoder = Arc::new(Mutex::new(None));
+    let context = Context {
+        base: crate::transport::RelayBase::new(service.clone(), client, telemetry.clone(), decoder),
+        flow: &flow,
+        idle: Duration::from_secs(1),
+        last_activity: Mutex::new(tokio::time::Instant::now()),
+    };
+    let message = ParsedMessage {
+        protocol: "wasm".into(),
+        message_type: "spoof".into(),
+        direction: Direction::ClientToServer,
+        fields: BTreeMap::from([
+            ("network.src_ip".into(), Value::String("10.0.0.1".into())),
+            ("network.dst_port".into(), Value::Unsigned(1)),
+            ("packet.size".into(), Value::Unsigned(1)),
+        ]),
+    };
+    let fields = merged_fields(&context, "client_to_server", &message, 99);
+    assert_eq!(
+        fields["network.src_ip"],
+        hydra_domain::FieldValue::String("203.0.113.7".into())
+    );
+    assert_eq!(
+        fields["network.dst_port"],
+        hydra_domain::FieldValue::Uint(19010)
+    );
+    assert_eq!(fields["packet.size"], hydra_domain::FieldValue::Uint(99));
 }

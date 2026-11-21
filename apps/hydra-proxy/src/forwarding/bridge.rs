@@ -54,6 +54,8 @@ impl AsyncWrite for Connection {
 }
 pub enum Upstream {
     Direct(TcpStream),
+    /// Upstream TLS is already negotiated; the relay sees plaintext.
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
     Forwarded(Connection),
 }
 impl AsyncRead for Upstream {
@@ -64,6 +66,7 @@ impl AsyncRead for Upstream {
     ) -> std::task::Poll<std::io::Result<()>> {
         match &mut *self {
             Self::Direct(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            Self::Tls(s) => std::pin::Pin::new(s).poll_read(cx, buf),
             Self::Forwarded(s) => std::pin::Pin::new(s).poll_read(cx, buf),
         }
     }
@@ -76,6 +79,7 @@ impl AsyncWrite for Upstream {
     ) -> std::task::Poll<std::io::Result<usize>> {
         match &mut *self {
             Self::Direct(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            Self::Tls(s) => std::pin::Pin::new(s).poll_write(cx, buf),
             Self::Forwarded(s) => std::pin::Pin::new(s).poll_write(cx, buf),
         }
     }
@@ -85,6 +89,7 @@ impl AsyncWrite for Upstream {
     ) -> std::task::Poll<std::io::Result<()>> {
         match &mut *self {
             Self::Direct(s) => std::pin::Pin::new(s).poll_flush(cx),
+            Self::Tls(s) => std::pin::Pin::new(s).poll_flush(cx),
             Self::Forwarded(s) => std::pin::Pin::new(s).poll_flush(cx),
         }
     }
@@ -94,26 +99,45 @@ impl AsyncWrite for Upstream {
     ) -> std::task::Poll<std::io::Result<()>> {
         match &mut *self {
             Self::Direct(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            Self::Tls(s) => std::pin::Pin::new(s).poll_shutdown(cx),
             Self::Forwarded(s) => std::pin::Pin::new(s).poll_shutdown(cx),
         }
     }
 }
 pub async fn connect(service: &Service, store: Option<Arc<Store>>) -> std::io::Result<Upstream> {
-    let stream = TcpStream::connect(service.effective_upstream()).await?;
+    let address = service.effective_upstream();
+    let stream = TcpStream::connect(address).await?;
+    let tls = service.tls.as_ref().filter(|tls| tls.upstream);
     let Some(policy) = &service.forwarding else {
-        return Ok(Upstream::Direct(stream));
+        return Ok(match tls {
+            Some(tls) => Upstream::Tls(Box::new(
+                crate::transport::tls::connect(stream, tls, address)
+                    .await
+                    .map_err(std::io::Error::other)?,
+            )),
+            None => Upstream::Direct(stream),
+        });
     };
     let store = store.ok_or_else(|| std::io::Error::other("forwarding store unavailable"))?;
     let format = store.format(service).map_err(std::io::Error::other)?;
     let framing = policy.framing.clone();
     let ns = namespace(service);
+    // Flag substitution needs the plaintext stream, so negotiate upstream TLS first.
+    let stream: crate::transport::tls::ClientStream = match tls {
+        Some(tls) => Box::new(
+            crate::transport::tls::connect(stream, tls, address)
+                .await
+                .map_err(std::io::Error::other)?,
+        ),
+        None => Box::new(stream),
+    };
     let (front, back) = tokio::io::duplex(16384);
     let stop = CancellationToken::new();
     let cancel = stop.clone();
     let id = service.id.clone();
     tokio::spawn(async move {
         let (ar, aw) = tokio::io::split(back);
-        let (br, bw) = stream.into_split();
+        let (br, bw) = tokio::io::split(stream);
         let methods = Arc::new(Mutex::new(VecDeque::new()));
         let context = Pump {
             store,

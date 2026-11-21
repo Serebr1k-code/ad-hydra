@@ -33,6 +33,19 @@ impl RelayBase {
             decoder,
         }
     }
+
+    /// Merge decoder output with authoritative transport metadata. Network and
+    /// packet fields are written last so a plugin cannot spoof host observations.
+    pub fn inspected_fields(
+        &self,
+        direction: &str,
+        mut decoded: std::collections::BTreeMap<String, FieldValue>,
+        packet_size: usize,
+    ) -> std::collections::BTreeMap<String, FieldValue> {
+        decoded.extend(network_fields(&self.config, self.client, direction));
+        decoded.insert("packet.size".into(), FieldValue::Uint(packet_size as u64));
+        decoded
+    }
 }
 
 /// Common object contract implemented by each transport relay context.

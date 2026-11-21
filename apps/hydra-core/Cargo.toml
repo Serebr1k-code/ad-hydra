@@ -9,6 +9,7 @@ anyhow.workspace = true
 axum.workspace = true
 axum-server.workspace = true
 rustls.workspace = true
+rustls-pemfile = "2"
 clap.workspace = true
 hydra-compression.workspace = true
 hydra-domain.workspace = true

@@ -153,7 +153,10 @@ impl CompiledExpression {
                 let Some(actual) = lookup(fields, field) else {
                     return Truth::Unknown;
                 };
-                if !bounded(actual, 1, &mut 0) {
+                // Decoder output can legitimately exceed the rule-input cap: a 64 KiB
+                // datagram or read plus the raw overlap tail. Bound evaluation by the
+                // runtime cap, so a large read cannot silently disable the rule.
+                if !bounded_with(actual, 1, &mut 0, MAX_EVALUATED_FIELD_BYTES) {
                     return Truth::Unknown;
                 }
                 let result = match op {
@@ -232,11 +235,19 @@ fn lookup<'a>(fields: &'a BTreeMap<String, FieldValue>, path: &str) -> Option<&'
     Some(value)
 }
 pub(crate) fn bounded(value: &FieldValue, depth: usize, size: &mut usize) -> bool {
+    bounded_with(value, depth, size, MAX_FIELD_BYTES)
+}
+pub(crate) fn bounded_with(
+    value: &FieldValue,
+    depth: usize,
+    size: &mut usize,
+    limit: usize,
+) -> bool {
     if depth > MAX_DEPTH {
         return false;
     }
     *size += 1;
-    if *size > MAX_FIELD_BYTES {
+    if *size > limit {
         return false;
     }
     match value {
@@ -246,19 +257,19 @@ pub(crate) fn bounded(value: &FieldValue, depth: usize, size: &mut usize) -> boo
         FieldValue::Object(v) => {
             for (key, value) in v {
                 *size += key.len();
-                if !bounded(value, depth + 1, size) {
+                if !bounded_with(value, depth + 1, size, limit) {
                     return false;
                 }
             }
         }
         FieldValue::List(v) => {
             for value in v {
-                if !bounded(value, depth + 1, size) {
+                if !bounded_with(value, depth + 1, size, limit) {
                     return false;
                 }
             }
         }
         _ => {}
     }
-    *size <= MAX_FIELD_BYTES
+    *size <= limit
 }

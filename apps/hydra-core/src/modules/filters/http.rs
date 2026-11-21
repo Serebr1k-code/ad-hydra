@@ -295,7 +295,13 @@ pub async fn create_filter(
         request(),
     )
     .await
-    .map(|v| (StatusCode::ACCEPTED, Json(v)).into_response())
+    .map(|v| {
+        (
+            StatusCode::ACCEPTED,
+            Json(crate::modules::services::http::public_desired(v)),
+        )
+            .into_response()
+    })
     .map_err(Error::from)
 }
 #[utoipa::path(patch,path="/api/v1/filters/{id}",params(("id"=String,Path)),request_body=FilterInput,responses((status=202,body=Object),(status=409)),tag="filters")]
@@ -309,7 +315,13 @@ pub async fn update_filter(
     let revision = input.expected_revision;
     c.put_rule(a, revision, input.into_rule(id), false, request())
         .await
-        .map(|v| (StatusCode::ACCEPTED, Json(v)).into_response())
+        .map(|v| {
+            (
+                StatusCode::ACCEPTED,
+                Json(crate::modules::services::http::public_desired(v)),
+            )
+                .into_response()
+        })
         .map_err(Error::from)
 }
 #[utoipa::path(put,path="/api/v1/filters/{id}/state",params(("id"=String,Path)),request_body=StateInput,responses((status=202,body=Object),(status=409)),tag="filters")]
@@ -332,7 +344,13 @@ pub async fn filter_state(
     rule.enabled = input.enabled;
     c.put_rule(a, input.expected_revision, rule, false, request())
         .await
-        .map(|v| (StatusCode::ACCEPTED, Json(v)).into_response())
+        .map(|v| {
+            (
+                StatusCode::ACCEPTED,
+                Json(crate::modules::services::http::public_desired(v)),
+            )
+                .into_response()
+        })
         .map_err(Error::from)
 }
 #[utoipa::path(delete,path="/api/v1/filters/{id}",params(("id"=String,Path),("expected_revision"=u64,Query)),responses((status=202,body=Object),(status=409)),tag="filters")]
@@ -422,7 +440,13 @@ pub async fn bulk_state(
         request(),
     )
     .await
-    .map(|v| (StatusCode::ACCEPTED, Json(v)).into_response())
+    .map(|v| {
+        (
+            StatusCode::ACCEPTED,
+            Json(crate::modules::services::http::public_desired(v)),
+        )
+            .into_response()
+    })
     .map_err(Error::from)
 }
 #[derive(Deserialize, ToSchema)]

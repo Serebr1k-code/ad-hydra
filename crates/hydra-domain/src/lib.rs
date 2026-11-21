@@ -17,6 +17,8 @@ pub enum Transport {
 pub struct Service {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forwarding: Option<Forwarding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<ServiceTls>,
     pub id: String,
     pub transport: Transport,
     pub listen_address: SocketAddr,
@@ -44,6 +46,65 @@ fn raw() -> String {
 }
 fn history_enabled() -> bool {
     true
+}
+
+/// TLS for one service. The Proxy terminates client TLS and/or speaks TLS upstream.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceTls {
+    /// Terminate TLS on the listener with `certificate_pem`/`private_key_pem`.
+    #[serde(default)]
+    pub terminate: bool,
+    /// Connect to the upstream over TLS.
+    #[serde(default)]
+    pub upstream: bool,
+    /// Skip upstream certificate verification (self-signed competition backends).
+    #[serde(default)]
+    pub insecure: bool,
+    /// PEM chain the Proxy presents to clients when `terminate` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_pem: Option<String>,
+    /// PEM private key matching `certificate_pem`. Never returned by the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_pem: Option<String>,
+    /// Upstream SNI and verification name; defaults to the upstream IP address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
+}
+impl ServiceTls {
+    /// Reject a configuration the Proxy could not honour, before it reaches the Proxy.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.terminate && !self.upstream {
+            return Err("TLS must terminate, connect upstream, or both".into());
+        }
+        if self.terminate {
+            let certificate = self
+                .certificate_pem
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or("TLS termination needs a PEM certificate chain")?;
+            let key = self
+                .private_key_pem
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or("TLS termination needs a PEM private key")?;
+            if certificate.len() > 64 * 1024 || key.len() > 64 * 1024 {
+                return Err("TLS certificate and key must be at most 64 KiB each".into());
+            }
+            if !certificate.contains("-----BEGIN CERTIFICATE-----") {
+                return Err("TLS certificate must be a PEM certificate chain".into());
+            }
+            if !key.contains("-----BEGIN") || !key.contains("PRIVATE KEY-----") {
+                return Err("TLS private key must be a PEM private key".into());
+            }
+        }
+        if let Some(name) = &self.server_name
+            && (name.is_empty() || name.len() > 253 || name.contains('/'))
+        {
+            return Err("invalid TLS server name".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -94,6 +155,12 @@ impl ServiceSnapshot {
                 return Err(
                     "protection active-flow limit and idle timeout must be positive".into(),
                 );
+            }
+            if let Some(tls) = &s.tls {
+                tls.validate()?;
+                if s.transport != Transport::Tcp {
+                    return Err("TLS requires TCP transport".into());
+                }
             }
             if s.id.is_empty() || s.id.len() > 128 || !ids.insert(&s.id) {
                 return Err("service IDs must be unique, nonempty, and at most 128 bytes".into());
@@ -147,6 +214,7 @@ mod tests {
             enabled: true,
             retain_history: true,
             protection: None,
+            tls: None,
         }
     }
     #[test]

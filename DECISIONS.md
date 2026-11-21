@@ -370,3 +370,41 @@ The editor intersects field paths and types across its selected decoders. The co
 ### Networkless Python and WASI request checkers
 
 Proxy can optionally launch a persistent Python or WASI sandbox for configured services. It evaluates client input before forwarding and uses a configured fallback on errors. One worker processes one framed input at a time, and concurrent requests use the fallback instead of entering a queue. Each worker gets a private writable directory mounted at `/state`. The host directory is keyed by checker ID under the Proxy state directory. Stateful scripts retain files independently of worker or Proxy restarts. The protobuf status additions expose an error count and the latest safe diagnostic string. Proxy persists console policy edits atomically with a separate revision. The host administrator registers the actual Python or WASI program in Proxy JSON. See [Request checkers](docs/REQUEST_CHECKERS.md).
+
+### Live rule evaluation of large decoder fields
+
+Rule input stays bounded at 16 KiB per value, but live evaluation now uses a separate 68 KiB cap (`MAX_EVALUATED_FIELD_BYTES`). A 16 KiB TCP read plus the raw decoder's 1023-byte overlap tail, or a 64 KiB UDP datagram, legitimately exceeds the input cap; treating those values as unknown silently disabled the rule, so `raw.bytes contains` forwarded a 20 KiB request unchanged while the same 2-byte marker was blocked in a small request. Values above the runtime cap remain unknown and are never matched on a truncated prefix, which preserves the existing guarantee that a truncated window cannot produce a match. Built-in decoders cannot reach the runtime cap, so no rule sees different bytes than before.
+
+### Host network metadata wins over decoder fields
+
+Field merging in the TCP path now inserts decoder output first and host-owned `network.src_ip`, `network.src_port`, `network.dst_ip`, `network.dst_port`, `transport.kind` and `packet.size` last. A native or WASM decoder could previously return those keys and shadow the real connection, so a source-based rule or a size limit could be bypassed by the plugin that is supposed to describe the protocol. `body.size`, `transfer.bytes` and `direction` were already protected by host-side annotation.
+
+### TLS termination and upstream TLS per service
+
+The operator asked for HTTPS support next to the HTTP decoder. A decoder cannot
+decrypt TLS, so this is a transport feature: an optional `tls` block on a TCP
+service lets the Proxy terminate client TLS with an operator-supplied PEM chain
+and key, connect to the backend over TLS, or do both. Termination happens inside
+the connection task, so a slow or hostile handshake cannot stall the accept loop,
+and the handshake shares the existing connect timeout. Upstream TLS is negotiated
+before flag substitution so the forwarding pump still sees plaintext, and
+`insecure` accepts self-signed competition backends while a configured
+`server_name` supplies SNI and verification. ALPN offers HTTP/1.1 only: the native
+decoder cannot parse HTTP/2, and a mis-decoded h2 stream would be worse than an
+unparsed one. The private key travels to the Proxy over the local socket and is
+never returned by the API; reads report `private_key_configured` instead, and an
+update that omits the key keeps the stored one. Nothing is decrypted passively:
+traffic without a terminating service stays opaque, as before.
+
+### Certificate prompt for undecoded TLS streams
+
+Opening a stream that starts with a TLS record header used to show hex with no
+hint that a certificate would make it readable. The traffic view now detects the
+handshake from the first client chunk (a record content type 0x14-0x17 with major
+version 0x03 and a minor version up to 0x04, in text or hex spans) and, when the
+service has no TLS configuration, shows a prompt with a button that opens that
+service's TLS section. A certificate cannot decrypt a session that was already
+negotiated, so the prompt states that only connections opened after saving are
+read as HTTP; captured history stays opaque and is not rewritten. Detection is
+client-side on bytes the console already receives, so no new API field, protobuf
+message or migration is added.

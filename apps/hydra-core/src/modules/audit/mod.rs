@@ -38,8 +38,6 @@ pub fn append(
     success: bool,
     now: i64,
 ) -> anyhow::Result<()> {
-    let count: i64 = tx.query_row("SELECT count(*) FROM audit", [], |r| r.get(0))?;
-    anyhow::ensure!(count < 1_000_000, "audit quota exhausted");
     tx.execute("INSERT INTO audit(at,actor_kind,actor_id,action,target,request_id,success,metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,'{}')",params![now,actor.kind,actor.id,action,target,request_id,success])?;
     Ok(())
 }
@@ -57,8 +55,6 @@ pub fn append_change(
 ) -> anyhow::Result<()> {
     let metadata = serde_json::to_string(metadata)?;
     anyhow::ensure!(metadata.len() <= 16384, "audit metadata too large");
-    let count: i64 = tx.query_row("SELECT count(*) FROM audit", [], |r| r.get(0))?;
-    anyhow::ensure!(count < 1_000_000, "audit quota exhausted");
     tx.execute("INSERT INTO audit(at,actor_kind,actor_id,action,target,request_id,success,metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![now,actor.kind,actor.id,action,target,request_id,success,metadata])?;
     Ok(())
 }
@@ -104,4 +100,91 @@ pub async fn http_attempt(
         append_change(&tx,&actor,if status.is_some(){"http.mutation.result"}else{"http.mutation.intent"},&path,&id,success,crate::modules::auth::now(),&serde_json::json!({"source":"http","method":method,"before":{"dispatch":status.is_none()},"after":{"status":status}}))?;
         tx.commit()?;Ok(())
     }).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::db::Database;
+
+    async fn database() -> (std::path::PathBuf, Database) {
+        let directory = std::env::temp_dir().join(format!("hydra-audit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let db = Database::open(directory.join("db")).await.unwrap();
+        (directory, db)
+    }
+
+    #[tokio::test]
+    async fn million_audit_rows_do_not_block_appends_or_get_evicted() {
+        let (directory, db) = database().await;
+        db.run(move |db| {
+            let tx = db.transaction()?;
+            tx.execute_batch(
+                "WITH RECURSIVE seq(n) AS (
+                     VALUES(1)
+                     UNION ALL
+                     SELECT n + 1 FROM seq WHERE n < 1000000
+                 )
+                 INSERT INTO audit(at,actor_kind,actor_id,action,target,request_id,success,metadata)
+                 SELECT n,'user','seed','test.seed','seed','seed',1,'{}' FROM seq;",
+            )?;
+            let actor = Actor::user("u".into());
+            append(
+                &tx,
+                &actor,
+                "auth.login",
+                "user:u",
+                "login-request",
+                true,
+                1_000_001,
+            )?;
+            append_change(
+                &tx,
+                &actor,
+                "service.update",
+                "service:test",
+                "mutation-request",
+                true,
+                1_000_002,
+                &serde_json::json!({"before":{"enabled":false},"after":{"enabled":true}}),
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let (rows, oldest_id, seeds, logins, mutations): (i64, i64, i64, i64, i64) = db
+            .run(|db| {
+                Ok(
+                    db.query_row(
+                        "SELECT count(*),min(id),sum(action='test.seed'),sum(action='auth.login'),sum(action='service.update') FROM audit",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                    )?,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(rows, 1_000_002, "appends must not prune the audit history");
+        assert_eq!(
+            oldest_id, 1,
+            "the oldest audit event should remain retained"
+        );
+        assert_eq!(seeds, 1_000_000, "all seeded audit events should remain");
+        assert_eq!(logins, 1, "the login-style append should succeed");
+        assert_eq!(mutations, 1, "the mutation append should succeed");
+        let error = db
+            .run(|db| Ok(db.execute("DELETE FROM audit", []).map(|_| ())?))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("append-only audit"),
+            "unexpected error: {error}"
+        );
+        std::fs::remove_dir_all(directory).ok();
+    }
 }

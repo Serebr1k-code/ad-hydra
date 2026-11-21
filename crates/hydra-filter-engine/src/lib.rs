@@ -13,6 +13,9 @@ pub const MAX_RULES: usize = 256;
 pub const MAX_DEPTH: usize = 16;
 pub const MAX_NODES: usize = 256;
 pub const MAX_FIELD_BYTES: usize = 16 * 1024;
+/// Runtime cap for evaluated field values. It exceeds every built-in decoder bound
+/// (64 KiB read plus the raw overlap tail), so live rules see the whole window.
+pub const MAX_EVALUATED_FIELD_BYTES: usize = 64 * 1024 + 4 * 1024;
 pub const MAX_PATTERN_BYTES: usize = 1024;
 pub const MAX_SNAPSHOT_NODES: usize = 512;
 pub const MAX_SNAPSHOT_REGEXES: usize = 16;

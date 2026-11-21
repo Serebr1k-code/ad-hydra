@@ -28,22 +28,53 @@ pub async fn listen(
     shutdown: CancellationToken,
     tasks: TaskTracker,
 ) {
+    // The acceptor is shared by concurrent handshakes and replaced atomically
+    // when Core applies a new service revision, including TLS mode or cert changes.
+    let mut current = service.borrow().clone();
+    let mut acceptor = match make_acceptor(current.as_ref()) {
+        Ok(acceptor) => acceptor,
+        Err(error) => {
+            tracing::error!(%error, "TLS configuration rejected; listener stays closed");
+            return;
+        }
+    };
     loop {
         tokio::select! {
             biased;
             _=shutdown.cancelled()=>break,
-            changed=service.changed()=>if changed.is_err() || service.borrow().is_none(){break},
+            changed=service.changed()=>{
+                if changed.is_err() { break; }
+                current = service.borrow().clone();
+                acceptor = match make_acceptor(current.as_ref()) {
+                    Ok(acceptor) => acceptor,
+                    Err(error) => {
+                        tracing::error!(%error, "updated TLS configuration rejected; listener closed");
+                        return;
+                    }
+                };
+                if current.is_none() { break; }
+            },
             accepted=listener.accept()=>{
                 let (client,addr)=match accepted{Ok(v)=>v,Err(error)=>{tracing::warn!(%error,"TCP accept failed");tokio::time::sleep(Duration::from_millis(50)).await;continue}};
-                let Some(config)=service.borrow().clone() else{break};
+                let Some(config)=current.clone() else{break};
                 let budget=telemetry.budget(&config);
                 let Ok(permit)=telemetry.permits.clone().try_acquire_owned() else{budget.reject();telemetry.rejected.fetch_add(1,Ordering::Relaxed);continue};
                 let Some(lease)=budget.admit(true) else{telemetry.rejected.fetch_add(1,Ordering::Relaxed);continue};
                 let flow=telemetry.open(&config,addr,permit);
-                let limits=limits.clone();let shutdown=shutdown.clone();let telemetry=telemetry.clone();
+                let limits=limits.clone();let shutdown=shutdown.clone();let telemetry=telemetry.clone();let acceptor=acceptor.clone();
                 tasks.spawn(async move{
                     let mut flow=flow;
                     flow.protection=Some(lease);
+                    // Terminate client TLS inside the task so a slow handshake never
+                    // blocks the accept loop.
+                    let client: crate::transport::tls::ClientStream=match &acceptor{
+                        Some(acceptor)=>match tokio::time::timeout(Duration::from_millis(limits.connect_timeout_ms),acceptor.accept(client)).await{
+                            Ok(Ok(stream))=>Box::new(stream),
+                            Ok(Err(error))=>{tracing::debug!(%error,"client TLS handshake failed");flow.reason="tls_handshake".into();return}
+                            Err(_)=>{tracing::debug!("client TLS handshake timed out");flow.reason="tls_handshake_timeout".into();return}
+                        },
+                        None=>Box::new(client),
+                    };
                     let mut session=telemetry.protocols.read().unwrap_or_else(|e|e.into_inner()).as_ref().and_then(|p|match p.session(&config.id,&config.protocol_id){Ok(s)=>Some(s),Err(_)=>{telemetry.decoder_error(&config.id,&flow.id,"decoder_initialization_failed");None}});
                     flow.body_sizes.lock().unwrap_or_else(|e|e.into_inner()).set_http(session.as_mut().is_some_and(|s|s.http_mut().is_some()));
                     let decoder=Arc::new(Mutex::new(session));
@@ -51,8 +82,7 @@ pub async fn listen(
                         if matches!(telemetry.evaluate(&config,&flow.id,&network_fields(&config,addr,"client_to_server"),false,""),Some(Action::DropConnection)){return Err(std::io::ErrorKind::PermissionDenied.into())}
                         let forwarding_store=telemetry.forwarding.read().unwrap_or_else(|e|e.into_inner()).clone();
                         let upstream=tokio::time::timeout(Duration::from_millis(limits.connect_timeout_ms),crate::forwarding::connect(&config, forwarding_store)).await??;
-                        let mut client=client;
-                        let(cr,cw)=client.split();let(ur,uw)=tokio::io::split(upstream);
+                        let(cr,cw)=tokio::io::split(client);let(ur,uw)=tokio::io::split(upstream);
                         let idle=Duration::from_millis(budget.idle(limits.tcp_idle_ms));
                         let (block_tx,block_rx)=mpsc::channel(1);
                         let context=Context{base:RelayBase::new(config.clone(),addr,telemetry.clone(),decoder.clone()),flow:&flow,idle,last_activity:Mutex::new(tokio::time::Instant::now())};
@@ -67,6 +97,15 @@ pub async fn listen(
             }
         }
     }
+}
+fn make_acceptor(
+    service: Option<&Service>,
+) -> anyhow::Result<Option<tokio_rustls::TlsAcceptor>> {
+    service
+        .and_then(|service| service.tls.as_ref())
+        .filter(|tls| tls.terminate)
+        .map(crate::transport::tls::acceptor)
+        .transpose()
 }
 struct Context<'a> {
     base: RelayBase,
@@ -364,17 +403,7 @@ fn inspect_message(
     } else {
         "server_to_client"
     };
-    let mut fields = c.network_fields(direction);
-    fields.insert(
-        "packet.size".into(),
-        hydra_domain::FieldValue::Uint(size as u64),
-    );
-    fields.extend(
-        message
-            .fields
-            .iter()
-            .map(|(k, v)| (k.clone(), domain_value(v))),
-    );
+    let fields = message_fields(c, direction, &message, size);
     let raw_payload = message.protocol == "raw";
     let message_id = if raw_payload {
         String::new()
@@ -386,6 +415,21 @@ fn inspect_message(
     }
     c.telemetry
         .evaluate(&c.config, &c.flow.id, &fields, safe_http, &message_id)
+}
+/// Host-owned network metadata is inserted last, so a decoder cannot shadow
+/// `network.*` or `packet.size` with values of its own.
+fn message_fields(
+    c: &Context<'_>,
+    direction: &str,
+    message: &hydra_protocol_sdk::ParsedMessage,
+    size: usize,
+) -> std::collections::BTreeMap<String, hydra_domain::FieldValue> {
+    let fields: std::collections::BTreeMap<String, hydra_domain::FieldValue> = message
+        .fields
+        .iter()
+        .map(|(k, v)| (k.clone(), domain_value(v)))
+        .collect();
+    c.base.inspected_fields(direction, fields, size)
 }
 fn inspect_raw(c: &Context<'_>, direction: Direction, bytes: &[u8]) -> bool {
     if inspect_transfer(c, direction, bytes) {
